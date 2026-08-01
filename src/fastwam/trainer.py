@@ -9,7 +9,7 @@ import time
 
 import numpy as np
 import torch
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from omegaconf import DictConfig
 from PIL import Image
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
@@ -18,7 +18,12 @@ from torch.utils.data import DataLoader
 from .utils.fs import ensure_dir
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
-from .utils.samplers import ResumableEpochSampler
+from .utils.samplers import (
+    ResumableAgentCountBatchSampler,
+    ResumableEpochSampler,
+    resolve_agent_counts,
+    resolve_task_ids,
+)
 from .utils.video_io import save_mp4
 from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
 
@@ -46,10 +51,22 @@ class Wan22Trainer:
         self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
         self.max_grad_norm = float(cfg.max_grad_norm)
         self.seed = int(cfg.seed)
+        configured_token_budget = cfg.get("agent_action_token_budget", None)
+        self.agent_action_token_budget = (
+            None
+            if configured_token_budget in (None, "", "null")
+            else int(configured_token_budget)
+        )
+        if self.agent_action_token_budget is not None and self.agent_action_token_budget <= 0:
+            raise ValueError(
+                "`agent_action_token_budget` must be positive when enabled, "
+                f"got {self.agent_action_token_budget}"
+            )
         
         self.resume = cfg.resume
         self.trainable_scope = str(cfg.get("trainable_scope", "dit")).strip().lower()
         self.save_training_state_enabled = bool(cfg.get("save_training_state", True))
+        self.save_final_checkpoint_enabled = bool(cfg.get("save_final_checkpoint", True))
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
         if self.mixed_precision not in {"no", "fp16", "bf16"}:
             raise ValueError(
@@ -62,7 +79,14 @@ class Wan22Trainer:
             gradient_accumulation_steps=self.gradient_accumulation_steps,
             mixed_precision=self.mixed_precision,
             step_scheduler_with_optimizer=False,
+            dataloader_config=DataLoaderConfiguration(
+                # Dynamic token-budget batches intentionally have different
+                # sample counts. Their source schedule is explicitly aligned
+                # across ranks, so Accelerate must shard without tail filling.
+                even_batches=self.agent_action_token_budget is None,
+            ),
         )
+        self._configure_dynamic_deepspeed_batch_accounting()
         
         logger.info(
             "Accelerate training: distributed_type=%s zero_stage=%s world_size=%d process_index=%d cfg_mixed_precision=%s accelerator_mixed_precision=%s grad_accum=%d grad_clip=%.4f",
@@ -135,6 +159,49 @@ class Wan22Trainer:
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
 
+    def _configure_dynamic_deepspeed_batch_accounting(self) -> None:
+        """Bridge variable-size batch samplers to DeepSpeed's fixed metadata.
+
+        Accelerate cannot infer a DeepSpeed micro-batch size from a DataLoader
+        backed by ``batch_sampler`` because its public ``batch_size`` is None.
+        The integer below is only used for DeepSpeed's global-batch accounting;
+        the sampler continues to emit native N-dependent batches.
+        """
+
+        if self.agent_action_token_budget is None:
+            return
+        plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        if plugin is None:
+            return
+        deepspeed_config = plugin.deepspeed_config
+        configured = deepspeed_config.get("train_micro_batch_size_per_gpu", "auto")
+        if configured == "auto":
+            configured = int(self.batch_size)
+            deepspeed_config["train_micro_batch_size_per_gpu"] = configured
+        if isinstance(configured, bool) or not isinstance(configured, int) or configured < 1:
+            raise ValueError(
+                "Dynamic token-budget batching requires DeepSpeed "
+                "train_micro_batch_size_per_gpu to be a positive integer after "
+                f"resolution, got {configured!r}."
+            )
+        logger.info(
+            "DeepSpeed dynamic-batch accounting: nominal_micro_batch=%d "
+            "(real sampler batch sizes vary by agent count).",
+            configured,
+        )
+
+    def _forward_training_loss(self, sample):
+        """Run loss computation through the prepared model wrapper.
+
+        In DeepSpeed mode ``self.model`` is a ``DeepSpeedEngine``. Calling a
+        method exposed through ``__getattr__`` would bypass the engine's
+        ``forward`` hooks, including its gradient-accumulation loss scaling.
+        FastWAM's ``forward`` delegates to ``training_loss``, so invoking the
+        wrapper preserves the result while keeping runtime hooks active.
+        """
+
+        return self.model(sample)
+
     def _init_wandb(self):
         if not self.wandb_enabled or not self.accelerator.is_main_process:
             return
@@ -172,6 +239,53 @@ class Wan22Trainer:
         self.wandb_run = None
 
     def _build_loader(self, dataset, worker_init_fn=None):
+        agent_counts = resolve_agent_counts(dataset)
+        if agent_counts is not None:
+            task_ids = resolve_task_ids(dataset)
+            if task_ids is None:
+                raise TypeError(
+                    "Variable-agent datasets must expose stable `task_ids` or "
+                    "`get_task_id(index)` for hierarchical balanced sampling."
+                )
+            self._uses_agent_count_batch_sampler = True
+            self.train_sampler = ResumableAgentCountBatchSampler(
+                dataset=dataset,
+                seed=self.seed,
+                batch_size=self.batch_size,
+                num_processes=self.accelerator.num_processes,
+                agent_counts=agent_counts,
+                task_ids=task_ids,
+                action_horizon=getattr(dataset, "action_horizon", None),
+                agent_action_token_budget=self.agent_action_token_budget,
+                gradient_accumulation_steps=self.gradient_accumulation_steps,
+            )
+            logger.info(
+                "Using hierarchical task/count-balanced batching: counts=%s tasks_by_count=%s "
+                "batch_sizes=%s token_budget=%s global_batches=%d local_microbatches=%d "
+                "optimizer_steps=%d schedule_sha256=%s",
+                self.train_sampler.observed_agent_counts,
+                self.train_sampler.tasks_by_agent_count,
+                self.train_sampler.batch_size_by_agent_count,
+                self.train_sampler.agent_action_token_budget,
+                self.train_sampler.global_batches_per_epoch,
+                self.train_sampler.microbatches_per_process,
+                self.train_sampler.optimizer_steps_per_epoch,
+                self.train_sampler.schedule_fingerprint(),
+            )
+            return DataLoader(
+                dataset,
+                batch_sampler=self.train_sampler,
+                num_workers=self.num_workers,
+                pin_memory=torch.cuda.is_available(),
+                worker_init_fn=worker_init_fn,
+            )
+
+        if self.agent_action_token_budget is not None:
+            raise ValueError(
+                "`agent_action_token_budget` is enabled, but the dataset does not expose "
+                "agent-count metadata."
+            )
+        self._uses_agent_count_batch_sampler = False
         self.train_sampler = ResumableEpochSampler(
             dataset=dataset,
             seed=self.seed,
@@ -216,13 +330,25 @@ class Wan22Trainer:
             raise TypeError("`train_dataset` must implement __len__ when `max_steps` is None.")
 
         num_processes = max(int(self.accelerator.num_processes), 1)
-        global_batch_size = max(self.batch_size * num_processes, 1)
-        micro_steps_per_epoch = max(ceil(len(self.train_dataset) / global_batch_size), 1)
+        if self._uses_agent_count_batch_sampler:
+            return max(self.train_sampler.optimizer_steps_per_epoch * self.num_epochs, 1)
+        else:
+            global_batch_size = max(self.batch_size * num_processes, 1)
+            micro_steps_per_epoch = max(ceil(len(self.train_dataset) / global_batch_size), 1)
         opt_steps_per_epoch = max(
             ceil(micro_steps_per_epoch / self.gradient_accumulation_steps),
             1,
         )
         return max(opt_steps_per_epoch * self.num_epochs, 1)
+
+    def _set_train_data_epoch(self, epoch: int):
+        """Synchronize the source sampler and Accelerate's prepared loader."""
+
+        epoch = int(epoch)
+        self.train_sampler.set_epoch(epoch)
+        train_loader = getattr(self, "train_loader", None)
+        if train_loader is not None and hasattr(train_loader, "set_epoch"):
+            train_loader.set_epoch(epoch)
 
     def _build_scheduler(self, scheduler_type, total_train_steps: int, warmup_steps: int = 0):
         scheduler_type = str(scheduler_type).strip().lower()
@@ -268,6 +394,25 @@ class Wan22Trainer:
         eta_h, eta_rem = divmod(eta_seconds, 3600)
         eta_m, eta_s = divmod(eta_rem, 60)
         return f"{eta_h:02d}:{eta_m:02d}:{eta_s:02d}", steps_per_sec
+
+    @staticmethod
+    def _sample_work_counts(sample) -> tuple[int, int]:
+        """Return real samples and agent-action tokens in one local micro-batch."""
+
+        action = sample.get("action") if isinstance(sample, dict) else None
+        if isinstance(action, torch.Tensor):
+            if action.ndim == 4:
+                batch_size, num_agents, horizon = action.shape[:3]
+                return int(batch_size), int(batch_size * num_agents * horizon)
+            if action.ndim == 3:
+                batch_size, horizon = action.shape[:2]
+                return int(batch_size), int(batch_size * horizon)
+
+        if isinstance(sample, dict):
+            for value in sample.values():
+                if isinstance(value, torch.Tensor) and value.ndim > 0:
+                    return int(value.shape[0]), 0
+        return 0, 0
 
     def _resume_or_load_checkpoint(self):
         resume = self.resume
@@ -592,6 +737,15 @@ class Wan22Trainer:
             "epoch": int(self.epoch),
             "batch_in_epoch": int(self.batch_in_epoch),
         }
+        if self._uses_agent_count_batch_sampler:
+            payload["data_schedule"] = {
+                "fingerprint": self.train_sampler.schedule_fingerprint(self.epoch),
+                "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
+                "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
+                "num_processes": self.train_sampler.num_processes,
+                "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
+                "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
+            }
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
 
@@ -615,6 +769,10 @@ class Wan22Trainer:
 
         return {"weights_path": ckpt_path, "state_path": state_path}
 
+    def _should_save_final_checkpoint(self, *, checkpoint_saved_this_step: bool) -> bool:
+        """Return whether the terminal step still needs a checkpoint write."""
+        return self.save_final_checkpoint_enabled and not checkpoint_saved_this_step
+
     def load_training_state(self, state_dir: str):
         self.accelerator.load_state(input_dir=state_dir)
         state_file = Path(state_dir) / "trainer_state.json"
@@ -626,17 +784,53 @@ class Wan22Trainer:
             if "epoch" in payload and "batch_in_epoch" in payload:
                 self.epoch = int(payload["epoch"])
                 self.batch_in_epoch = int(payload["batch_in_epoch"])
-                self.train_sampler.set_epoch_offset(self.epoch)
+                self._set_train_data_epoch(self.epoch)
+                if self._uses_agent_count_batch_sampler:
+                    saved_schedule = payload.get("data_schedule")
+                    if saved_schedule is None:
+                        logger.warning(
+                            "Trainer state predates data-schedule fingerprints; "
+                            "resume compatibility cannot be verified."
+                        )
+                    else:
+                        current_schedule = {
+                            "fingerprint": self.train_sampler.schedule_fingerprint(self.epoch),
+                            "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
+                            "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
+                            "num_processes": self.train_sampler.num_processes,
+                            "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
+                            "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
+                        }
+                        mismatches = {
+                            key: (saved_schedule.get(key), current_value)
+                            for key, current_value in current_schedule.items()
+                            if saved_schedule.get(key) != current_value
+                        }
+                        if mismatches:
+                            raise RuntimeError(
+                                "Cannot resume with a different deterministic data schedule: "
+                                f"{mismatches}"
+                            )
                 self.train_sampler.set_resume_batch_offset(self.batch_in_epoch)
-                logger.info(
-                    "Restored dataloader progress: epoch=%d batch_in_epoch=%d sample_offset=%d",
-                    self.epoch,
-                    self.batch_in_epoch,
-                    self.batch_in_epoch * self.batch_size * self.accelerator.num_processes,
-                )
+                if self._uses_agent_count_batch_sampler:
+                    logger.info(
+                        "Restored bucket-dataloader progress: epoch=%d batch_in_epoch=%d "
+                        "global_batch_offset=%d",
+                        self.epoch,
+                        self.batch_in_epoch,
+                        self.train_sampler.resume_global_batch_offset,
+                    )
+                else:
+                    logger.info(
+                        "Restored dataloader progress: epoch=%d batch_in_epoch=%d sample_offset=%d",
+                        self.epoch,
+                        self.batch_in_epoch,
+                        self.train_sampler.resume_sample_offset,
+                    )
             else:
                 self.epoch = 0
                 self.batch_in_epoch = 0
+                self._set_train_data_epoch(self.epoch)
                 self.train_sampler.clear_resume_batch_offset()
                 logger.warning(
                     "State file does not contain `epoch`/`batch_in_epoch`; "
@@ -652,6 +846,7 @@ class Wan22Trainer:
             self.global_step = 0
         self.epoch = 0
         self.batch_in_epoch = 0
+        self._set_train_data_epoch(self.epoch)
         self.train_sampler.clear_resume_batch_offset()
         self.accelerator.wait_for_everyone()
         logger.info("Loaded accelerate training state from %s at step=%d", state_dir, self.global_step)
@@ -669,26 +864,31 @@ class Wan22Trainer:
             raise ValueError("`max_steps` must be set before entering the while-step training loop.")
 
         logger.info("Starting training with max_steps=%d.", self.max_steps)
+        self._set_train_data_epoch(self.epoch)
         data_iter = iter(self.train_loader)
         self.run_start_step = self.global_step
         self.run_start_time = time.perf_counter()
+        self.run_local_samples = 0
+        self.run_local_agent_action_tokens = 0
 
         while self.global_step < self.max_steps:
             try:
                 sample = next(data_iter)
                 self.batch_in_epoch += 1
+                local_samples, local_agent_action_tokens = self._sample_work_counts(sample)
+                self.run_local_samples += local_samples
+                self.run_local_agent_action_tokens += local_agent_action_tokens
             except StopIteration:
                 self.epoch += 1
                 self.batch_in_epoch = 0
                 self.train_sampler.clear_resume_batch_offset()
+                self._set_train_data_epoch(self.epoch)
                 data_iter = iter(self.train_loader)
                 continue
 
             with self.accelerator.accumulate(self.model):
-                train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
-
                 with self.accelerator.autocast():
-                    loss, loss_dict = train_model.training_loss(sample)
+                    loss, loss_dict = self._forward_training_loss(sample)
                 self.accelerator.backward(loss)
 
                 if self.accelerator.sync_gradients:
@@ -712,7 +912,19 @@ class Wan22Trainer:
 
                     current_lr = float(self.optimizer.param_groups[0]["lr"])
 
-                    if self.log_every > 0 and self.global_step % self.log_every == 0 and self.accelerator.is_main_process:
+                    should_log = self.log_every > 0 and self.global_step % self.log_every == 0
+                    if should_log:
+                        work_counts = torch.tensor(
+                            [self.run_local_samples, self.run_local_agent_action_tokens],
+                            device=loss.device,
+                            dtype=torch.float64,
+                        )
+                        global_work_counts = self.accelerator.gather(work_counts).reshape(-1, 2).sum(dim=0)
+                        elapsed = max(time.perf_counter() - self.run_start_time, 1e-6)
+                        samples_per_sec = float(global_work_counts[0].item() / elapsed)
+                        agent_action_tokens_per_sec = float(global_work_counts[1].item() / elapsed)
+
+                    if should_log and self.accelerator.is_main_process:
                         eta_str, steps_per_sec = self._estimate_eta()
                         description = "[train] epoch=%d step=%d/%d loss=%.4f " % (
                             self.epoch,
@@ -723,10 +935,15 @@ class Wan22Trainer:
                         if global_loss_metrics:
                             detail_str = " ".join([f"{k}={v:.4f}" for k, v in sorted(global_loss_metrics.items())])
                             description += detail_str + " "
-                        description += "lr=%.2e speed=%.2f step/s, %.2f samples/s eta=%s" % (
+                        description += (
+                            "grad_norm=%.4f lr=%.2e speed=%.2f step/s, %.2f samples/s, "
+                            "%.2f real_agent_action_tokens/s eta=%s"
+                        ) % (
+                            global_grad_norm,
                             current_lr,
                             steps_per_sec,
-                            steps_per_sec * self.batch_size * self.accelerator.num_processes,
+                            samples_per_sec,
+                            agent_action_tokens_per_sec,
                             eta_str,
                         )
                         logger.info(description)
@@ -736,7 +953,8 @@ class Wan22Trainer:
                             "train/grad_norm": global_grad_norm,
                             "train/lr": current_lr,
                             "performance/steps_per_sec": steps_per_sec,
-                            "performance/samples_per_sec": steps_per_sec * self.batch_size * self.accelerator.num_processes,
+                            "performance/samples_per_sec": samples_per_sec,
+                            "performance/real_agent_action_tokens_per_sec": agent_action_tokens_per_sec,
                         }
                         for key, value in global_loss_metrics.items():
                             wandb_payload[f"train/{key}"] = value
@@ -776,8 +994,10 @@ class Wan22Trainer:
                                 eval_payload["eval/action_l1"] = float(metrics["action_l1"])
                             self._wandb_log(eval_payload)
 
+                    checkpoint_saved_this_step = False
                     if self.save_every > 0 and self.global_step % self.save_every == 0:
                         ckpt_info = self.save_checkpoint()
+                        checkpoint_saved_this_step = True
                         if self.accelerator.is_main_process:
                             logger.info(
                                 "[ckpt] step=%d weights=%s state=%s",
@@ -787,8 +1007,12 @@ class Wan22Trainer:
                             )
 
                     if self.global_step >= self.max_steps:
-                        ckpt_info = self.save_checkpoint()
-                        if self.accelerator.is_main_process:
+                        if self._should_save_final_checkpoint(
+                            checkpoint_saved_this_step=checkpoint_saved_this_step
+                        ):
+                            ckpt_info = self.save_checkpoint()
+                            checkpoint_saved_this_step = True
+                        if self.accelerator.is_main_process and checkpoint_saved_this_step:
                             logger.info(
                                 "[done] max_steps reached step=%d weights=%s state=%s",
                                 self.global_step,
@@ -797,6 +1021,8 @@ class Wan22Trainer:
                             )
                         return
 
+        if not self.save_final_checkpoint_enabled:
+            return
         ckpt_info = self.save_checkpoint()
         if self.accelerator.is_main_process:
             logger.info(

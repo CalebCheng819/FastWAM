@@ -1,30 +1,9 @@
 # @package _global_
 
+# Backward-compatible alias for the explicit VG0-HUB1 arm.
 defaults:
-  - override /data: robofactory_multi_robot
-  - override /model: fastwam_multi_robot
+  - robofactory_multi_robot_vg0_hub1_224_1e-4
   - _self_
-
-batch_size: 1
-num_workers: 4
-learning_rate: 1.0e-4
-lr_scheduler_type: cosine
-num_epochs: 10
-max_steps: 5000
-log_every: 10
-save_every: 500
-eval_every: 0
-gradient_accumulation_steps: 4
-weight_decay: 1.0e-2
-
-# Stage 1 trains only action I/O, state encoder, and hubs.  Set this to
-# `action` after the collaboration path is validated, or `dit` for joint WAM.
-trainable_scope: hub_io
-# CPFS is currently full; sparse model weights are saved, while large
-# optimizer snapshots remain disabled until a storage target is provisioned.
-save_training_state: false
-resume: /cpfs/user/chengjuntao/checkpoints/FastWAM/yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/libero_uncond_2cam224.pt
 
 wandb:
   name: fastwam-robofactory-multirobot-hub-s42
-  group: robofactory-multirobot

@@ -38,8 +38,13 @@ video_dit_config:
 action_dit_config:
   action_dim: ${data.train.action_dim}
   state_dim: ${data.train.state_dim}
-  max_agents: ${data.train.max_agents}
-  num_hub_tokens: 8
+  # Geometry is the primary permutation-equivariant identity signal. Hub
+  # queries are generated dynamically with K(N)=ceil(hub_token_ratio * N), so
+  # neither agents nor hubs use a fixed-capacity parameter bank.
+  agent_encoding_mode: geometry
+  agent_geometry_dim: ${data.train.agent_geometry_dim}
+  hub_enabled: true
+  hub_token_ratio: 2.0
   agent_rope_dim: 48
   agent_phase_scale: 1.0
   hidden_dim: 1024

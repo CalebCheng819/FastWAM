@@ -13,6 +13,8 @@ Official codebase for **Fast-WAM: Do World Action Models Need Test-time Future I
 
 This repository contains the training and evaluation code for FastWAM on LIBERO / RoboTwin.
 
+Research provenance and experiment history: [FastWAM Project Chronicle](https://app.notion.com/p/3ae21e7789cc8145873ac6c7057f1c52).
+
 ## Index
 
 - [File Structure](#file-structure)

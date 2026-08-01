@@ -79,19 +79,21 @@ class MoT(nn.Module):
         q_cat: torch.Tensor,
         k_cat: torch.Tensor,
         v_cat: torch.Tensor,
-        attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        attn_mask = attention_mask.to(device=q_cat.device)
-        if attn_mask.ndim == 3:
-            # SDPA expects a batch-specific mask to broadcast over the head
-            # dimension as [B, 1, Q, K].  A raw [B, Q, K] tensor would align
-            # B with the number of heads instead.
-            attn_mask = attn_mask.unsqueeze(1)
-        elif attn_mask.ndim != 2:
-            raise ValueError(
-                "`attention_mask` must be [Q,K] or [B,Q,K], "
-                f"got shape {tuple(attention_mask.shape)}"
-            )
+        attn_mask = None
+        if attention_mask is not None:
+            attn_mask = attention_mask.to(device=q_cat.device)
+            if attn_mask.ndim == 3:
+                # SDPA expects a batch-specific mask to broadcast over the head
+                # dimension as [B, 1, Q, K].  A raw [B, Q, K] tensor would align
+                # B with the number of heads instead.
+                attn_mask = attn_mask.unsqueeze(1)
+            elif attn_mask.ndim != 2:
+                raise ValueError(
+                    "`attention_mask` must be [Q,K] or [B,Q,K], "
+                    f"got shape {tuple(attention_mask.shape)}"
+                )
 
         def _forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
             return flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=attn_mask)
@@ -105,6 +107,128 @@ class MoT(nn.Module):
                 use_reentrant=False,
             )
         return _forward(q_cat, k_cat, v_cat)
+
+    def _factorized_multi_agent_attention(
+        self,
+        *,
+        q_action: torch.Tensor,
+        k_action: torch.Tensor,
+        v_action: torch.Tensor,
+        k_video: torch.Tensor,
+        v_video: torch.Tensor,
+        num_agents: int,
+        horizon: int,
+        num_hub_tokens: int,
+        first_frame_tokens: int,
+    ) -> torch.Tensor:
+        """Apply the multi-agent Hub graph without a global masked QK product.
+
+        For every transformer layer, each agent query attends only to the
+        observed-video prefix, its own temporal tokens, and the current hub
+        tokens. Hub queries attend to the observed-video prefix, all agents,
+        and all hubs. Consequently, direct agent-to-agent edges are never
+        materialized. Information gathered into a hub at layer ``l`` can be
+        broadcast to another agent at layer ``l+1``, exactly matching the
+        synchronous sparse-mask semantics while retaining the original block
+        parameters and checkpoint format.
+
+        The two SDPA calls have sizes ``[B*N,H,V0+H+K]`` and
+        ``[B,K,V0+N*H+K]``. Neither call constructs or evaluates a dense
+        ``[V+N*H+K, V+N*H+K]`` attention matrix.
+        """
+
+        if num_agents < 1 or horizon < 1 or num_hub_tokens < 0:
+            raise ValueError(
+                "Invalid multi-agent layout: "
+                f"N={num_agents}, H={horizon}, K={num_hub_tokens}"
+            )
+        if q_action.ndim != 3 or k_action.ndim != 3 or v_action.ndim != 3:
+            raise ValueError("Action Q/K/V must be 3D [B,S,D].")
+        if q_action.shape != k_action.shape or q_action.shape != v_action.shape:
+            raise ValueError(
+                "Action Q/K/V shapes must match, got "
+                f"{tuple(q_action.shape)}, {tuple(k_action.shape)}, {tuple(v_action.shape)}"
+            )
+        if k_video.ndim != 3 or v_video.ndim != 3 or k_video.shape != v_video.shape:
+            raise ValueError(
+                "Video K/V must have matching [B,S,D] shapes, got "
+                f"{tuple(k_video.shape)} and {tuple(v_video.shape)}"
+            )
+
+        batch_size, action_seq_len, hidden_dim = q_action.shape
+        num_action_tokens = num_agents * horizon
+        expected_action_seq_len = num_action_tokens + num_hub_tokens
+        if action_seq_len != expected_action_seq_len:
+            raise ValueError(
+                "Action sequence/layout mismatch: "
+                f"S={action_seq_len}, expected N*H+K={expected_action_seq_len}"
+            )
+        if k_video.shape[0] != batch_size or k_video.shape[2] != hidden_dim:
+            raise ValueError(
+                "Video/action K/V batch or hidden dimension mismatch: "
+                f"video={tuple(k_video.shape)}, action={tuple(q_action.shape)}"
+            )
+        if not 1 <= first_frame_tokens <= k_video.shape[1]:
+            raise ValueError(
+                "`first_frame_tokens` must be within the video K/V sequence, "
+                f"got {first_frame_tokens} for length {k_video.shape[1]}"
+            )
+
+        video_k = k_video[:, :first_frame_tokens]
+        video_v = v_video[:, :first_frame_tokens]
+        q_agents = q_action[:, :num_action_tokens].reshape(
+            batch_size, num_agents, horizon, hidden_dim
+        )
+        k_agents = k_action[:, :num_action_tokens].reshape(
+            batch_size, num_agents, horizon, hidden_dim
+        )
+        v_agents = v_action[:, :num_action_tokens].reshape(
+            batch_size, num_agents, horizon, hidden_dim
+        )
+
+        # Agent-local attention plus broadcast from the previous-layer hubs.
+        # Expanding video/hub K/V over N changes only the batch view; the QK
+        # products are computed solely for the permitted sparse blocks.
+        local_k_parts = [
+            video_k.unsqueeze(1).expand(-1, num_agents, -1, -1),
+            k_agents,
+        ]
+        local_v_parts = [
+            video_v.unsqueeze(1).expand(-1, num_agents, -1, -1),
+            v_agents,
+        ]
+        if num_hub_tokens:
+            k_hubs = k_action[:, num_action_tokens:]
+            v_hubs = v_action[:, num_action_tokens:]
+            local_k_parts.append(k_hubs.unsqueeze(1).expand(-1, num_agents, -1, -1))
+            local_v_parts.append(v_hubs.unsqueeze(1).expand(-1, num_agents, -1, -1))
+
+        local_k = torch.cat(local_k_parts, dim=2).reshape(
+            batch_size * num_agents, -1, hidden_dim
+        )
+        local_v = torch.cat(local_v_parts, dim=2).reshape(
+            batch_size * num_agents, -1, hidden_dim
+        )
+        local_q = q_agents.reshape(batch_size * num_agents, horizon, hidden_dim)
+        local_out = self._mixed_attention(
+            q_cat=local_q,
+            k_cat=local_k,
+            v_cat=local_v,
+            attention_mask=None,
+        ).reshape(batch_size, num_action_tokens, hidden_dim)
+
+        if not num_hub_tokens:
+            return local_out
+
+        # Hub gather + hub self. All permitted keys are concatenated directly;
+        # there is no masked dense key space and no direct agent-agent edge.
+        hub_out = self._mixed_attention(
+            q_cat=q_action[:, num_action_tokens:],
+            k_cat=torch.cat([video_k, k_action], dim=1),
+            v_cat=torch.cat([video_v, v_action], dim=1),
+            attention_mask=None,
+        )
+        return torch.cat([local_out, hub_out], dim=1)
 
     @staticmethod
     def _apply_expert_post_block(
@@ -463,6 +587,200 @@ class MoT(nn.Module):
                 context_payload=action_context_payload,
             )
         return x
+
+    def forward_multi_agent_action_with_video_cache(
+        self,
+        *,
+        action_tokens: torch.Tensor,
+        action_freqs: torch.Tensor,
+        action_t_mod: torch.Tensor,
+        action_context_payload: Optional[dict],
+        video_kv_cache: list[dict[str, torch.Tensor]],
+        num_agents: int,
+        horizon: int,
+        num_hub_tokens: int,
+        first_frame_tokens: int,
+    ) -> torch.Tensor:
+        """Run cached-video action denoising through factorized Hub attention."""
+
+        if "action" not in self.mixtures:
+            raise ValueError(
+                "MoT requires `action` expert for factorized multi-agent attention."
+            )
+        if len(video_kv_cache) != self.num_layers:
+            raise ValueError(
+                f"`video_kv_cache` must contain {self.num_layers} layers, "
+                f"got {len(video_kv_cache)}."
+            )
+
+        expert = self.mixtures["action"]
+        x = action_tokens
+        for layer_idx in range(self.num_layers):
+            block = expert.blocks[layer_idx]
+            (
+                q_action,
+                k_action,
+                v_action,
+                residual_x,
+                gate_msa,
+                shift_mlp,
+                scale_mlp,
+                gate_mlp,
+                use_gradient_checkpointing,
+            ) = self._build_expert_attention_io(
+                expert=expert,
+                block=block,
+                x=x,
+                freqs=action_freqs,
+                t_mod=action_t_mod,
+            )
+            layer_cache = video_kv_cache[layer_idx]
+            if "k" not in layer_cache or "v" not in layer_cache:
+                raise ValueError(
+                    f"`video_kv_cache[{layer_idx}]` must contain `k` and `v`."
+                )
+            factorized = self._factorized_multi_agent_attention(
+                q_action=q_action,
+                k_action=k_action,
+                v_action=v_action,
+                k_video=layer_cache["k"],
+                v_video=layer_cache["v"],
+                num_agents=num_agents,
+                horizon=horizon,
+                num_hub_tokens=num_hub_tokens,
+                first_frame_tokens=first_frame_tokens,
+            )
+            x = self._apply_post_with_optional_checkpoint(
+                block=block,
+                residual_x=residual_x,
+                gate_msa=gate_msa,
+                shift_mlp=shift_mlp,
+                scale_mlp=scale_mlp,
+                gate_mlp=gate_mlp,
+                use_gradient_checkpointing=use_gradient_checkpointing,
+                mixed_slice=factorized,
+                context_payload=action_context_payload,
+            )
+        return x
+
+    def forward_multi_agent_joint(
+        self,
+        *,
+        video_tokens: torch.Tensor,
+        action_tokens: torch.Tensor,
+        video_freqs: torch.Tensor,
+        action_freqs: torch.Tensor,
+        video_t_mod: torch.Tensor,
+        action_t_mod: torch.Tensor,
+        video_context_payload: Optional[dict],
+        action_context_payload: Optional[dict],
+        video_attention_mask: torch.Tensor,
+        num_agents: int,
+        horizon: int,
+        num_hub_tokens: int,
+        first_frame_tokens: int,
+    ) -> Dict[str, torch.Tensor]:
+        """Joint VideoGen/action forward without global video-action attention."""
+
+        if video_attention_mask.ndim != 2:
+            raise ValueError(
+                "`video_attention_mask` must be a 2D video-only mask, got "
+                f"{tuple(video_attention_mask.shape)}"
+            )
+        if video_attention_mask.shape != (
+            video_tokens.shape[1],
+            video_tokens.shape[1],
+        ):
+            raise ValueError(
+                "Video mask/token mismatch: "
+                f"mask={tuple(video_attention_mask.shape)}, "
+                f"tokens={tuple(video_tokens.shape)}"
+            )
+
+        video_expert = self.mixtures["video"]
+        action_expert = self.mixtures["action"]
+        x_video = video_tokens
+        x_action = action_tokens
+        for layer_idx in range(self.num_layers):
+            video_block = video_expert.blocks[layer_idx]
+            action_block = action_expert.blocks[layer_idx]
+            (
+                q_video,
+                k_video,
+                v_video,
+                residual_video,
+                gate_msa_video,
+                shift_mlp_video,
+                scale_mlp_video,
+                gate_mlp_video,
+                checkpoint_video,
+            ) = self._build_expert_attention_io(
+                expert=video_expert,
+                block=video_block,
+                x=x_video,
+                freqs=video_freqs,
+                t_mod=video_t_mod,
+            )
+            (
+                q_action,
+                k_action,
+                v_action,
+                residual_action,
+                gate_msa_action,
+                shift_mlp_action,
+                scale_mlp_action,
+                gate_mlp_action,
+                checkpoint_action,
+            ) = self._build_expert_attention_io(
+                expert=action_expert,
+                block=action_block,
+                x=x_action,
+                freqs=action_freqs,
+                t_mod=action_t_mod,
+            )
+
+            video_attention = self._mixed_attention(
+                q_cat=q_video,
+                k_cat=k_video,
+                v_cat=v_video,
+                attention_mask=video_attention_mask,
+            )
+            action_attention = self._factorized_multi_agent_attention(
+                q_action=q_action,
+                k_action=k_action,
+                v_action=v_action,
+                k_video=k_video,
+                v_video=v_video,
+                num_agents=num_agents,
+                horizon=horizon,
+                num_hub_tokens=num_hub_tokens,
+                first_frame_tokens=first_frame_tokens,
+            )
+
+            x_video = self._apply_post_with_optional_checkpoint(
+                block=video_block,
+                residual_x=residual_video,
+                gate_msa=gate_msa_video,
+                shift_mlp=shift_mlp_video,
+                scale_mlp=scale_mlp_video,
+                gate_mlp=gate_mlp_video,
+                use_gradient_checkpointing=checkpoint_video,
+                mixed_slice=video_attention,
+                context_payload=video_context_payload,
+            )
+            x_action = self._apply_post_with_optional_checkpoint(
+                block=action_block,
+                residual_x=residual_action,
+                gate_msa=gate_msa_action,
+                shift_mlp=shift_mlp_action,
+                scale_mlp=scale_mlp_action,
+                gate_mlp=gate_mlp_action,
+                use_gradient_checkpointing=checkpoint_action,
+                mixed_slice=action_attention,
+                context_payload=action_context_payload,
+            )
+
+        return {"video": x_video, "action": x_action}
 
     def forward(
         self,

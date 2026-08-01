@@ -34,6 +34,12 @@ class FastWAMMultiRobot(FastWAM):
                 f"Unsupported training_mode={training_mode!r}; expected 'action_only_cache' or 'joint'."
             )
         self.training_mode = training_mode
+        if self.training_mode == "action_only_cache" and self.loss_lambda_video != 0.0:
+            raise ValueError(
+                "training_mode='action_only_cache' requires loss_lambda_video=0"
+            )
+        if self.training_mode == "joint" and self.loss_lambda_video <= 0.0:
+            raise ValueError("training_mode='joint' requires loss_lambda_video > 0")
         self._trainable_scope = "dit"
         self._loaded_base_checkpoint: Optional[str] = None
 
@@ -135,6 +141,16 @@ class FastWAMMultiRobot(FastWAM):
         scope = str(scope).strip().lower()
         if scope not in {"hub_io", "action", "dit"}:
             raise ValueError(f"Unsupported trainable_scope={scope!r}; expected hub_io, action, or dit.")
+        if self.training_mode == "joint" and scope != "dit":
+            raise ValueError(
+                "Joint VideoGen training requires trainable_scope='dit' so the video "
+                "loss has a trainable path."
+            )
+        if self.training_mode == "action_only_cache" and scope == "dit":
+            raise ValueError(
+                "Action-only training must use trainable_scope='action' or 'hub_io'; "
+                "scope='dit' would leave unused trainable video parameters."
+            )
 
         self.eval()
         self.requires_grad_(False)
@@ -143,8 +159,10 @@ class FastWAMMultiRobot(FastWAM):
             self.video_expert.eval()
             self.action_expert.action_encoder.requires_grad_(True)
             self.action_expert.agent_state_encoder.requires_grad_(True)
+            if self.action_expert.agent_geometry_encoder is not None:
+                self.action_expert.agent_geometry_encoder.requires_grad_(True)
             self.action_expert.head.requires_grad_(True)
-            self.action_expert.hub_tokens.requires_grad_(True)
+            self.action_expert.hub_seed.requires_grad_(self.action_expert.hub_enabled)
             self.action_expert.train()
         elif scope == "action":
             self.mot.train()
@@ -155,6 +173,11 @@ class FastWAMMultiRobot(FastWAM):
             self.mot.requires_grad_(True)
             self.mot.train()
 
+        # HUB0 retains the same model/state-dict schema as HUB1, but its shared
+        # seed is inactive in forward and must not be a trainable DDP parameter.
+        if not self.action_expert.hub_enabled:
+            self.action_expert.hub_seed.requires_grad_(False)
+
         self._trainable_scope = scope
         params = [parameter for parameter in self.parameters() if parameter.requires_grad]
         if not params:
@@ -162,7 +185,9 @@ class FastWAMMultiRobot(FastWAM):
         return params
 
     def build_inputs(self, sample, tiled: bool = False):
-        required = {"video", "action", "agent_state", "agent_mask", "context", "context_mask"}
+        required = {"video", "action", "agent_state", "context", "context_mask"}
+        if self.action_expert.agent_encoding_mode == "geometry":
+            required.add("agent_geometry")
         missing = sorted(required - set(sample))
         if missing:
             raise ValueError(f"Missing multi-robot sample fields: {missing}")
@@ -170,7 +195,7 @@ class FastWAMMultiRobot(FastWAM):
         video = sample["video"]
         action = sample["action"]
         agent_state = sample["agent_state"]
-        agent_mask = sample["agent_mask"]
+        agent_geometry = sample.get("agent_geometry")
         context = sample["context"]
         context_mask = sample["context_mask"]
 
@@ -179,8 +204,14 @@ class FastWAMMultiRobot(FastWAM):
         batch_size, _, num_frames, height, width = video.shape
         if height % 16 or width % 16:
             raise ValueError(f"Video H/W must be multiples of 16, got {(height, width)}")
-        if num_frames <= 1 or num_frames % 4 != 1:
-            raise ValueError(f"Video T must be >1 and satisfy T % 4 == 1, got {num_frames}")
+        if self.training_mode == "joint":
+            if num_frames <= 1 or num_frames % 4 != 1:
+                raise ValueError(
+                    "Joint VideoGen input T must be >1 and satisfy T % 4 == 1, "
+                    f"got {num_frames}"
+                )
+        elif num_frames < 1:
+            raise ValueError("Action-only input must contain its observation frame")
         if action.ndim != 4:
             raise ValueError(f"`action` must be [B,N,H,A], got {tuple(action.shape)}")
         if action.shape[0] != batch_size or action.shape[-1] != self.action_expert.action_dim:
@@ -189,7 +220,7 @@ class FastWAMMultiRobot(FastWAM):
                 f"A={self.action_expert.action_dim}"
             )
         num_agents, horizon = int(action.shape[1]), int(action.shape[2])
-        if horizon % (num_frames - 1) != 0:
+        if self.training_mode == "joint" and horizon % (num_frames - 1) != 0:
             raise ValueError(
                 f"Action horizon {horizon} must be divisible by video transitions {num_frames - 1}."
             )
@@ -198,8 +229,26 @@ class FastWAMMultiRobot(FastWAM):
                 f"`agent_state` must be {(batch_size, num_agents, self.action_expert.state_dim)}, "
                 f"got {tuple(agent_state.shape)}"
             )
-        if agent_mask.shape != (batch_size, num_agents):
-            raise ValueError(f"`agent_mask` must be {(batch_size, num_agents)}, got {tuple(agent_mask.shape)}")
+        if self.action_expert.agent_encoding_mode == "geometry":
+            expected_geometry_shape = (
+                batch_size,
+                num_agents,
+                self.action_expert.agent_geometry_dim,
+            )
+            if agent_geometry is None or agent_geometry.shape != expected_geometry_shape:
+                got = None if agent_geometry is None else tuple(agent_geometry.shape)
+                raise ValueError(
+                    f"`agent_geometry` must be {expected_geometry_shape}, got {got}"
+                )
+
+        agent_count = sample.get("agent_count")
+        if agent_count is not None:
+            counts = torch.as_tensor(agent_count).reshape(-1)
+            if counts.numel() != batch_size or not bool((counts == num_agents).all().item()):
+                raise ValueError(
+                    "A native variable-length batch must contain one cardinality; "
+                    f"tensor N={num_agents}, metadata={counts.tolist()}"
+                )
 
         agent_ids = sample.get("agent_ids")
         if agent_ids is None:
@@ -242,7 +291,13 @@ class FastWAMMultiRobot(FastWAM):
             "agent_state": agent_state.to(
                 device=self.device, dtype=self.torch_dtype, non_blocking=True
             ),
-            "agent_mask": agent_mask.to(device=self.device, dtype=torch.bool, non_blocking=True),
+            "agent_geometry": (
+                None
+                if agent_geometry is None
+                else agent_geometry.to(
+                    device=self.device, dtype=self.torch_dtype, non_blocking=True
+                )
+            ),
             "agent_ids": agent_ids.to(device=self.device, dtype=torch.long, non_blocking=True),
             "action_is_pad": (
                 None
@@ -256,57 +311,45 @@ class FastWAMMultiRobot(FastWAM):
             ),
         }
 
-    def _build_multi_robot_attention_mask(
-        self,
+    @staticmethod
+    def _multi_robot_attention_layout(
         *,
         video_seq_len: int,
         video_tokens_per_frame: int,
         action_pre: dict[str, Any],
-        device: torch.device,
-    ) -> torch.Tensor:
+    ) -> dict[str, int]:
         meta = action_pre["meta"]
-        agent_mask = meta["agent_mask"].to(device=device, dtype=torch.bool)
-        batch_size, num_agents = agent_mask.shape
+        num_agents = int(meta["num_agents"])
         horizon = int(meta["horizon"])
         num_hubs = int(meta["num_hub_tokens"])
-        action_seq_len = num_agents * horizon + num_hubs
-        total_seq_len = video_seq_len + action_seq_len
-        mask = torch.zeros(
-            (batch_size, total_seq_len, total_seq_len),
-            dtype=torch.bool,
-            device=device,
-        )
+        expected_action_seq_len = num_agents * horizon + num_hubs
+        actual_action_seq_len = int(action_pre["tokens"].shape[1])
+        if actual_action_seq_len != expected_action_seq_len:
+            raise ValueError(
+                "Action pre-state/layout mismatch: "
+                f"tokens={actual_action_seq_len}, expected={expected_action_seq_len}"
+            )
+        return {
+            "num_agents": num_agents,
+            "horizon": horizon,
+            "num_hub_tokens": num_hubs,
+            "first_frame_tokens": min(video_tokens_per_frame, video_seq_len),
+        }
 
-        video_mask = self.video_expert.build_video_to_video_mask(
+    def _build_video_attention_mask(
+        self,
+        *,
+        video_seq_len: int,
+        video_tokens_per_frame: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build only the world-stream mask, never a global agent mask."""
+
+        return self.video_expert.build_video_to_video_mask(
             video_seq_len=video_seq_len,
             video_tokens_per_frame=video_tokens_per_frame,
             device=device,
         )
-        mask[:, :video_seq_len, :video_seq_len] = video_mask
-        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
-        hub_start = video_seq_len + num_agents * horizon
-
-        for agent_idx in range(num_agents):
-            start = video_seq_len + agent_idx * horizon
-            end = start + horizon
-            # Even padded query rows retain a non-empty local attention set,
-            # preventing all-masked SDPA rows.  They are excluded from loss and
-            # are never visible to hubs.
-            mask[:, start:end, start:end] = True
-            valid = agent_mask[:, agent_idx]
-            mask[valid, start:end, :first_frame_tokens] = True
-            if num_hubs:
-                mask[valid, start:end, hub_start:] = True
-
-        if num_hubs:
-            mask[:, hub_start:, :first_frame_tokens] = True
-            mask[:, hub_start:, hub_start:] = True
-            for agent_idx in range(num_agents):
-                start = video_seq_len + agent_idx * horizon
-                end = start + horizon
-                valid = agent_mask[:, agent_idx]
-                mask[valid, hub_start:, start:end] = True
-        return mask
 
     def _multi_action_loss(
         self,
@@ -314,15 +357,14 @@ class FastWAMMultiRobot(FastWAM):
         pred_action: torch.Tensor,
         target_action: torch.Tensor,
         timestep_action: torch.Tensor,
-        agent_mask: torch.Tensor,
         action_is_pad: Optional[torch.Tensor],
     ) -> torch.Tensor:
         token_loss = F.mse_loss(
             pred_action.float(), target_action.float(), reduction="none"
         ).mean(dim=-1)
-        valid = agent_mask.unsqueeze(-1).expand_as(token_loss)
+        valid = torch.ones_like(token_loss, dtype=torch.bool)
         if action_is_pad is not None:
-            valid = valid & (~action_is_pad)
+            valid = ~action_is_pad
         valid_f = valid.to(dtype=token_loss.dtype)
         per_sample = (token_loss * valid_f).sum(dim=(1, 2)) / valid_f.sum(dim=(1, 2)).clamp(min=1.0)
         weight = self.train_action_scheduler.training_weight(timestep_action).to(
@@ -357,7 +399,7 @@ class FastWAMMultiRobot(FastWAM):
             context=inputs["context"],
             context_mask=inputs["context_mask"],
             agent_states=inputs["agent_state"],
-            agent_mask=inputs["agent_mask"],
+            agent_geometry=inputs["agent_geometry"],
             agent_ids=inputs["agent_ids"],
         )
 
@@ -379,13 +421,18 @@ class FastWAMMultiRobot(FastWAM):
                 action=None,
                 fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
             )
-            attention_mask = self._build_multi_robot_attention_mask(
-                video_seq_len=video_pre["tokens"].shape[1],
-                video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            video_seq_len = int(video_pre["tokens"].shape[1])
+            video_tokens_per_frame = int(video_pre["meta"]["tokens_per_frame"])
+            attention_layout = self._multi_robot_attention_layout(
+                video_seq_len=video_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
                 action_pre=action_pre,
+            )
+            video_attention_mask = self._build_video_attention_mask(
+                video_seq_len=video_seq_len,
+                video_tokens_per_frame=video_tokens_per_frame,
                 device=video_pre["tokens"].device,
             )
-            video_seq_len = int(video_pre["tokens"].shape[1])
             video_kv_cache = self.mot.prefill_video_cache(
                 video_tokens=video_pre["tokens"],
                 video_freqs=video_pre["freqs"],
@@ -394,10 +441,10 @@ class FastWAMMultiRobot(FastWAM):
                     "context": video_pre["context"],
                     "mask": video_pre["context_mask"],
                 },
-                video_attention_mask=attention_mask[0, :video_seq_len, :video_seq_len],
+                video_attention_mask=video_attention_mask,
             )
 
-        action_tokens = self.mot.forward_action_with_video_cache(
+        action_tokens = self.mot.forward_multi_agent_action_with_video_cache(
             action_tokens=action_pre["tokens"],
             action_freqs=action_pre["freqs"],
             action_t_mod=action_pre["t_mod"],
@@ -406,15 +453,13 @@ class FastWAMMultiRobot(FastWAM):
                 "mask": action_pre["context_mask"],
             },
             video_kv_cache=video_kv_cache,
-            attention_mask=attention_mask,
-            video_seq_len=video_seq_len,
+            **attention_layout,
         )
         pred_action = self.action_expert.post_dit(action_tokens, action_pre)
         loss_action = self._multi_action_loss(
             pred_action=pred_action,
             target_action=target_action,
             timestep_action=timestep_action,
-            agent_mask=inputs["agent_mask"],
             action_is_pad=inputs["action_is_pad"],
         )
         loss_total = self.loss_lambda_action * loss_action
@@ -449,21 +494,35 @@ class FastWAMMultiRobot(FastWAM):
             fuse_vae_embedding_in_latents=inputs["fuse_vae_embedding_in_latents"],
         )
         action_pre = self._action_pre(noisy_action, timestep_action, inputs)
-        attention_mask = self._build_multi_robot_attention_mask(
-            video_seq_len=video_pre["tokens"].shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+        video_seq_len = int(video_pre["tokens"].shape[1])
+        video_tokens_per_frame = int(video_pre["meta"]["tokens_per_frame"])
+        attention_layout = self._multi_robot_attention_layout(
+            video_seq_len=video_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
             action_pre=action_pre,
+        )
+        video_attention_mask = self._build_video_attention_mask(
+            video_seq_len=video_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
             device=video_pre["tokens"].device,
         )
-        tokens_out = self.mot(
-            embeds_all={"video": video_pre["tokens"], "action": action_pre["tokens"]},
-            attention_mask=attention_mask,
-            freqs_all={"video": video_pre["freqs"], "action": action_pre["freqs"]},
-            context_all={
-                "video": {"context": video_pre["context"], "mask": video_pre["context_mask"]},
-                "action": {"context": action_pre["context"], "mask": action_pre["context_mask"]},
+        tokens_out = self.mot.forward_multi_agent_joint(
+            video_tokens=video_pre["tokens"],
+            action_tokens=action_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            action_freqs=action_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            action_t_mod=action_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
             },
-            t_mod_all={"video": video_pre["t_mod"], "action": action_pre["t_mod"]},
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            video_attention_mask=video_attention_mask,
+            **attention_layout,
         )
         pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)[:, :, 1:]
         pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
@@ -482,7 +541,6 @@ class FastWAMMultiRobot(FastWAM):
             pred_action=pred_action,
             target_action=target_action,
             timestep_action=timestep_action,
-            agent_mask=inputs["agent_mask"],
             action_is_pad=inputs["action_is_pad"],
         )
         loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
@@ -504,7 +562,7 @@ class FastWAMMultiRobot(FastWAM):
         input_image: torch.Tensor,
         action_horizon: int,
         agent_states: torch.Tensor,
-        agent_mask: Optional[torch.Tensor] = None,
+        agent_geometry: Optional[torch.Tensor] = None,
         agent_ids: Optional[torch.Tensor] = None,
         prompt: Optional[Union[str, Sequence[str]]] = None,
         context: Optional[torch.Tensor] = None,
@@ -525,10 +583,19 @@ class FastWAMMultiRobot(FastWAM):
         if agent_states.ndim != 3 or agent_states.shape[0] != 1:
             raise ValueError(f"`agent_states` must be [N,D] or [1,N,D], got {tuple(agent_states.shape)}")
         num_agents = int(agent_states.shape[1])
-        if agent_mask is None:
-            agent_mask = torch.ones((1, num_agents), dtype=torch.bool)
-        elif agent_mask.ndim == 1:
-            agent_mask = agent_mask.unsqueeze(0)
+        if agent_geometry is not None and agent_geometry.ndim == 2:
+            agent_geometry = agent_geometry.unsqueeze(0)
+        if self.action_expert.agent_encoding_mode == "geometry":
+            expected_geometry_shape = (
+                1,
+                num_agents,
+                self.action_expert.agent_geometry_dim,
+            )
+            if agent_geometry is None or agent_geometry.shape != expected_geometry_shape:
+                got = None if agent_geometry is None else tuple(agent_geometry.shape)
+                raise ValueError(
+                    f"`agent_geometry` must be [N,G] or {expected_geometry_shape}, got {got}"
+                )
         if agent_ids is None:
             agent_ids = torch.arange(num_agents).unsqueeze(0)
         elif agent_ids.ndim == 1:
@@ -558,7 +625,8 @@ class FastWAMMultiRobot(FastWAM):
             dtype=torch.float32,
         ).to(device=self.device, dtype=self.torch_dtype)
         agent_states = agent_states.to(device=self.device, dtype=self.torch_dtype)
-        agent_mask = agent_mask.to(device=self.device, dtype=torch.bool)
+        if agent_geometry is not None:
+            agent_geometry = agent_geometry.to(device=self.device, dtype=self.torch_dtype)
         agent_ids = agent_ids.to(device=self.device, dtype=torch.long)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
@@ -576,21 +644,27 @@ class FastWAMMultiRobot(FastWAM):
         )
         video_seq_len = int(video_pre["tokens"].shape[1])
 
-        # Mask structure is timestep-independent, so build it from an initial
-        # pre-state and reuse it throughout flow-matching denoising.
+        # Native N/H/K layout is timestep-independent and is reused throughout
+        # denoising. Only the video stream needs an attention mask; the action
+        # stream uses factorized local/hub SDPA calls.
         initial_pre = self.action_expert.pre_dit(
             action_tokens=latents_action,
             timestep=torch.zeros((1,), device=self.device, dtype=latents_action.dtype),
             context=context,
             context_mask=context_mask,
             agent_states=agent_states,
-            agent_mask=agent_mask,
+            agent_geometry=agent_geometry,
             agent_ids=agent_ids,
         )
-        attention_mask = self._build_multi_robot_attention_mask(
+        video_tokens_per_frame = int(video_pre["meta"]["tokens_per_frame"])
+        attention_layout = self._multi_robot_attention_layout(
             video_seq_len=video_seq_len,
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            video_tokens_per_frame=video_tokens_per_frame,
             action_pre=initial_pre,
+        )
+        video_attention_mask = self._build_video_attention_mask(
+            video_seq_len=video_seq_len,
+            video_tokens_per_frame=video_tokens_per_frame,
             device=self.device,
         )
         video_kv_cache = self.mot.prefill_video_cache(
@@ -601,7 +675,7 @@ class FastWAMMultiRobot(FastWAM):
                 "context": video_pre["context"],
                 "mask": video_pre["context_mask"],
             },
-            video_attention_mask=attention_mask[0, :video_seq_len, :video_seq_len],
+            video_attention_mask=video_attention_mask,
         )
 
         timesteps, deltas = self.infer_action_scheduler.build_inference_schedule(
@@ -617,10 +691,10 @@ class FastWAMMultiRobot(FastWAM):
                 context=context,
                 context_mask=context_mask,
                 agent_states=agent_states,
-                agent_mask=agent_mask,
+                agent_geometry=agent_geometry,
                 agent_ids=agent_ids,
             )
-            action_tokens = self.mot.forward_action_with_video_cache(
+            action_tokens = self.mot.forward_multi_agent_action_with_video_cache(
                 action_tokens=action_pre["tokens"],
                 action_freqs=action_pre["freqs"],
                 action_t_mod=action_pre["t_mod"],
@@ -629,8 +703,7 @@ class FastWAMMultiRobot(FastWAM):
                     "mask": action_pre["context_mask"],
                 },
                 video_kv_cache=video_kv_cache,
-                attention_mask=attention_mask,
-                video_seq_len=video_seq_len,
+                **attention_layout,
             )
             pred_action = self.action_expert.post_dit(action_tokens, action_pre)
             latents_action = self.infer_action_scheduler.step(pred_action, delta, latents_action)
@@ -664,15 +737,65 @@ class FastWAMMultiRobot(FastWAM):
             logger.warning("Shape-skipped %s keys (first 12): %s", label, skipped[:12])
         return compatible
 
+    @staticmethod
+    def _upgrade_legacy_hub_state(state: dict[str, Any]) -> dict[str, Any]:
+        """Convert a fixed ``hub_tokens[K,D]`` bank to the v2 shared seed."""
+
+        upgraded = dict(state)
+        for key in list(upgraded):
+            if key != "hub_tokens" and not key.endswith(".hub_tokens"):
+                continue
+            value = upgraded.pop(key)
+            if not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] < 1:
+                logger.warning("Cannot convert legacy hub tensor %s with value %s", key, type(value))
+                continue
+            seed_key = f"{key[:-len('hub_tokens')]}hub_seed"
+            upgraded.setdefault(seed_key, value.mean(dim=0, keepdim=True))
+            logger.info("Converted legacy %s to cardinality-independent %s", key, seed_key)
+        return upgraded
+
+    def _multi_robot_architecture_metadata(self) -> dict[str, Any]:
+        return {
+            "agent_set_representation": "native_variable_length_v1",
+            "agent_encoding_mode": self.action_expert.agent_encoding_mode,
+            "agent_geometry_dim": self.action_expert.agent_geometry_dim,
+            "agent_geometry_schema": "robofactory_root_pose_xyz_canonical_qwqxqyqz_v1",
+            "hub_enabled": self.action_expert.hub_enabled,
+            "hub_token_policy": "ceil(hub_token_ratio*num_agents)",
+            "hub_token_ratio": self.action_expert.hub_token_ratio,
+        }
+
+    def _validate_multi_robot_checkpoint_metadata(self, payload: dict[str, Any], path) -> None:
+        if payload.get("format") != "fastwam_multi_robot_v2":
+            return
+        received = payload.get("multi_robot_architecture")
+        if not isinstance(received, dict):
+            raise ValueError(f"v2 checkpoint is missing multi_robot_architecture: {path}")
+        expected = self._multi_robot_architecture_metadata()
+        for key, expected_value in expected.items():
+            if key not in received:
+                raise ValueError(f"Checkpoint metadata is missing {key!r}: {path}")
+            received_value = received[key]
+            if isinstance(expected_value, float):
+                matches = abs(float(received_value) - expected_value) <= 1e-12
+            else:
+                matches = received_value == expected_value
+            if not matches:
+                raise ValueError(
+                    f"Checkpoint architecture mismatch for {key}: "
+                    f"expected {expected_value!r}, got {received_value!r} in {path}"
+                )
+
     def save_checkpoint(self, path, optimizer=None, step=None):
         del optimizer
         payload: dict[str, Any] = {
-            "format": "fastwam_multi_robot_v1",
+            "format": "fastwam_multi_robot_v2",
             "step": step,
             "torch_dtype": str(self.torch_dtype),
             "trainable_scope": self._trainable_scope,
             "training_mode": self.training_mode,
             "base_checkpoint": self._loaded_base_checkpoint,
+            "multi_robot_architecture": self._multi_robot_architecture_metadata(),
         }
         if self._trainable_scope == "dit":
             payload["mot"] = self.mot.state_dict()
@@ -691,6 +814,7 @@ class FastWAMMultiRobot(FastWAM):
         payload = torch.load(path, map_location="cpu")
         if not isinstance(payload, dict):
             raise ValueError(f"Checkpoint payload must be a dict: {path}")
+        self._validate_multi_robot_checkpoint_metadata(payload, path)
 
         base_checkpoint = payload.get("base_checkpoint")
         if "mot_trainable" in payload and base_checkpoint and not self._loaded_base_checkpoint:
@@ -704,10 +828,12 @@ class FastWAMMultiRobot(FastWAM):
                     )
 
         if "mot" in payload:
-            self._load_matching_state(self.mot, payload["mot"], label="mot")
+            mot_state = self._upgrade_legacy_hub_state(payload["mot"])
+            self._load_matching_state(self.mot, mot_state, label="mot")
             self._loaded_base_checkpoint = str(path)
         elif "mot_trainable" in payload:
-            self._load_matching_state(self.mot, payload["mot_trainable"], label="mot_trainable")
+            trainable_state = self._upgrade_legacy_hub_state(payload["mot_trainable"])
+            self._load_matching_state(self.mot, trainable_state, label="mot_trainable")
         elif "dit" in payload:
             self._load_matching_state(self.video_expert, payload["dit"], label="legacy video dit")
             self._loaded_base_checkpoint = str(path)

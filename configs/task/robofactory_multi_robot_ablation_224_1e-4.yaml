@@ -1,0 +1,41 @@
+# @package _global_
+
+# Shared controls for the predeclared VideoGen x HubToken 2x2 experiment.
+# Treatment flags are set explicitly by each arm config rather than here.
+defaults:
+  - override /data: robofactory_multi_robot
+  - override /model: fastwam_multi_robot
+  - _self_
+
+batch_size: 1
+# Real agent-action tokens per rank micro-batch. With horizon=32 this yields
+# native batch sizes N=2/3/4 -> 2/1/1 without agent padding.
+agent_action_token_budget: 128
+num_workers: 4
+learning_rate: 1.0e-4
+lr_scheduler_type: cosine
+num_epochs: 10
+max_steps: 5000
+log_every: 10
+# Keep one resumable midpoint and one final checkpoint. The trainer avoids a
+# duplicate final write when max_steps is itself a save boundary.
+save_every: 2500
+eval_every: 0
+gradient_accumulation_steps: 4
+weight_decay: 1.0e-2
+
+# Formal runs require optimizer/scheduler/dataloader state so their exact
+# deterministic schedule can resume. Storage provisioning is a prelaunch gate;
+# smoke runs may opt out with an explicit CLI override.
+save_training_state: true
+save_final_checkpoint: true
+resume: /cpfs/user/chengjuntao/checkpoints/FastWAM/yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/libero_uncond_2cam224.pt
+
+model:
+  action_dit_config:
+    agent_encoding_mode: geometry
+    agent_geometry_dim: ${data.train.agent_geometry_dim}
+    hub_token_ratio: 2.0
+
+wandb:
+  group: robofactory-multirobot-videogen-hub-2x2

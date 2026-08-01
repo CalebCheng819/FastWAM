@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_ablation_224_1e-4
+  - _self_
+
+trainable_scope: dit
+
+data:
+  train:
+    load_future_video: true
+  val:
+    load_future_video: true
+
+model:
+  training_mode: joint
+  action_dit_config:
+    hub_enabled: true
+  loss:
+    lambda_video: 1.0
+    lambda_action: 1.0
+
+wandb:
+  name: fastwam-robofactory-vg1-hub1-s42

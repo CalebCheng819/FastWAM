@@ -1,10 +1,14 @@
 train:
   _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
-  root_dir: /mnt/workspace/datasets/robofactory_multi_robot/robofactory_34arm_clean_extracted
+  root_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot
   num_frames: 33
   action_video_freq_ratio: 4
   video_size: [224, 320]
-  max_agents: 4
+  # Native variable-length agent axis. When declared, this is the exact
+  # cardinality scope: missing or unexpected counts both fail closed.
+  required_agent_counts: [2, 3, 4]
+  agent_geometry_dim: 7
+  load_future_video: true
   action_dim: 8
   state_dim: 18
   window_stride: 16
@@ -12,21 +16,28 @@ train:
   is_training_set: true
   split_seed: 42
   randomize_agent_order: true
-  pretrained_norm_stats: /mnt/workspace/datasets/robofactory_multi_robot/fastwam_multi_robot_stats.json
-  text_embedding_cache_dir: /mnt/workspace/datasets/robofactory_multi_robot/text_embeds_cache
+  # The formal 2026-08-01 data scope is the verified N=2/3/4 corpus. Keep its
+  # normalization and prompt artifacts separate from legacy 3/4-only files.
+  pretrained_norm_stats: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_stats.json
+  text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
   context_len: 128
   instruction_map:
+    StrikeCubeHard-rf: two robots collaboratively strike the cube to the target
+    PlaceFood-rf: two robots collaboratively place the food in the target location
+    PlaceCubeInCup-rf: two robots collaboratively place the cube in the cup
     ThreeRobotsPlaceShoes-rf: three robots collaboratively place the shoes in their target locations
     ThreeRobotsStackCube-rf: three robots collaboratively stack the cubes
     FourRobotsStackCube-rf: four robots collaboratively stack the cubes
 
 val:
   _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
-  root_dir: /mnt/workspace/datasets/robofactory_multi_robot/robofactory_34arm_clean_extracted
+  root_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot
   num_frames: 33
   action_video_freq_ratio: 4
   video_size: [224, 320]
-  max_agents: 4
+  required_agent_counts: [2, 3, 4]
+  agent_geometry_dim: 7
+  load_future_video: true
   action_dim: 8
   state_dim: 18
   window_stride: 32
@@ -34,7 +45,7 @@ val:
   is_training_set: false
   split_seed: 42
   randomize_agent_order: false
-  pretrained_norm_stats: /mnt/workspace/datasets/robofactory_multi_robot/fastwam_multi_robot_stats.json
-  text_embedding_cache_dir: /mnt/workspace/datasets/robofactory_multi_robot/text_embeds_cache
+  pretrained_norm_stats: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_stats.json
+  text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
   context_len: 128
   instruction_map: ${data.train.instruction_map}

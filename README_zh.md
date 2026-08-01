@@ -13,6 +13,8 @@
 
 本仓库包含 FastWAM 在 LIBERO / RoboTwin 上的训练与评估代码。
 
+研究演进与实验追溯：[FastWAM Project Chronicle](https://app.notion.com/p/3ae21e7789cc8145873ac6c7057f1c52)。
+
 ## 目录
 
 - [File Structure](#file-structure)
@@ -261,43 +263,44 @@ bash scripts/train_zero1.sh 8 task=robotwin_uncond_3cam_384_1e-4
 
 ### RoboFactory 多机器人 HubToken 训练
 
-新增的多机器人变体不把 3/4 台机器人的动作粗暴拼成一个向量，而是保留
+新增的多机器人变体不把不同数量机器人的动作粗暴拼成一个向量，而是保留
 `[batch, agent, horizon, action_dim]` 的显式 agent 轴：
 
 - 全局相机只经过一份共享的 Wan2.2 视频专家；
 - 所有机器人共享一份 ActionDiT 编码器与主干；
 - 18D `qpos + qvel` 经过共享 state encoder 注入对应 agent；
-- 参数无关的 regular-simplex RoPE 区分 agent；
-- 不同 agent 的动作 token 不能直接互相注意，只能通过 8 个 HubToken 聚合和广播；
-- 3/4 机器人统一 pad 到 4 个 agent，`agent_mask` 同时约束注意力和 loss。
+- 机器人根位姿提供 permutation-equivariant 的几何身份编码；
+- 不同 agent 的动作 token 通过动态 HubToken 聚合和广播，`K(N)=ceil(2N)`；
+- 每个 batch 保留原生 N，不设置 `max_agents`，也不做 agent padding/masking；
+- 当前正式数据范围为现场验证过的 N=2/3/4，模型结构本身不固定最大 N。
 
 数据直接从 RoboFactory HDF5 读取，不需要再次转换或复制。先计算共享 z-score
 统计并生成三条任务文本的 embedding：
 
 ```bash
 python scripts/compute_robofactory_stats.py \
-  --root-dir /mnt/workspace/datasets/robofactory_multi_robot/robofactory_34arm_clean_extracted \
-  --output /mnt/workspace/datasets/robofactory_multi_robot/fastwam_multi_robot_stats.json
+  --root-dir /cpfs/user/chengjuntao/datasets/robofactory_multi_robot \
+  --output /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_stats.json
 
 python scripts/precompute_text_embeds.py \
   task=robofactory_multi_robot_hub_224_1e-4 \
   +overwrite=false
 ```
 
-推荐先跑参数高效的 stage 1。它冻结 5B 世界模型和 ActionDiT 主干，只训练动作
-I/O、state encoder 与 HubToken；配置中的 `trainable_scope` 也可改为 `action` 或
-`dit` 逐级解冻：
+预声明的 2x2 消融分别控制 VideoGen 与 HubToken。正式主模型使用
+`robofactory_multi_robot_vg1_hub1_224_1e-4`；其余三个配置只改变对应 treatment，
+共享数据、seed、采样调度与初始化：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 accelerate launch \
   --use_deepspeed --zero_stage 2 --num_processes 2 \
   --mixed_precision bf16 --gradient_accumulation_steps 4 \
-  scripts/train.py task=robofactory_multi_robot_hub_224_1e-4
+  scripts/train.py task=robofactory_multi_robot_vg1_hub1_224_1e-4
 ```
 
-对应的无 Hub 消融为 `task=robofactory_multi_robot_nohub_224_1e-4`。训练权重使用
+其余消融为 `vg1_hub0`、`vg0_hub1`、`vg0_hub0` 三个同名 task 配置。训练权重使用
 `fastwam_multi_robot_v1` 稀疏格式，只保存当前 trainable scope，并记录其官方
-FastWAM base checkpoint；`hub_io` checkpoint 约为 2.1 MB。
+FastWAM base checkpoint。
 
 ## 使用自己训练的权重推理
 
