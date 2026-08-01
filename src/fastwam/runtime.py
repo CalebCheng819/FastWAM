@@ -158,6 +158,72 @@ def create_fastwam(
     )
 
 
+def create_multi_robot_fastwam(
+    model_id: str,
+    tokenizer_model_id: str,
+    video_dit_config,
+    tokenizer_max_len: int = 512,
+    load_text_encoder: bool = True,
+    action_dit_config=None,
+    action_dit_pretrained_path: str | None = None,
+    skip_dit_load_from_pretrain: bool = False,
+    video_scheduler=None,
+    action_scheduler=None,
+    loss=None,
+    training_mode: str = "action_only_cache",
+    mot_checkpoint_mixed_attn: bool = True,
+    redirect_common_files: bool = True,
+    model_dtype: torch.dtype = torch.bfloat16,
+    device: str = "cuda",
+):
+    """Hydra factory for the synchronized multi-robot FastWAM variant."""
+
+    from .models.wan22.fastwam_multi_robot import FastWAMMultiRobot
+
+    def _as_dict(value, *, name: str, default=None):
+        if isinstance(value, DictConfig):
+            value = OmegaConf.to_container(value, resolve=True)
+        if value is None:
+            value = {} if default is None else default
+        if not isinstance(value, dict):
+            raise ValueError(f"`{name}` must resolve to a dict, got {type(value)}")
+        return value
+
+    video_dit_config = _as_dict(video_dit_config, name="video_dit_config")
+    action_dit_config = _as_dict(action_dit_config, name="action_dit_config")
+    video_scheduler = _as_dict(video_scheduler, name="video_scheduler")
+    action_scheduler = _as_dict(action_scheduler, name="action_scheduler")
+    loss = _as_dict(loss, name="loss")
+    required_scheduler_keys = {"train_shift", "infer_shift", "num_train_timesteps"}
+    missing_keys = required_scheduler_keys - set(action_scheduler)
+    if missing_keys:
+        raise ValueError(f"`action_scheduler` missing required keys: {sorted(missing_keys)}")
+
+    return FastWAMMultiRobot.from_wan22_pretrained(
+        device=device,
+        torch_dtype=model_dtype,
+        model_id=model_id,
+        tokenizer_model_id=tokenizer_model_id,
+        tokenizer_max_len=int(tokenizer_max_len),
+        load_text_encoder=bool(load_text_encoder),
+        redirect_common_files=bool(redirect_common_files),
+        video_dit_config=video_dit_config,
+        action_dit_config=action_dit_config,
+        action_dit_pretrained_path=action_dit_pretrained_path,
+        skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
+        mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
+        training_mode=str(training_mode),
+        video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
+        video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
+        video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
+        action_train_shift=float(action_scheduler["train_shift"]),
+        action_infer_shift=float(action_scheduler["infer_shift"]),
+        action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
+        loss_lambda_video=float(loss.get("lambda_video", 0.0)),
+        loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+    )
+
+
 def create_fastwam_joint(
     model_id: str,
     tokenizer_model_id: str,

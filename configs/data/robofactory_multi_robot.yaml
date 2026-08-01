@@ -1,0 +1,40 @@
+train:
+  _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
+  root_dir: /mnt/workspace/datasets/robofactory_multi_robot/robofactory_34arm_clean_extracted
+  num_frames: 33
+  action_video_freq_ratio: 4
+  video_size: [224, 320]
+  max_agents: 4
+  action_dim: 8
+  state_dim: 18
+  window_stride: 16
+  val_set_proportion: 0.1
+  is_training_set: true
+  split_seed: 42
+  randomize_agent_order: true
+  pretrained_norm_stats: /mnt/workspace/datasets/robofactory_multi_robot/fastwam_multi_robot_stats.json
+  text_embedding_cache_dir: /mnt/workspace/datasets/robofactory_multi_robot/text_embeds_cache
+  context_len: 128
+  instruction_map:
+    ThreeRobotsPlaceShoes-rf: three robots collaboratively place the shoes in their target locations
+    ThreeRobotsStackCube-rf: three robots collaboratively stack the cubes
+    FourRobotsStackCube-rf: four robots collaboratively stack the cubes
+
+val:
+  _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
+  root_dir: /mnt/workspace/datasets/robofactory_multi_robot/robofactory_34arm_clean_extracted
+  num_frames: 33
+  action_video_freq_ratio: 4
+  video_size: [224, 320]
+  max_agents: 4
+  action_dim: 8
+  state_dim: 18
+  window_stride: 32
+  val_set_proportion: 0.1
+  is_training_set: false
+  split_seed: 42
+  randomize_agent_order: false
+  pretrained_norm_stats: /mnt/workspace/datasets/robofactory_multi_robot/fastwam_multi_robot_stats.json
+  text_embedding_cache_dir: /mnt/workspace/datasets/robofactory_multi_robot/text_embeds_cache
+  context_len: 128
+  instruction_map: ${data.train.instruction_map}

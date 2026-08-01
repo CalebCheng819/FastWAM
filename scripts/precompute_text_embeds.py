@@ -58,7 +58,13 @@ def _to_bool(value: Any) -> bool:
 
 def _iter_dataset_nodes(node: Any, path: str = "data"):
     if isinstance(node, DictConfig):
-        if "dataset_dirs" in node and node.get("dataset_dirs") is not None:
+        if (
+            node.get("text_embedding_cache_dir") is not None
+            and (
+                ("dataset_dirs" in node and node.get("dataset_dirs") is not None)
+                or ("root_dir" in node and node.get("root_dir") is not None)
+            )
+        ):
             yield path, node
         for key, value in node.items():
             yield from _iter_dataset_nodes(value, f"{path}.{key}")
@@ -71,11 +77,10 @@ def _collect_dataset_settings(data_cfg: DictConfig):
     dataset_dirs: list[str] = []
     cache_dirs: list[Path] = []
     context_lens = set()
+    configured_tasks: list[str] = []
 
     for node_path, node in _iter_dataset_nodes(data_cfg, path="data"):
-        raw_dirs = node.get("dataset_dirs")
-        if raw_dirs is None:
-            continue
+        raw_dirs = node.get("dataset_dirs", [])
 
         cache_dir = node.get("text_embedding_cache_dir")
         if cache_dir is None or not str(cache_dir).strip():
@@ -97,9 +102,21 @@ def _collect_dataset_settings(data_cfg: DictConfig):
         if context_len is not None:
             context_lens.add(int(context_len))
 
-        logger.info("Discovered dataset node `%s` with %d dataset_dirs.", node_path, len(raw_dirs))
+        instruction_map = node.get("instruction_map")
+        if instruction_map is not None:
+            for task in instruction_map.values():
+                task = str(task)
+                if task not in configured_tasks:
+                    configured_tasks.append(task)
 
-    return dataset_dirs, cache_dirs, context_lens
+        logger.info(
+            "Discovered dataset node `%s` with %d dataset_dirs%s.",
+            node_path,
+            len(raw_dirs),
+            " and root_dir" if node.get("root_dir") is not None else "",
+        )
+
+    return dataset_dirs, cache_dirs, context_lens, configured_tasks
 
 
 def _resolve_context_len(context_lens: set[int]) -> int:
@@ -187,7 +204,7 @@ def main(cfg: DictConfig):
     if cfg.data is None:
         raise ValueError("`cfg.data` is required.")
 
-    dataset_dirs, cache_dirs, context_lens = _collect_dataset_settings(cfg.data)
+    dataset_dirs, cache_dirs, context_lens, configured_tasks = _collect_dataset_settings(cfg.data)
     if not cache_dirs:
         raise ValueError("No `text_embedding_cache_dir` found under `cfg.data`.")
 
@@ -197,9 +214,15 @@ def main(cfg: DictConfig):
         prompts = [override_prompt]
         logger.info("Using override_instruction; skipping dataset scan and encoding exactly 1 prompt.")
     else:
-        if not dataset_dirs:
-            raise ValueError("No `dataset_dirs` found under `cfg.data`.")
-        prompts = _read_unique_prompts(dataset_dirs)
+        prompts = _read_unique_prompts(dataset_dirs) if dataset_dirs else []
+        seen = set(prompts)
+        for task in configured_tasks:
+            prompt = DEFAULT_PROMPT.format(task=task)
+            if prompt not in seen:
+                seen.add(prompt)
+                prompts.append(prompt)
+        if not prompts:
+            raise ValueError("No dataset task metadata or `instruction_map` entries found.")
     if not prompts:
         logger.warning("No prompts found from tasks.jsonl; nothing to do.")
         return

@@ -48,6 +48,8 @@ class Wan22Trainer:
         self.seed = int(cfg.seed)
         
         self.resume = cfg.resume
+        self.trainable_scope = str(cfg.get("trainable_scope", "dit")).strip().lower()
+        self.save_training_state_enabled = bool(cfg.get("save_training_state", True))
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
         if self.mixed_precision not in {"no", "fp16", "bf16"}:
             raise ValueError(
@@ -81,11 +83,16 @@ class Wan22Trainer:
 
         # Freeze non-trainable modules before optimizer/deepspeed initialization.
         # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
-        self._apply_dit_only_train_mode(self.model)
-        trainable_params = list(self.model.dit.parameters())
-        proprio_encoder = getattr(self.model, "proprio_encoder", None)
-        if proprio_encoder is not None:
-            trainable_params.extend(list(proprio_encoder.parameters()))
+        trainable_params = self._apply_dit_only_train_mode(
+            self.model,
+            trainable_scope=self.trainable_scope,
+        )
+        trainable_count = sum(parameter.numel() for parameter in trainable_params)
+        logger.info(
+            "Selected trainable_scope=%s with %.3f M parameters.",
+            self.trainable_scope,
+            trainable_count / 1e6,
+        )
         self.optimizer = torch.optim.AdamW(
             trainable_params,
             lr=self.learning_rate,
@@ -278,21 +285,29 @@ class Wan22Trainer:
         logger.warning("Loaded .pt weights only; optimizer/scheduler/step were not restored under ZeRO2.")
 
     def _set_dit_only_train_mode(self):
-        # Match DiffSynth's freeze_except("dit"): only DiT stays trainable/in-train-mode.
-        logger.info("Setting DiT to train mode and freezing other model components.")
+        logger.info("Applying trainable scope %s and freezing all other components.", self.trainable_scope)
         model = self.accelerator.unwrap_model(self.model)
-        self._apply_dit_only_train_mode(model)
+        self._apply_dit_only_train_mode(model, trainable_scope=self.trainable_scope)
 
     @staticmethod
-    def _apply_dit_only_train_mode(model):
+    def _apply_dit_only_train_mode(model, trainable_scope: str = "dit"):
+        if hasattr(model, "configure_trainable_parameters"):
+            return list(model.configure_trainable_parameters(trainable_scope))
+        if trainable_scope != "dit":
+            raise ValueError(
+                f"Model {type(model).__name__} does not implement trainable_scope={trainable_scope!r}."
+            )
         model.eval()
         model.requires_grad_(False)
         model.dit.train()
         model.dit.requires_grad_(True)
+        trainable_params = list(model.dit.parameters())
         proprio_encoder = getattr(model, "proprio_encoder", None)
         if proprio_encoder is not None:
             proprio_encoder.train()
             proprio_encoder.requires_grad_(True)
+            trainable_params.extend(list(proprio_encoder.parameters()))
+        return trainable_params
 
     @staticmethod
     def _to_batched_eval_sample(sample):
@@ -589,12 +604,14 @@ class Wan22Trainer:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
-        ensure_dir(state_path)
-        self.accelerator.save_state(output_dir=state_path)
-        if self.accelerator.is_main_process:
-            self._save_trainer_state(state_path)
-        self.accelerator.wait_for_everyone()
+        state_path = None
+        if self.save_training_state_enabled:
+            state_path = os.path.join(self.state_dir, step_tag)
+            ensure_dir(state_path)
+            self.accelerator.save_state(output_dir=state_path)
+            if self.accelerator.is_main_process:
+                self._save_trainer_state(state_path)
+            self.accelerator.wait_for_everyone()
 
         return {"weights_path": ckpt_path, "state_path": state_path}
 

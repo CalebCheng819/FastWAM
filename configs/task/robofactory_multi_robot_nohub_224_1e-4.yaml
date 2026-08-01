@@ -1,0 +1,12 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_hub_224_1e-4
+  - _self_
+
+model:
+  action_dit_config:
+    num_hub_tokens: 0
+
+wandb:
+  name: fastwam-robofactory-multirobot-nohub-s42

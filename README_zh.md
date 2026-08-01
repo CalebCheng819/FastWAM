@@ -259,6 +259,46 @@ bash scripts/train_zero1.sh 8 task=robotwin_uncond_3cam_384_1e-4
 
 对于LIBERO，我们使用单机8卡训练。对于RoboTwin，我们使用了64卡来加速训练，你可以尝试调小卡数和训练总epoch数。
 
+### RoboFactory 多机器人 HubToken 训练
+
+新增的多机器人变体不把 3/4 台机器人的动作粗暴拼成一个向量，而是保留
+`[batch, agent, horizon, action_dim]` 的显式 agent 轴：
+
+- 全局相机只经过一份共享的 Wan2.2 视频专家；
+- 所有机器人共享一份 ActionDiT 编码器与主干；
+- 18D `qpos + qvel` 经过共享 state encoder 注入对应 agent；
+- 参数无关的 regular-simplex RoPE 区分 agent；
+- 不同 agent 的动作 token 不能直接互相注意，只能通过 8 个 HubToken 聚合和广播；
+- 3/4 机器人统一 pad 到 4 个 agent，`agent_mask` 同时约束注意力和 loss。
+
+数据直接从 RoboFactory HDF5 读取，不需要再次转换或复制。先计算共享 z-score
+统计并生成三条任务文本的 embedding：
+
+```bash
+python scripts/compute_robofactory_stats.py \
+  --root-dir /mnt/workspace/datasets/robofactory_multi_robot/robofactory_34arm_clean_extracted \
+  --output /mnt/workspace/datasets/robofactory_multi_robot/fastwam_multi_robot_stats.json
+
+python scripts/precompute_text_embeds.py \
+  task=robofactory_multi_robot_hub_224_1e-4 \
+  +overwrite=false
+```
+
+推荐先跑参数高效的 stage 1。它冻结 5B 世界模型和 ActionDiT 主干，只训练动作
+I/O、state encoder 与 HubToken；配置中的 `trainable_scope` 也可改为 `action` 或
+`dit` 逐级解冻：
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 accelerate launch \
+  --use_deepspeed --zero_stage 2 --num_processes 2 \
+  --mixed_precision bf16 --gradient_accumulation_steps 4 \
+  scripts/train.py task=robofactory_multi_robot_hub_224_1e-4
+```
+
+对应的无 Hub 消融为 `task=robofactory_multi_robot_nohub_224_1e-4`。训练权重使用
+`fastwam_multi_robot_v1` 稀疏格式，只保存当前 trainable scope，并记录其官方
+FastWAM base checkpoint；`hub_io` checkpoint 约为 2.1 MB。
+
 ## 使用自己训练的权重推理
 
 `mujoco` 环境和 LIBERO 数据版本相关，最好保持一致。之后再运行 LIBERO 评测：
@@ -293,6 +333,10 @@ robotwin_uncond_3cam_384_1e-4
 ## 致谢
 
 本仓库中的 RoboTwin 评测代码基于官方 [RoboTwin 仓库](https://github.com/RoboTwin-Platform/RoboTwin) 适配而来。感谢 RoboTwin 团队公开其代码仓库和相关 assets。
+
+多机器人变体的 Sparse Hub Attention 与 Simplex Rotary Agent Encoding 设计受到
+[Gamma-World](https://github.com/nv-tlabs/Gamma-World) 启发；这里是面向 FastWAM
+MoT 的独立适配，并未复制其 Cosmos 实现。Gamma-World 仓库采用 Apache-2.0 许可证。
 
 ## BibTeX
 
