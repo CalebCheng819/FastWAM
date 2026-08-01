@@ -1,0 +1,33 @@
+# Policy-Lightning Gaussian cache-build boundary.
+#
+# Verified on 2026-08-02 with:
+#   Python 3.12.13
+#   CUDA 12.8 runtime/driver-compatible host
+#   Policy-Lightning c944b4989a89c99c69d2572ea870f6a04680f5e7
+#
+# Install torch/torchvision from the CUDA 12.8 PyTorch index appropriate for
+# the execution image. Do not mix this environment with FastWAM's training
+# environment: the two intentionally pin different torch stacks.
+
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+
+# Direct cache extractor / pinned NoPoSplat encoder imports.
+einops==0.8.2
+h5py==3.16.0
+hydra-core==1.3.2
+jaxtyping==0.3.11
+numpy==1.26.4
+omegaconf==2.3.0
+pillow==11.3.0
+typing_extensions==4.16.0
+
+# Hydra and torch runtime dependencies pinned at the verified boundary.
+antlr4-python3-runtime==4.9.3
+filelock==3.32.0
+fsspec==2026.2.0
+Jinja2==3.1.6
+networkx==3.6.1
+packaging==26.2
+PyYAML==6.0.3
+sympy==1.14.0

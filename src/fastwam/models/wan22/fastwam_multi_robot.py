@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
 import torch
@@ -42,6 +44,9 @@ class FastWAMMultiRobot(FastWAM):
             raise ValueError("training_mode='joint' requires loss_lambda_video > 0")
         self._trainable_scope = "dit"
         self._loaded_base_checkpoint: Optional[str] = None
+        self._loaded_base_checkpoint_sha256: Optional[str] = None
+        self._loaded_base_checkpoint_descriptor: Optional[dict[str, str]] = None
+        self._loaded_base_checkpoint_can_restore_sparse = False
 
     @classmethod
     def from_wan22_pretrained(
@@ -161,6 +166,10 @@ class FastWAMMultiRobot(FastWAM):
             self.action_expert.agent_state_encoder.requires_grad_(True)
             if self.action_expert.agent_geometry_encoder is not None:
                 self.action_expert.agent_geometry_encoder.requires_grad_(True)
+            if self.action_expert.gaussian_adapter is not None:
+                self.action_expert.gaussian_adapter.requires_grad_(True)
+            if self.action_expert.gaussian_gate is not None:
+                self.action_expert.gaussian_gate.requires_grad_(True)
             self.action_expert.head.requires_grad_(True)
             self.action_expert.hub_seed.requires_grad_(self.action_expert.hub_enabled)
             self.action_expert.train()
@@ -188,6 +197,8 @@ class FastWAMMultiRobot(FastWAM):
         required = {"video", "action", "agent_state", "context", "context_mask"}
         if self.action_expert.agent_encoding_mode == "geometry":
             required.add("agent_geometry")
+        if self.action_expert.enable_gaussian:
+            required.add("agent_gaussian")
         missing = sorted(required - set(sample))
         if missing:
             raise ValueError(f"Missing multi-robot sample fields: {missing}")
@@ -196,6 +207,7 @@ class FastWAMMultiRobot(FastWAM):
         action = sample["action"]
         agent_state = sample["agent_state"]
         agent_geometry = sample.get("agent_geometry")
+        agent_gaussian = sample.get("agent_gaussian")
         context = sample["context"]
         context_mask = sample["context_mask"]
 
@@ -240,6 +252,28 @@ class FastWAMMultiRobot(FastWAM):
                 raise ValueError(
                     f"`agent_geometry` must be {expected_geometry_shape}, got {got}"
                 )
+        if self.action_expert.enable_gaussian:
+            expected_gaussian_shape = (
+                batch_size,
+                num_agents,
+                self.action_expert.gaussian_channels,
+                self.action_expert.gaussian_height,
+                self.action_expert.gaussian_width,
+            )
+            if agent_gaussian is None or agent_gaussian.shape != expected_gaussian_shape:
+                got = None if agent_gaussian is None else tuple(agent_gaussian.shape)
+                raise ValueError(
+                    f"`agent_gaussian` must be {expected_gaussian_shape}, got {got}"
+                )
+            if not torch.is_floating_point(agent_gaussian):
+                raise TypeError(
+                    "`agent_gaussian` must be floating point (the canonical cache is FP16), "
+                    f"got {agent_gaussian.dtype}"
+                )
+        else:
+            # Gaussian-off remains compatible with loaders that either omit or
+            # unconditionally provide the ablated field.
+            agent_gaussian = None
 
         agent_count = sample.get("agent_count")
         if agent_count is not None:
@@ -296,6 +330,13 @@ class FastWAMMultiRobot(FastWAM):
                 if agent_geometry is None
                 else agent_geometry.to(
                     device=self.device, dtype=self.torch_dtype, non_blocking=True
+                )
+            ),
+            "agent_gaussian": (
+                None
+                if agent_gaussian is None
+                else agent_gaussian.to(
+                    device=self.device, non_blocking=True
                 )
             ),
             "agent_ids": agent_ids.to(device=self.device, dtype=torch.long, non_blocking=True),
@@ -401,6 +442,7 @@ class FastWAMMultiRobot(FastWAM):
             agent_states=inputs["agent_state"],
             agent_geometry=inputs["agent_geometry"],
             agent_ids=inputs["agent_ids"],
+            agent_gaussian=inputs["agent_gaussian"],
         )
 
     def _training_loss_action_only(self, inputs: dict[str, Any]):
@@ -470,6 +512,14 @@ class FastWAMMultiRobot(FastWAM):
     def _training_loss_joint(self, inputs: dict[str, Any]):
         input_latents = inputs["input_latents"]
         batch_size = input_latents.shape[0]
+
+        # Keep action corruption on the same RNG substream as the VG0
+        # action-only arm.  Offline evaluation forks/seeds per sample; drawing
+        # video noise first here would shift both action noise and its timestep
+        # in VG1, making val_loss_action a different Monte Carlo measurement
+        # even when the two arms share initialization and seed.
+        noisy_action, target_action, timestep_action = self._prepare_noisy_action(inputs)
+
         noise_video = torch.randn_like(input_latents)
         timestep_video = self.train_video_scheduler.sample_training_t(
             batch_size=batch_size,
@@ -484,7 +534,6 @@ class FastWAMMultiRobot(FastWAM):
         )
         noisy_video[:, :, :1] = inputs["first_frame_latents"]
 
-        noisy_action, target_action, timestep_action = self._prepare_noisy_action(inputs)
         video_pre = self.video_expert.pre_dit(
             x=noisy_video,
             timestep=timestep_video,
@@ -564,6 +613,7 @@ class FastWAMMultiRobot(FastWAM):
         agent_states: torch.Tensor,
         agent_geometry: Optional[torch.Tensor] = None,
         agent_ids: Optional[torch.Tensor] = None,
+        agent_gaussian: Optional[torch.Tensor] = None,
         prompt: Optional[Union[str, Sequence[str]]] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
@@ -596,6 +646,29 @@ class FastWAMMultiRobot(FastWAM):
                 raise ValueError(
                     f"`agent_geometry` must be [N,G] or {expected_geometry_shape}, got {got}"
                 )
+        if agent_gaussian is not None and agent_gaussian.ndim == 4:
+            agent_gaussian = agent_gaussian.unsqueeze(0)
+        if self.action_expert.enable_gaussian:
+            expected_gaussian_shape = (
+                1,
+                num_agents,
+                self.action_expert.gaussian_channels,
+                self.action_expert.gaussian_height,
+                self.action_expert.gaussian_width,
+            )
+            if agent_gaussian is None or agent_gaussian.shape != expected_gaussian_shape:
+                got = None if agent_gaussian is None else tuple(agent_gaussian.shape)
+                raise ValueError(
+                    "enable_gaussian=true requires `agent_gaussian` as [N,C,H,W] "
+                    f"or {expected_gaussian_shape}, got {got}"
+                )
+            if not torch.is_floating_point(agent_gaussian):
+                raise TypeError(
+                    "`agent_gaussian` must be floating point (the canonical cache is FP16), "
+                    f"got {agent_gaussian.dtype}"
+                )
+        else:
+            agent_gaussian = None
         if agent_ids is None:
             agent_ids = torch.arange(num_agents).unsqueeze(0)
         elif agent_ids.ndim == 1:
@@ -627,6 +700,8 @@ class FastWAMMultiRobot(FastWAM):
         agent_states = agent_states.to(device=self.device, dtype=self.torch_dtype)
         if agent_geometry is not None:
             agent_geometry = agent_geometry.to(device=self.device, dtype=self.torch_dtype)
+        if agent_gaussian is not None:
+            agent_gaussian = agent_gaussian.to(device=self.device)
         agent_ids = agent_ids.to(device=self.device, dtype=torch.long)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
@@ -655,6 +730,7 @@ class FastWAMMultiRobot(FastWAM):
             agent_states=agent_states,
             agent_geometry=agent_geometry,
             agent_ids=agent_ids,
+            agent_gaussian=agent_gaussian,
         )
         video_tokens_per_frame = int(video_pre["meta"]["tokens_per_frame"])
         attention_layout = self._multi_robot_attention_layout(
@@ -693,6 +769,7 @@ class FastWAMMultiRobot(FastWAM):
                 agent_states=agent_states,
                 agent_geometry=agent_geometry,
                 agent_ids=agent_ids,
+                agent_gaussian=agent_gaussian,
             )
             action_tokens = self.mot.forward_multi_agent_action_with_video_cache(
                 action_tokens=action_pre["tokens"],
@@ -754,20 +831,428 @@ class FastWAMMultiRobot(FastWAM):
             logger.info("Converted legacy %s to cardinality-independent %s", key, seed_key)
         return upgraded
 
-    def _multi_robot_architecture_metadata(self) -> dict[str, Any]:
+    @staticmethod
+    def _checkpoint_sha256(path: str | Path) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as checkpoint_file:
+            while chunk := checkpoint_file.read(8 * 1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _validate_exact_tensor_state(
+        expected_state: dict[str, Any],
+        received_state: dict[str, Any],
+        *,
+        expected_keys: Sequence[str],
+        path,
+        label: str,
+    ) -> None:
+        """Validate a native checkpoint before mutating the live module."""
+
+        if not isinstance(received_state, dict):
+            raise TypeError(f"Checkpoint {label} state must be a dict: {path}")
+        expected_names = set(expected_keys)
+        missing = sorted(expected_names - set(received_state))
+        unexpected = sorted(set(received_state) - expected_names)
+        unknown_expected = sorted(expected_names - set(expected_state))
+        if unknown_expected:
+            raise RuntimeError(
+                f"Internal {label} contract contains unknown model keys: "
+                f"{unknown_expected[:12]}"
+            )
+
+        type_mismatches = []
+        shape_mismatches = []
+        dtype_mismatches = []
+        for key in sorted(expected_names & set(received_state)):
+            value = received_state[key]
+            target = expected_state[key]
+            if not isinstance(value, torch.Tensor):
+                type_mismatches.append((key, type(value).__name__))
+                continue
+            if tuple(value.shape) != tuple(target.shape):
+                shape_mismatches.append(
+                    (key, tuple(value.shape), tuple(target.shape))
+                )
+            if value.dtype != target.dtype:
+                dtype_mismatches.append((key, str(value.dtype), str(target.dtype)))
+
+        if (
+            missing
+            or unexpected
+            or type_mismatches
+            or shape_mismatches
+            or dtype_mismatches
+        ):
+            raise ValueError(
+                f"Strict native v2 {label} state mismatch in {path}: "
+                f"missing={missing[:12]} (count={len(missing)}), "
+                f"unexpected={unexpected[:12]} (count={len(unexpected)}), "
+                f"type_mismatches={type_mismatches[:12]} "
+                f"(count={len(type_mismatches)}), "
+                f"shape_mismatches={shape_mismatches[:12]} "
+                f"(count={len(shape_mismatches)}), "
+                f"dtype_mismatches={dtype_mismatches[:12]} "
+                f"(count={len(dtype_mismatches)})"
+            )
+
+    @staticmethod
+    def _native_checkpoint_state_kind(payload: dict[str, Any], path) -> str:
+        state_kind = payload.get("state_kind")
+        if state_kind not in {"full", "sparse_delta"}:
+            raise ValueError(
+                "Native v2 checkpoint must declare state_kind='full' or "
+                f"'sparse_delta': {path}"
+            )
+        has_full = "mot" in payload
+        has_sparse = "mot_trainable" in payload
+        if state_kind == "full" and (not has_full or has_sparse):
+            raise ValueError(
+                "Native v2 full checkpoint must contain only `mot` state: "
+                f"mot={has_full} mot_trainable={has_sparse} in {path}"
+            )
+        if state_kind == "sparse_delta" and (not has_sparse or has_full):
+            raise ValueError(
+                "Native v2 sparse_delta checkpoint must contain only "
+                f"`mot_trainable` state: mot={has_full} "
+                f"mot_trainable={has_sparse} in {path}"
+            )
+        return str(state_kind)
+
+    def _expected_trainable_parameter_names(self) -> list[str]:
+        names = sorted(
+            name for name, parameter in self.mot.named_parameters() if parameter.requires_grad
+        )
+        if not names:
+            raise RuntimeError(
+                "Native sparse checkpoint requires trainable parameters to be configured "
+                "before save/load."
+            )
+        return names
+
+    def _validate_sparse_trainable_contract(
+        self,
+        payload: dict[str, Any],
+        state: dict[str, Any],
+        *,
+        path,
+    ) -> list[str]:
+        declared = payload.get("trainable_parameter_names")
+        if not isinstance(declared, list) or not all(
+            isinstance(name, str) and name for name in declared
+        ):
+            raise ValueError(
+                "Native v2 sparse_delta must declare a non-empty string list in "
+                f"trainable_parameter_names: {path}"
+            )
+        canonical_declared = sorted(set(declared))
+        if declared != canonical_declared:
+            raise ValueError(
+                "Native v2 trainable_parameter_names must be sorted and unique: "
+                f"{path}"
+            )
+        expected_names = self._expected_trainable_parameter_names()
+        if declared != expected_names:
+            missing = sorted(set(expected_names) - set(declared))
+            unexpected = sorted(set(declared) - set(expected_names))
+            raise ValueError(
+                "Native v2 sparse trainable contract mismatch: "
+                f"missing={missing[:12]} (count={len(missing)}), "
+                f"unexpected={unexpected[:12]} (count={len(unexpected)}) in {path}"
+            )
+        self._validate_exact_tensor_state(
+            self.mot.state_dict(),
+            state,
+            expected_keys=expected_names,
+            path=path,
+            label="mot_trainable",
+        )
+        return expected_names
+
+    def _legacy_required_mot_keys(self) -> set[str]:
+        current = self.mot.state_dict()
+        video_keys = {
+            key for key in current if key.startswith("mixtures.video.")
+        }
+        action_backbone_keys = {
+            f"mixtures.action.{key}"
+            for key in self.action_expert.backbone_key_set(
+                self.action_expert.state_dict().keys()
+            )
+        }
+        required = video_keys | action_backbone_keys
+        if not video_keys or not action_backbone_keys:
+            raise RuntimeError(
+                "Cannot establish minimum legacy FastWAM coverage for video/action backbones."
+            )
+        return required
+
+    @staticmethod
+    def _shape_compatible_keys(module, state: dict[str, Any]) -> set[str]:
+        if not isinstance(state, dict):
+            return set()
+        current = module.state_dict()
         return {
+            key
+            for key, value in state.items()
+            if key in current
+            and isinstance(value, torch.Tensor)
+            and tuple(value.shape) == tuple(current[key].shape)
+        }
+
+    def _validate_legacy_minimum_coverage(
+        self,
+        state: dict[str, Any],
+        *,
+        path,
+        label: str,
+        load_role: str,
+    ) -> None:
+        if not isinstance(state, dict):
+            raise TypeError(f"Legacy checkpoint {label} state must be a dict: {path}")
+        if label == "mot":
+            required = self._legacy_required_mot_keys()
+            compatible = self._shape_compatible_keys(self.mot, state)
+        elif label == "dit":
+            if load_role == "base_dependency":
+                raise ValueError(
+                    "A sparse native v2 checkpoint cannot depend on a legacy "
+                    f"video-only `dit` checkpoint: {path}"
+                )
+            required = set(self.video_expert.state_dict())
+            compatible = self._shape_compatible_keys(self.video_expert, state)
+        else:
+            raise RuntimeError(f"Unsupported legacy checkpoint label: {label}")
+        missing = sorted(required - compatible)
+        if missing:
+            raise ValueError(
+                f"Legacy {label} checkpoint lacks minimum safe backbone coverage: "
+                f"missing={missing[:12]} (count={len(missing)}) in {path}"
+            )
+
+    @classmethod
+    def _validated_base_dependency_descriptor(
+        cls,
+        descriptor: Any,
+        *,
+        owner_path: str | Path,
+        active_paths: set[Path],
+    ) -> dict[str, str]:
+        if not isinstance(descriptor, dict):
+            raise ValueError(
+                "Native sparse checkpoint base_checkpoint must be a "
+                f"{{path, sha256, role}} object: {owner_path}"
+            )
+        required_fields = {"path", "sha256", "role"}
+        if set(descriptor) != required_fields:
+            raise ValueError(
+                "Native sparse checkpoint base descriptor fields mismatch: "
+                f"expected={sorted(required_fields)} got={sorted(descriptor)} "
+                f"in {owner_path}"
+            )
+        if descriptor["role"] != "base_dependency":
+            raise ValueError(
+                "Native sparse checkpoint base descriptor role must be "
+                f"'base_dependency', got {descriptor['role']!r} in {owner_path}"
+            )
+        raw_path = descriptor["path"]
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError(f"Invalid base dependency path in {owner_path}")
+        dependency_path = Path(raw_path).expanduser()
+        if not dependency_path.is_absolute():
+            dependency_path = Path(owner_path).parent / dependency_path
+        dependency_path = dependency_path.resolve(strict=True)
+        if not dependency_path.is_file():
+            raise FileNotFoundError(
+                f"Base checkpoint dependency is not a file: {dependency_path}"
+            )
+        if dependency_path in active_paths:
+            raise ValueError(
+                "Checkpoint base dependency cycle detected: "
+                f"{dependency_path} is already active"
+            )
+        expected_sha256 = descriptor["sha256"]
+        if (
+            not isinstance(expected_sha256, str)
+            or len(expected_sha256) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in expected_sha256)
+        ):
+            raise ValueError(
+                f"Invalid base checkpoint SHA-256 in {owner_path}: {expected_sha256!r}"
+            )
+        expected_sha256 = expected_sha256.lower()
+        actual_sha256 = cls._checkpoint_sha256(dependency_path)
+        if actual_sha256 != expected_sha256:
+            raise ValueError(
+                "Base checkpoint SHA-256 mismatch: "
+                f"expected={expected_sha256} actual={actual_sha256} "
+                f"path={dependency_path}"
+            )
+        return {
+            "path": str(dependency_path),
+            "sha256": actual_sha256,
+            "role": "base_dependency",
+        }
+
+    def _base_dependency_descriptor_for_save(self, output_path) -> dict[str, str]:
+        if not getattr(self, "_loaded_base_checkpoint_can_restore_sparse", False):
+            raise RuntimeError(
+                "Cannot save sparse_delta: no loaded full `mot` checkpoint can "
+                "reconstruct frozen parameters."
+            )
+        base_path_value = getattr(self, "_loaded_base_checkpoint", None)
+        if not base_path_value:
+            raise RuntimeError("Cannot save sparse_delta without a base checkpoint path.")
+        base_path = Path(str(base_path_value)).expanduser().resolve(strict=True)
+        if not base_path.is_file():
+            raise FileNotFoundError(f"Base checkpoint is not a file: {base_path}")
+        output_resolved = Path(output_path).expanduser().resolve(strict=False)
+        if output_resolved == base_path:
+            raise ValueError(
+                "A sparse checkpoint cannot overwrite its own base dependency: "
+                f"{base_path}"
+            )
+
+        cached = getattr(self, "_loaded_base_checkpoint_descriptor", None)
+        if isinstance(cached, dict) and cached.get("path") == str(base_path):
+            return dict(cached)
+        cached_sha256 = self._checkpoint_sha256(base_path)
+        descriptor = {
+            "path": str(base_path),
+            "sha256": cached_sha256,
+            "role": "base_dependency",
+        }
+        self._loaded_base_checkpoint_sha256 = cached_sha256
+        self._loaded_base_checkpoint_descriptor = descriptor
+        return dict(descriptor)
+
+    def _multi_robot_architecture_metadata(self) -> dict[str, Any]:
+        metadata = {
             "agent_set_representation": "native_variable_length_v1",
+            "action_attention_topology": "factorized_agent_local_hub_v1",
+            "action_dim": self.action_expert.action_dim,
+            "state_dim": self.action_expert.state_dim,
+            "hidden_dim": self.action_expert.hidden_dim,
+            "ffn_dim": self.action_expert.ffn_dim,
+            "num_layers": len(self.action_expert.blocks),
+            "num_heads": self.action_expert.num_heads,
+            "attn_head_dim": self.action_expert.attn_head_dim,
+            "text_dim": self.action_expert.text_dim,
+            "freq_dim": self.action_expert.freq_dim,
             "agent_encoding_mode": self.action_expert.agent_encoding_mode,
             "agent_geometry_dim": self.action_expert.agent_geometry_dim,
             "agent_geometry_schema": "robofactory_root_pose_xyz_canonical_qwqxqyqz_v1",
+            "agent_rope_dim": self.action_expert.agent_rope_dim,
+            "agent_phase_scale": self.action_expert.agent_phase_scale,
             "hub_enabled": self.action_expert.hub_enabled,
             "hub_token_policy": "ceil(hub_token_ratio*num_agents)",
             "hub_token_ratio": self.action_expert.hub_token_ratio,
+            "hub_position_scale": self.action_expert.hub_position_scale,
+            "enable_gaussian": self.action_expert.enable_gaussian,
         }
+        if self.action_expert.enable_gaussian:
+            metadata.update(
+                {
+                    "gaussian_conditioning": "agent_local_residual_v1",
+                    "gaussian_shape": [
+                        self.action_expert.gaussian_channels,
+                        self.action_expert.gaussian_height,
+                        self.action_expert.gaussian_width,
+                    ],
+                    "gaussian_hidden_dim": self.action_expert.hidden_dim,
+                    "gaussian_stem_dim": self.action_expert.gaussian_stem_dim,
+                    "gaussian_adapter_version": "conv_gn_silu_pool_v1",
+                    "gaussian_gate_init": 0.0,
+                }
+            )
+        return metadata
 
-    def _validate_multi_robot_checkpoint_metadata(self, payload: dict[str, Any], path) -> None:
+    def _validate_gaussian_v2_state(
+        self,
+        payload: dict[str, Any],
+        state: dict[str, Any],
+        *,
+        path,
+        label: str,
+    ) -> None:
+        """Require every GAU1 adapter/gate tensor in native v2 checkpoints.
+
+        Official FastWAM checkpoints predate the multi-robot v2 envelope and
+        remain permissive.  Once a checkpoint declares v2 GAU1 metadata,
+        silently retaining newly initialized Gaussian parameters would make a
+        resumed treatment scientifically different, so those tensors are
+        strict even though legacy backbone loading remains shape-tolerant.
+        """
+
+        if (
+            payload.get("format") != "fastwam_multi_robot_v2"
+            or not self.action_expert.enable_gaussian
+        ):
+            return
+        if not isinstance(state, dict):
+            raise TypeError(f"Checkpoint {label} state must be a dict: {path}")
+
+        def is_gaussian_key(key: str) -> bool:
+            return (
+                ".gaussian_adapter." in key
+                or key.endswith(".gaussian_gate")
+            )
+
+        current = self.mot.state_dict()
+        required = {key for key in current if is_gaussian_key(key)}
+        received = {key for key in state if is_gaussian_key(key)}
+        missing = sorted(required - received)
+        unexpected = sorted(received - required)
+        shape_mismatches = []
+        for key in sorted(required & received):
+            value = state[key]
+            if not isinstance(value, torch.Tensor):
+                shape_mismatches.append(
+                    (key, type(value).__name__, tuple(current[key].shape))
+                )
+            elif tuple(value.shape) != tuple(current[key].shape):
+                shape_mismatches.append(
+                    (key, tuple(value.shape), tuple(current[key].shape))
+                )
+        if missing or unexpected or shape_mismatches:
+            raise ValueError(
+                f"Strict GAU1 {label} state mismatch in {path}: "
+                f"missing={missing}, unexpected={unexpected}, "
+                f"shape_mismatches={shape_mismatches}"
+            )
+
+    def _validate_multi_robot_checkpoint_metadata(
+        self,
+        payload: dict[str, Any],
+        path,
+        *,
+        validate_treatment: bool = True,
+        validate_trainable_scope: bool = True,
+    ) -> None:
         if payload.get("format") != "fastwam_multi_robot_v2":
             return
+        for key, allowed_values in (
+            ("training_mode", {"action_only_cache", "joint"}),
+            ("trainable_scope", {"hub_io", "action", "dit"}),
+        ):
+            if key not in payload:
+                raise ValueError(f"Native v2 checkpoint is missing {key!r}: {path}")
+            if payload[key] not in allowed_values:
+                raise ValueError(
+                    f"Native v2 checkpoint has invalid {key}={payload[key]!r}: {path}"
+                )
+        if validate_treatment:
+            treatment_expected = {"training_mode": self.training_mode}
+            if validate_trainable_scope:
+                treatment_expected["trainable_scope"] = self._trainable_scope
+            for key, expected_value in treatment_expected.items():
+                if payload[key] != expected_value:
+                    raise ValueError(
+                        f"Checkpoint treatment mismatch for {key}: "
+                        f"expected {expected_value!r}, got {payload[key]!r} in {path}"
+                    )
+
         received = payload.get("multi_robot_architecture")
         if not isinstance(received, dict):
             raise ValueError(f"v2 checkpoint is missing multi_robot_architecture: {path}")
@@ -785,24 +1270,53 @@ class FastWAMMultiRobot(FastWAM):
                     f"Checkpoint architecture mismatch for {key}: "
                     f"expected {expected_value!r}, got {received_value!r} in {path}"
                 )
+        unexpected_metadata = sorted(set(received) - set(expected))
+        if unexpected_metadata:
+            raise ValueError(
+                "Checkpoint architecture contains unexpected metadata keys: "
+                f"{unexpected_metadata} in {path}"
+            )
 
-    def save_checkpoint(self, path, optimizer=None, step=None):
+    def save_checkpoint(
+        self,
+        path,
+        optimizer=None,
+        step=None,
+        checkpoint_state_kind: str | None = None,
+    ):
         del optimizer
+        if checkpoint_state_kind is None or checkpoint_state_kind == "auto":
+            checkpoint_state_kind = (
+                "full" if self._trainable_scope == "dit" else "sparse_delta"
+            )
+        checkpoint_state_kind = str(checkpoint_state_kind).strip().lower()
+        if checkpoint_state_kind not in {"full", "sparse_delta"}:
+            raise ValueError(
+                "checkpoint_state_kind must be 'full' or 'sparse_delta', got "
+                f"{checkpoint_state_kind!r}"
+            )
+        if checkpoint_state_kind == "sparse_delta" and self._trainable_scope == "dit":
+            raise ValueError(
+                "checkpoint_state_kind='sparse_delta' is invalid when "
+                "trainable_scope='dit'; save a self-contained full checkpoint."
+            )
         payload: dict[str, Any] = {
             "format": "fastwam_multi_robot_v2",
             "step": step,
             "torch_dtype": str(self.torch_dtype),
             "trainable_scope": self._trainable_scope,
             "training_mode": self.training_mode,
-            "base_checkpoint": self._loaded_base_checkpoint,
             "multi_robot_architecture": self._multi_robot_architecture_metadata(),
         }
-        if self._trainable_scope == "dit":
+        if checkpoint_state_kind == "full":
+            payload["state_kind"] = "full"
+            payload["base_checkpoint"] = None
             payload["mot"] = self.mot.state_dict()
         else:
-            trainable_keys = {
-                name for name, parameter in self.mot.named_parameters() if parameter.requires_grad
-            }
+            trainable_keys = self._expected_trainable_parameter_names()
+            payload["state_kind"] = "sparse_delta"
+            payload["base_checkpoint"] = self._base_dependency_descriptor_for_save(path)
+            payload["trainable_parameter_names"] = trainable_keys
             payload["mot_trainable"] = {
                 name: value.detach().cpu()
                 for name, value in self.mot.state_dict().items()
@@ -810,36 +1324,168 @@ class FastWAMMultiRobot(FastWAM):
             }
         torch.save(payload, path)
 
-    def load_checkpoint(self, path, optimizer=None):
-        payload = torch.load(path, map_location="cpu")
+    def load_checkpoint(
+        self,
+        path,
+        optimizer=None,
+        *,
+        validate_trainable_scope: bool = True,
+    ):
+        """Load a checkpoint with strict architecture/treatment validation.
+
+        ``trainable_scope`` is training provenance, not an inference-time
+        architecture choice.  Training/resume keeps the strict default;
+        inference may disable only that comparison for self-contained full
+        checkpoints while all tensor, architecture and training-mode checks
+        remain active.
+        """
+        return self._load_checkpoint_with_role(
+            path,
+            optimizer=optimizer,
+            load_role="top_level",
+            active_paths=set(),
+            validate_trainable_scope=validate_trainable_scope,
+        )
+
+    def _load_checkpoint_with_role(
+        self,
+        path,
+        *,
+        optimizer=None,
+        load_role: str,
+        active_paths: set[Path],
+        validate_trainable_scope: bool = True,
+    ):
+        checkpoint_path = Path(path).expanduser().resolve(strict=True)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Checkpoint is not a file: {checkpoint_path}")
+        if checkpoint_path in active_paths:
+            raise ValueError(
+                f"Checkpoint base dependency cycle detected at {checkpoint_path}"
+            )
+        active_paths = set(active_paths)
+        active_paths.add(checkpoint_path)
+
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         if not isinstance(payload, dict):
-            raise ValueError(f"Checkpoint payload must be a dict: {path}")
-        self._validate_multi_robot_checkpoint_metadata(payload, path)
+            raise ValueError(f"Checkpoint payload must be a dict: {checkpoint_path}")
 
-        base_checkpoint = payload.get("base_checkpoint")
-        if "mot_trainable" in payload and base_checkpoint and not self._loaded_base_checkpoint:
-            if str(base_checkpoint) != str(path):
-                try:
-                    self.load_checkpoint(str(base_checkpoint), optimizer=None)
-                except FileNotFoundError:
-                    logger.warning(
-                        "Sparse checkpoint refers to missing base checkpoint %s; using current base weights.",
-                        base_checkpoint,
+        checkpoint_format = payload.get("format")
+        if checkpoint_format == "fastwam_multi_robot_v2":
+            self._validate_multi_robot_checkpoint_metadata(
+                payload,
+                checkpoint_path,
+                validate_treatment=load_role == "top_level",
+                validate_trainable_scope=validate_trainable_scope,
+            )
+            state_kind = self._native_checkpoint_state_kind(payload, checkpoint_path)
+            if load_role == "base_dependency" and state_kind != "full":
+                raise ValueError(
+                    "Nested sparse native v2 checkpoints are forbidden; a "
+                    f"base_dependency must be state_kind='full': {checkpoint_path}"
+                )
+
+            if state_kind == "full":
+                mot_state = payload["mot"]
+                expected_state = self.mot.state_dict()
+                self._validate_exact_tensor_state(
+                    expected_state,
+                    mot_state,
+                    expected_keys=sorted(expected_state),
+                    path=checkpoint_path,
+                    label="mot",
+                )
+                self.mot.load_state_dict(mot_state, strict=True)
+                if load_role == "top_level":
+                    self._loaded_base_checkpoint = str(checkpoint_path)
+                    self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
+                        checkpoint_path
                     )
-
-        if "mot" in payload:
+                    self._loaded_base_checkpoint_descriptor = {
+                        "path": str(checkpoint_path),
+                        "sha256": self._loaded_base_checkpoint_sha256,
+                        "role": "base_dependency",
+                    }
+                    self._loaded_base_checkpoint_can_restore_sparse = True
+            else:
+                if load_role != "top_level":
+                    raise ValueError(
+                        f"sparse_delta is only valid as a top-level checkpoint: {checkpoint_path}"
+                    )
+                trainable_state = payload["mot_trainable"]
+                self._validate_sparse_trainable_contract(
+                    payload,
+                    trainable_state,
+                    path=checkpoint_path,
+                )
+                descriptor = self._validated_base_dependency_descriptor(
+                    payload.get("base_checkpoint"),
+                    owner_path=checkpoint_path,
+                    active_paths=active_paths,
+                )
+                self._load_checkpoint_with_role(
+                    descriptor["path"],
+                    optimizer=None,
+                    load_role="base_dependency",
+                    active_paths=active_paths,
+                    validate_trainable_scope=validate_trainable_scope,
+                )
+                result = self.mot.load_state_dict(trainable_state, strict=False)
+                if result.unexpected_keys:
+                    raise RuntimeError(
+                        "Validated sparse state produced unexpected keys during load: "
+                        f"{result.unexpected_keys}"
+                    )
+                self._loaded_base_checkpoint = descriptor["path"]
+                self._loaded_base_checkpoint_sha256 = descriptor["sha256"]
+                self._loaded_base_checkpoint_descriptor = descriptor
+                self._loaded_base_checkpoint_can_restore_sparse = True
+        elif checkpoint_format is not None:
+            raise ValueError(
+                f"Unsupported checkpoint format {checkpoint_format!r}: {checkpoint_path}"
+            )
+        elif "mot" in payload:
             mot_state = self._upgrade_legacy_hub_state(payload["mot"])
-            self._load_matching_state(self.mot, mot_state, label="mot")
-            self._loaded_base_checkpoint = str(path)
-        elif "mot_trainable" in payload:
-            trainable_state = self._upgrade_legacy_hub_state(payload["mot_trainable"])
-            self._load_matching_state(self.mot, trainable_state, label="mot_trainable")
+            self._validate_legacy_minimum_coverage(
+                mot_state,
+                path=checkpoint_path,
+                label="mot",
+                load_role=load_role,
+            )
+            self._load_matching_state(self.mot, mot_state, label="legacy mot")
+            if load_role == "top_level":
+                self._loaded_base_checkpoint = str(checkpoint_path)
+                self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
+                    checkpoint_path
+                )
+                self._loaded_base_checkpoint_descriptor = {
+                    "path": str(checkpoint_path),
+                    "sha256": self._loaded_base_checkpoint_sha256,
+                    "role": "base_dependency",
+                }
+                self._loaded_base_checkpoint_can_restore_sparse = True
         elif "dit" in payload:
-            self._load_matching_state(self.video_expert, payload["dit"], label="legacy video dit")
-            self._loaded_base_checkpoint = str(path)
+            self._validate_legacy_minimum_coverage(
+                payload["dit"],
+                path=checkpoint_path,
+                label="dit",
+                load_role=load_role,
+            )
+            self._load_matching_state(
+                self.video_expert,
+                payload["dit"],
+                label="legacy video dit",
+            )
+            if load_role == "top_level":
+                self._loaded_base_checkpoint = str(checkpoint_path)
+                self._loaded_base_checkpoint_sha256 = None
+                self._loaded_base_checkpoint_descriptor = None
+                self._loaded_base_checkpoint_can_restore_sparse = False
         else:
-            raise ValueError(f"Checkpoint missing mot/mot_trainable/dit: {path}")
+            raise ValueError(
+                f"Legacy checkpoint missing both `mot` and `dit`: {checkpoint_path}"
+            )
 
-        if optimizer is not None and "optimizer" in payload:
+        if load_role == "top_level" and optimizer is not None and "optimizer" in payload:
             optimizer.load_state_dict(payload["optimizer"])
         return payload

@@ -16,7 +16,10 @@ from torch.utils.data._utils.collate import default_collate
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--task", default="robofactory_multi_robot_vg0_hub1_224_1e-4")
+    parser.add_argument(
+        "--task",
+        default="robofactory_multi_robot_vg1_hub1_gau1_224_1e-4",
+    )
     parser.add_argument("--scope", default=None)
     parser.add_argument("--agent-count", type=int, default=None)
     parser.add_argument("--required-agent-counts", type=int, nargs="+", default=None)

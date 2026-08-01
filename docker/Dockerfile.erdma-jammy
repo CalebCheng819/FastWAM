@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.7
+
+# BASE_IMAGE is deliberately required and must be an immutable ACR digest, for
+# example registry-vpc.example/repository@sha256:....  A mutable default would
+# make the 32-GPU run irreproducible.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG SOURCE_COMMIT=unknown
+ARG ERDMA_USERSPACE_VERSION=56.2-1.0.3
+ARG ERDMA_GPG_FINGERPRINT=9D212E476C8B3A156037FDEE53AB9571F185CE62
+
+LABEL org.opencontainers.image.title="FastWAM multi-robot eRDMA runtime" \
+      org.opencontainers.image.description="Ubuntu 22.04 FastWAM runtime with Alibaba Cloud eRDMA userspace and fail-closed diagnostics" \
+      org.opencontainers.image.source="https://github.com/CalebCheng819/FastWAM" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.base.name="${BASE_IMAGE}" \
+      io.fastwam.iteration="ITER-2026-08-02-FASTWAM-GAUDP-001" \
+      io.fastwam.erdma.userspace="${ERDMA_USERSPACE_VERSION}"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# PAI's eRDMA kernel driver and devices are injected by the platform.  The
+# image supplies only the matching userspace provider and diagnostics.  Keep
+# the package replacement in one layer so a removed generic provider cannot
+# survive in an intermediate runtime layer.
+RUN set -eux; \
+    . /etc/os-release; \
+    test "${ID}" = ubuntu; \
+    test "${VERSION_CODENAME}" = jammy; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates \
+      gnupg \
+      wget; \
+    key_file="$(mktemp)"; \
+    key_home="$(mktemp -d)"; \
+    chmod 0700 "${key_home}"; \
+    wget -qO "${key_file}" https://mirrors.aliyun.com/erdma/GPGKEY; \
+    observed_fingerprint="$(GNUPGHOME="${key_home}" gpg --show-keys --with-colons "${key_file}" | awk -F: '$1 == "fpr" { print $10; exit }')"; \
+    test "${observed_fingerprint}" = "${ERDMA_GPG_FINGERPRINT}"; \
+    GNUPGHOME="${key_home}" gpg --dearmor --yes --output /etc/apt/trusted.gpg.d/erdma.gpg "${key_file}"; \
+    rm -rf -- "${key_home}"; \
+    rm -f -- "${key_file}"; \
+    rm -f -- /etc/apt/sources.list.d/mellanox_mlnx_ofed.list; \
+    printf '%s\n' 'deb [arch=amd64] https://mirrors.aliyun.com/erdma/apt/ubuntu jammy/erdma main' \
+      > /etc/apt/sources.list.d/erdma.list; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y \
+      libibverbs1 \
+      ibverbs-providers \
+      ibverbs-utils \
+      librdmacm1; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      "rdma-core=${ERDMA_USERSPACE_VERSION}" \
+      "libibverbs1=${ERDMA_USERSPACE_VERSION}" \
+      "ibverbs-providers=${ERDMA_USERSPACE_VERSION}" \
+      "ibverbs-utils=${ERDMA_USERSPACE_VERSION}" \
+      "librdmacm1=${ERDMA_USERSPACE_VERSION}" \
+      iproute2 \
+      perftest; \
+    test "$(dpkg-query -W -f='${Version}' ibverbs-providers)" = "${ERDMA_USERSPACE_VERSION}"; \
+    test -s /etc/libibverbs.d/erdma.driver; \
+    test -e /usr/lib/x86_64-linux-gnu/libibverbs/liberdma-rdmav34.so; \
+    test -e /usr/lib/x86_64-linux-gnu/liberdma.so.1; \
+    command -v ibv_devices; \
+    command -v ibv_devinfo; \
+    command -v ib_write_bw; \
+    rm -rf -- /var/lib/apt/lists/*
+
+COPY --chmod=0755 docker/verify-erdma-userspace.sh /usr/local/bin/fastwam-verify-erdma-userspace

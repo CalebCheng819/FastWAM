@@ -16,9 +16,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root-dir", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument("--val-set-proportion", type=float, default=0.1)
     args = parser.parse_args()
 
-    payload = compute_robofactory_stats(args.root_dir)
+    payload = compute_robofactory_stats(
+        args.root_dir,
+        split_seed=args.split_seed,
+        val_set_proportion=args.val_set_proportion,
+    )
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.tmp.{uuid.uuid4().hex}"
@@ -26,6 +32,7 @@ def main():
     os.replace(temporary, output)
     print(
         f"wrote {output} files={payload['files']} trajectories={payload['trajectories']} "
+        f"fit_trajectories={payload['normalization_fit']['trajectories']} "
         f"action_count={payload['action']['count']} state_count={payload['state']['count']}"
     )
 

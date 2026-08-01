@@ -47,6 +47,14 @@ action_dit_config:
   hub_token_ratio: 2.0
   agent_rope_dim: 48
   agent_phase_scale: 1.0
+  # GauDP-style agent-local conditioning ablation.  When enabled, every real
+  # agent must provide a causal canonical tensor [13,28,40].  The adapter is
+  # shared across agents and its residual gate starts at zero.
+  enable_gaussian: false
+  gaussian_channels: 13
+  gaussian_height: 28
+  gaussian_width: 40
+  gaussian_stem_dim: 64
   hidden_dim: 1024
   ffn_dim: 4096
   num_heads: 24

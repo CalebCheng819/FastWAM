@@ -1,0 +1,17 @@
+# @package _global_
+
+# Formal 4-node x 8-GPU DLC scale profile.  The 8-GPU ablation baseline keeps
+# gradient_accumulation_steps=4; at 32 GPUs this override preserves the same
+# 32-rank optimizer-update scale with one micro-batch per rank.
+gradient_accumulation_steps: 1
+
+# Every formal 2 x 2 x 2 ablation arm publishes a self-contained full MoT
+# checkpoint.  In particular, VG0/action-only arms must not serialize a
+# node-local /tmp official-checkpoint dependency into their final weights.
+checkpoint_state_kind: full
+seal_training_state: true
+
+# A deterministic, cardinality-stratified held-out loss check.  This is not a
+# simulator rollout or task-success metric.
+eval_every: 1000
+offline_eval_num_samples: 12

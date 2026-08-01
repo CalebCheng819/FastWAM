@@ -280,27 +280,37 @@ bash scripts/train_zero1.sh 8 task=robotwin_uncond_3cam_384_1e-4
 ```bash
 python scripts/compute_robofactory_stats.py \
   --root-dir /cpfs/user/chengjuntao/datasets/robofactory_multi_robot \
-  --output /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_stats.json
+  --output /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json \
+  --split-seed 42 \
+  --val-set-proportion 0.1
 
 python scripts/precompute_text_embeds.py \
   task=robofactory_multi_robot_hub_224_1e-4 \
   +overwrite=false
 ```
 
-预声明的 2x2 消融分别控制 VideoGen 与 HubToken。正式主模型使用
-`robofactory_multi_robot_vg1_hub1_224_1e-4`；其余三个配置只改变对应 treatment，
-共享数据、seed、采样调度与初始化：
+预声明的 2x2x2 消融分别控制 VideoGen、HubToken 与 Gaussian/GauDP 条件。正式主模型使用
+`robofactory_multi_robot_vg1_hub1_gau1_224_1e-4`；其余配置只改变对应 treatment，
+共享数据、seed、采样调度与初始化。GAU1 必须通过环境变量固定一个已完成且校验过的
+28x40 compact cache；全分辨率 13ch FP16 全时间步 canonical cache 保留在 OSS：
 
 ```bash
 CUDA_VISIBLE_DEVICES=2,3 accelerate launch \
   --use_deepspeed --zero_stage 2 --num_processes 2 \
   --mixed_precision bf16 --gradient_accumulation_steps 4 \
-  scripts/train.py task=robofactory_multi_robot_vg1_hub1_224_1e-4
+  scripts/train.py task=robofactory_multi_robot_vg1_hub1_gau1_224_1e-4
 ```
 
-其余消融为 `vg1_hub0`、`vg0_hub1`、`vg0_hub0` 三个同名 task 配置。训练权重使用
-`fastwam_multi_robot_v1` 稀疏格式，只保存当前 trainable scope，并记录其官方
-FastWAM base checkpoint。
+其余七个消融使用相同的 `vg{0,1}_hub{0,1}_gau{0,1}` 命名。正式运行统一保存
+self-contained full MoT 权重，避免 VG0/action-only 权重引用 Pod 本地 `/tmp` base；
+sparse delta 仅保留给显式诊断。
+
+这里的 VG0/VG1 是“VideoGen 训练范式整体消融”，不是只把 video loss 系数置零：
+VG0 同时切换为 action-only cache、去掉 future-video 训练目标并缩小可训练参数范围；
+因此不能把差异单独解释成 video loss 的因果效果。正式 sampler 在 N=2/3/4 与 task
+之间做 balanced、with-replacement 抽样，并非按原始轨迹比例的 ERM。训练内 eval 是固定
+12 个 held-out window 的离线 loss/动作误差，不代表仿真 task success；成功率需要单独的
+rollout 评测任务。
 
 ## 使用自己训练的权重推理
 

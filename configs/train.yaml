@@ -22,6 +22,10 @@ log_every: 10
 save_every: 100
 eval_every: 50
 eval_num_inference_steps: 10
+# Multi-robot configs use a deterministic held-out loss subset instead of the
+# single-robot video rollout evaluator. Zero keeps that evaluator disabled
+# unless an explicit scale/task profile opts in.
+offline_eval_num_samples: 0
 
 # training
 gradient_accumulation_steps: 1
@@ -30,8 +34,20 @@ seed: 42
 max_grad_norm: 1.0
 weight_decay: 0.0
 resume: null
+# Full-state directories without the v1 scientific run contract are refused
+# before Accelerator mutates model/optimizer state.  Set true only for an
+# explicitly audited legacy recovery; formal runs keep this false.
+allow_legacy_resume: false
 trainable_scope: dit
+# `auto` preserves the historical behavior: full weights for a fully trainable
+# DiT and a base-dependent sparse delta for a staged action/hub-only treatment.
+# Formal 32-GPU runs override this to `full`, making every reported weights
+# artifact self-contained even for action-only ablations.
+checkpoint_state_kind: auto
 save_training_state: true
+# When enabled, rank zero hashes the complete post-barrier Accelerate/DeepSpeed
+# state directory into an immutable JSON manifest (path, bytes, SHA-256).
+seal_training_state: false
 save_final_checkpoint: true
 
 # wandb

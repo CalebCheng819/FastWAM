@@ -13,8 +13,10 @@ from omegaconf import OmegaConf
 
 from .trainer import Wan22Trainer
 from .utils.logging_config import get_logger, setup_logging
+from .utils.pytorch_utils import set_global_seed
 from .utils.video_io import save_mp4
 from .utils import misc
+from .runtime_provenance import publish_rank_zero_file, rank_and_world_from_environment
 
 logger = get_logger(__name__)
 
@@ -423,18 +425,55 @@ def _resolve_train_device() -> str:
 
 
 def run_training(cfg: DictConfig):
+    env_rank, env_world_size = rank_and_world_from_environment()
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+        world_size = torch.distributed.get_world_size()
+        if (rank, world_size) != (env_rank, env_world_size):
+            raise RuntimeError(
+                "initialized process-group topology disagrees with torchrun environment: "
+                f"dist=({rank},{world_size}) env=({env_rank},{env_world_size})"
+            )
+    else:
+        rank, world_size = env_rank, env_world_size
     setup_logging(
         log_level=logging.INFO,
-        is_main_process=torch.distributed.get_rank() == 0 if torch.distributed.is_initialized() else True,
+        is_main_process=rank == 0,
     )
     misc.register_work_dir(cfg.output_dir)
-    config_payload = OmegaConf.to_container(cfg, resolve=True)
-    with open(Path(cfg.output_dir) / "config.yaml", "w") as f:
-        OmegaConf.save(config_payload, f)
+    config_payload = OmegaConf.to_yaml(cfg, resolve=True, sort_keys=True).encode("utf-8")
+    try:
+        config_timeout = float(os.environ.get("FASTWAM_CONFIG_BARRIER_TIMEOUT", "300"))
+    except ValueError as error:
+        raise RuntimeError("FASTWAM_CONFIG_BARRIER_TIMEOUT must be numeric") from error
+    config_sha256 = publish_rank_zero_file(
+        Path(cfg.output_dir) / "config.yaml",
+        config_payload,
+        rank=rank,
+        world_size=world_size,
+        timeout_seconds=config_timeout,
+    )
+    # Accelerator is instantiated later in the trainer, so the hash-qualified
+    # ready marker above is the required pre-process-group barrier.  If a caller
+    # initialized torch.distributed early, preserve a real collective barrier too.
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    logger.info(
+        "Resolved config barrier passed: rank=%d world_size=%d sha256=%s",
+        rank,
+        world_size,
+        config_sha256,
+    )
 
     model_device = _resolve_train_device()
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
+    # Seed before instantiation so treatment-only modules (for example the
+    # Gaussian adapter) do not make the shared public weights depend on the
+    # order in which an ablation arm happens to be constructed.  The trainer
+    # intentionally resets this seed after Accelerator is initialized so data
+    # workers and the training RNG still start from the documented run seed.
+    set_global_seed(int(cfg.seed), get_worker_init_fn=False)
     model = instantiate(cfg.model, model_dtype=model_dtype, device=model_device)
     train_ds, val_ds = build_datasets(cfg.data)
 
@@ -458,9 +497,15 @@ def run_inference(cfg: DictConfig):
         ckpt = Path(checkpoint_path)
         if ckpt.exists():
             logger.info("Loading finetuned checkpoint: %s", checkpoint_path)
-            model.load_checkpoint(checkpoint_path)
+            load_parameters = inspect.signature(model.load_checkpoint).parameters
+            load_kwargs = (
+                {"validate_trainable_scope": False}
+                if "validate_trainable_scope" in load_parameters
+                else {}
+            )
+            model.load_checkpoint(checkpoint_path, **load_kwargs)
         else:
-            logger.warning("Checkpoint not found, skipping load: %s", checkpoint_path)
+            raise FileNotFoundError(f"Inference checkpoint not found: {checkpoint_path}")
     model.eval()
     
     def center_crop_resize(img: Image, width: int, height: int) -> Image.Image:
