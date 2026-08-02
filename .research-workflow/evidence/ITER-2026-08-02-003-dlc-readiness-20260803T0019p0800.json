@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_dlc_readiness_live_readback",
+  "queried_at_utc": "2026-08-02T16:19:25.866707+00:00",
+  "control_instance": "root@123.57.187.96:942",
+  "workspace_id": "270969",
+  "resource": {
+    "resource_id": "quotaksvqq2oh2pg",
+    "resource_name": "more_8GPU",
+    "resource_type": "ECS",
+    "aiworkspace_resource_record_id": "103921",
+    "workspace_association_visible": true,
+    "live_capacity_or_free_gpu_field_returned": false,
+    "quota_records_returned": 0
+  },
+  "dlc_jobs": {
+    "total_count": 31,
+    "status_counts": {
+      "Failed": 15,
+      "Running": 4,
+      "Stopped": 1,
+      "Succeeded": 11
+    },
+    "active_job_count": 4,
+    "active_gpu_sum_from_request_gpu": 32,
+    "active_jobs": [
+      {
+        "job_id": "dlcgm7tai1vrpnvr",
+        "display_name": "fastwam-mr-n234-vg1h1-acv0-rtinit-s42-finalonly-5000-20260802t092800z",
+        "status": "Running",
+        "request_gpu": 8
+      },
+      {
+        "job_id": "dlcgm7tairn247c3",
+        "display_name": "fastwam-mr-n234-vg1h1-acv1-rtinit-s42-finalonly-5000-20260802t092800z",
+        "status": "Running",
+        "request_gpu": 8
+      },
+      {
+        "job_id": "dlcena4uivun5w8n",
+        "display_name": "fastwam-mr-n234-vg1h1-acv1-s42-5000-20260802t073651z",
+        "status": "Running",
+        "request_gpu": 8
+      },
+      {
+        "job_id": "dlc1hqocuisxxdkb",
+        "display_name": "fastwam-mr-n234-vg1hub1-s42-formal-20260801",
+        "status": "Running",
+        "request_gpu": 8
+      }
+    ],
+    "availability_inference": "Four running jobs prove 32 requested GPUs are active, but do not prove that no additional GPU capacity is available."
+  },
+  "image_readback": {
+    "job_id": "dlcgm7tai1vrpnvr",
+    "reference": "pj4090acr-registry-vpc.cn-beijing.cr.aliyuncs.com/pj4090/chengjuntao:cjt-multirobot-benchmark",
+    "immutable_digest_present": false
+  },
+  "credentials_source": "CredentialsURI profile consumed in memory",
+  "credentials_printed": false,
+  "cloud_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "decision": "NO-GO: active allocation is visible, but free capacity remains unreadable and the selected image is still a mutable tag.",
+  "formal_training_allowed": false
+}
