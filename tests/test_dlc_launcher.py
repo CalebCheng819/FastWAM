@@ -171,6 +171,11 @@ def _formal_scale_environment(*, rank: int = 0) -> dict[str, str]:
         "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256": "2" * 64,
         "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256": "3" * 64,
         "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256": "4" * 64,
+        "FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT": (
+            "/oss-chengjuntao/artifacts/fastwam-n4-fullmodel-gate/launcher-fixture"
+        ),
+        "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256": "7" * 64,
+        "FASTWAM_OUTPUT_ZERO_CHECKPOINT_SMOKE_SHA256": "d" * 64,
         "FASTWAM_DLC_IMAGE_REFERENCE": (
             "pj4090acr-registry-vpc.cn-beijing.cr.aliyuncs.com/"
             "pj4090/chengjuntao:cjt-multirobot-benchmark"
@@ -183,6 +188,13 @@ def _formal_scale_args() -> list[str]:
     return [
         "task=robofactory_multi_robot_vg1_hub1_gau1_224_1e-4",
         "+scale=robofactory_multi_robot_32gpu",
+    ]
+
+
+def _formal_n4_gate_args() -> list[str]:
+    return [
+        "task=robofactory_multi_robot_vg1_hub1_gau1_224_1e-4",
+        "+scale=robofactory_multi_robot_32gpu_n4_fullmodel_gate",
     ]
 
 
@@ -461,6 +473,79 @@ def test_formal_32gpu_scale_is_fail_closed_even_in_dry_run() -> None:
     assert "owns provenance and node-local path override 'output_dir'" in (conflict.stderr or "")
 
 
+def test_formal_n4_gate_scale_has_separate_save_load_contract() -> None:
+    base = {
+        **_formal_scale_environment(),
+        "FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT": None,
+        "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256": None,
+        "FASTWAM_N4_FULLMODEL_GATE_PHASE": "save",
+    }
+    save = _run_launcher(
+        nproc=None,
+        env_updates=base,
+        extra_args=_formal_n4_gate_args(),
+    )
+    assert save.returncode == 0, save.stderr
+    assert "+scale=robofactory_multi_robot_32gpu_n4_fullmodel_gate" in save.stdout
+    assert "resume=/tmp/fastwam-whole-file-cache/cpfs/" in save.stdout
+
+    output_root = base["FASTWAM_FORMAL_OUTPUT_DIR"]
+    state_root = f"{output_root}/checkpoints/state/step_000002"
+    load = _run_launcher(
+        nproc=None,
+        env_updates={
+            **base,
+            "FASTWAM_N4_FULLMODEL_GATE_PHASE": "load",
+            "FASTWAM_FORMAL_RESUME_STATE_DIR": state_root,
+            "FASTWAM_FORMAL_RESUME_STATE_MANIFEST": (
+                f"{output_root}/checkpoints/state/step_000002.state-tree.json"
+            ),
+            "FASTWAM_FORMAL_RESUME_STATE_MANIFEST_SHA256": "8" * 64,
+            "FASTWAM_FORMAL_RESUME_TRAINER_STATE_SHA256": "9" * 64,
+        },
+        extra_args=_formal_n4_gate_args(),
+    )
+    assert load.returncode == 0, load.stderr
+    assert f"resume={state_root}" in load.stdout
+
+    missing_phase = _run_launcher(
+        nproc=None,
+        env_updates={**base, "FASTWAM_N4_FULLMODEL_GATE_PHASE": None},
+        extra_args=_formal_n4_gate_args(),
+    )
+    assert missing_phase.returncode != 0
+    assert "requires FASTWAM_N4_FULLMODEL_GATE_PHASE" in (missing_phase.stderr or "")
+
+    inherited_main_gate = _run_launcher(
+        nproc=None,
+        env_updates={
+            **base,
+            "FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT": "/oss-chengjuntao/stale",
+            "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256": "7" * 64,
+        },
+        extra_args=_formal_n4_gate_args(),
+    )
+    assert inherited_main_gate.returncode != 0
+    assert "cannot depend on or inherit a prior N=4 gate identity" in (
+        inherited_main_gate.stderr or ""
+    )
+
+
+def test_formal_main_requires_n4_gate_authorization_identity() -> None:
+    base = _formal_scale_environment()
+    for missing_name in (
+        "FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT",
+        "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256",
+    ):
+        result = _run_launcher(
+            nproc=None,
+            env_updates={**base, missing_name: None},
+            extra_args=_formal_scale_args(),
+        )
+        assert result.returncode != 0
+        assert "N=4" in (result.stderr or "") or "N4" in (result.stderr or "")
+
+
 def test_formal_32gpu_cli_allowlist_seals_treatment_and_schedule() -> None:
     base = _formal_scale_environment()
     forbidden = [
@@ -647,6 +732,10 @@ def test_formal_non_dry_requires_clean_checkout_and_exact_env_preflight() -> Non
             "#!/usr/bin/env bash\n"
             "printf 'PYTHON %s\\n' \"$*\" >> \"$FASTWAM_TEST_PYTHON_LOG\"\n"
             "case \"${1-}\" in\n"
+            "  */finalize_n4_fullmodel_gate.py)\n"
+            "    [[ \"${2-}\" == --phase && \"${3-}\" == validate-binding ]] || exit 95\n"
+            "    exit 0\n"
+            "    ;;\n"
             "  */reserve_dlc_run.py)\n"
             "    [[ \"${2-}\" == --mode && \"${3-}\" == validate ]] || exit 96\n"
             "    exit 0\n"
@@ -700,11 +789,14 @@ def test_formal_non_dry_requires_clean_checkout_and_exact_env_preflight() -> Non
         assert clean.returncode == 61
         assert "Python environment preflight failed with status=61" in (clean.stderr or "")
         python_calls = clean_python_log.read_text(encoding="utf-8").splitlines()
-        assert len(python_calls) == 2, python_calls
-        assert "reserve_dlc_run.py --mode validate" in python_calls[0]
-        assert "--timeout 300 --resume-timeout 21600" in python_calls[0]
-        assert "--training-env-bundle-manifest-sha256 " + "6" * 64 in python_calls[0]
-        assert "validate_python_environment.py --pyproject" in python_calls[1]
+        assert len(python_calls) == 3, python_calls
+        assert "finalize_n4_fullmodel_gate.py --phase validate-binding" in python_calls[0]
+        assert "--expected-complete-sha256 " + "7" * 64 in python_calls[0]
+        assert "reserve_dlc_run.py --mode validate" in python_calls[1]
+        assert "--timeout 300 --resume-timeout 21600" in python_calls[1]
+        assert "--training-env-bundle-manifest-sha256 " + "6" * 64 in python_calls[1]
+        assert "--n4-fullmodel-gate-complete-sha256 " + "7" * 64 in python_calls[1]
+        assert "validate_python_environment.py --pyproject" in python_calls[2]
         assert all("--mode owner" not in call for call in python_calls)
 
 

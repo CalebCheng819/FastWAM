@@ -49,6 +49,18 @@ save_training_state: true
 # state directory into an immutable JSON manifest (path, bytes, SHA-256).
 seal_training_state: false
 save_final_checkpoint: true
+# Formal 32-GPU training publishes a self-contained run-level terminal seal
+# only after the final checkpoint has been strongly read back. Diagnostic and
+# gate phases opt in explicitly so an ordinary local run cannot claim formal
+# completion.
+seal_training_run: false
+# This flag is owned by the committed N=4 gate scale. It is never a user-side
+# Hydra override surface in the formal launcher.
+formal_n4_fullmodel_gate: false
+# Rehash full weight files while building a formal terminal seal. State shards
+# are already hashed by the adjacent state-tree manifest and are fully re-read
+# by the fresh-process gate/resume validator.
+terminal_rehash_weights: true
 # Operational watchdogs.  Formal multi-node runs override both with a window
 # sized for large checkpoint publication; they are intentionally excluded from
 # the scientific full-state resume contract.

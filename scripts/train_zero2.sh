@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 FORMAL_SCALE_NAME="robofactory_multi_robot_32gpu"
+FORMAL_N4_GATE_SCALE_NAME="robofactory_multi_robot_32gpu_n4_fullmodel_gate"
 FORMAL_CPFS_PREFIX="/cpfs/user/chengjuntao"
 FORMAL_OSS_PREFIX="/oss-chengjuntao"
 FORMAL_LOCAL_CACHE_ROOT="/tmp/fastwam-whole-file-cache"
@@ -220,14 +221,19 @@ for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
 done
 
 FORMAL_32GPU=0
-if [[ "${SCALE_PROFILE}" == "${FORMAL_SCALE_NAME}" ]]; then
+FORMAL_N4_FULLMODEL_GATE=0
+if [[ "${SCALE_PROFILE}" == "${FORMAL_SCALE_NAME}" || \
+  "${SCALE_PROFILE}" == "${FORMAL_N4_GATE_SCALE_NAME}" ]]; then
   FORMAL_32GPU=1
+  if [[ "${SCALE_PROFILE}" == "${FORMAL_N4_GATE_SCALE_NAME}" ]]; then
+    FORMAL_N4_FULLMODEL_GATE=1
+  fi
   if ((NUM_MACHINES != 4 || NPROC_PER_NODE != 8 || GLOBAL_WORLD_SIZE != 32)); then
-    echo "Error: +scale=${FORMAL_SCALE_NAME} requires DLC WORLD_SIZE=4 nodes, NPROC_PER_NODE=8, and global world size 32; resolved ${NUM_MACHINES}x${NPROC_PER_NODE}=${GLOBAL_WORLD_SIZE}." >&2
+    echo "Error: +scale=${SCALE_PROFILE} requires DLC WORLD_SIZE=4 nodes, NPROC_PER_NODE=8, and global world size 32; resolved ${NUM_MACHINES}x${NPROC_PER_NODE}=${GLOBAL_WORLD_SIZE}." >&2
     exit 1
   fi
   if ((MACHINE_RANK < 0 || MACHINE_RANK > 3)); then
-    echo "Error: +scale=${FORMAL_SCALE_NAME} requires node RANK in [0,3], got ${MACHINE_RANK}." >&2
+    echo "Error: +scale=${SCALE_PROFILE} requires node RANK in [0,3], got ${MACHINE_RANK}." >&2
     exit 1
   fi
 fi
@@ -265,6 +271,7 @@ FORMAL_RESUME_TRAINER_STATE_SHA256=""
 FORMAL_RESUME_MODE="fresh_weights"
 ERDMA_BOOTSTRAP_SHA256=""
 TRAINING_ENV_BUNDLE_MANIFEST_SHA256=""
+N4_FULLMODEL_GATE_COMPLETE_SHA256=""
 LOCAL_CPFS_BUNDLE_DIR=""
 LOCAL_OSS_BUNDLE_DIR=""
 LOCAL_DERIVED_STATS_PATH=""
@@ -280,7 +287,12 @@ export FASTWAM_PYTHON="${PYTHON_TOOL}"
 
 if ((FORMAL_32GPU)); then
   if [[ "${TASK_BASENAME}" != robofactory_multi_robot_* ]]; then
-    echo "Error: +scale=${FORMAL_SCALE_NAME} is reserved for a RoboFactory multi-robot task." >&2
+    echo "Error: +scale=${SCALE_PROFILE} is reserved for a RoboFactory multi-robot task." >&2
+    exit 1
+  fi
+  if ((FORMAL_N4_FULLMODEL_GATE)) && \
+    [[ "${TASK_BASENAME}" != "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4" ]]; then
+    echo "Error: the committed N=4 full-model gate permits only the VG1/HUB1/GAU1 task." >&2
     exit 1
   fi
   for arg in "${EXTRA_ARGS[@]}"; do
@@ -316,20 +328,33 @@ if ((FORMAL_32GPU)); then
       +scale=*)
         formal_scale="${arg#+scale=}"
         formal_scale="${formal_scale%.yaml}"
-        if [[ "${formal_scale}" != "${FORMAL_SCALE_NAME}" ]]; then
-          echo "Error: formal 32-GPU CLI scale must be +scale=${FORMAL_SCALE_NAME}." >&2
+        if [[ "${formal_scale}" != "${SCALE_PROFILE}" ]]; then
+          echo "Error: formal 32-GPU CLI scale must be +scale=${SCALE_PROFILE}." >&2
           exit 1
         fi
         formal_scale_selector_count=$((formal_scale_selector_count + 1))
         ;;
       *)
-        echo "Error: formal 32-GPU CLI allowlist accepts only one explicit task=<2x2x2-arm> and +scale=${FORMAL_SCALE_NAME}; user override/flag '${arg}' is forbidden because it can change the sealed treatment, data, schedule, eval, or checkpoint contract." >&2
+        echo "Error: formal 32-GPU CLI allowlist accepts only one explicit task selector and +scale=${SCALE_PROFILE}; user override/flag '${arg}' is forbidden because it can change the sealed treatment, data, schedule, eval, or checkpoint contract." >&2
         exit 1
         ;;
     esac
   done
   if ((formal_task_selector_count != 1 || formal_scale_selector_count != 1)); then
     echo "Error: formal 32-GPU CLI requires exactly one task selector and one fixed scale selector; got task=${formal_task_selector_count} scale=${formal_scale_selector_count}." >&2
+    exit 1
+  fi
+
+  n4_gate_phase="${FASTWAM_N4_FULLMODEL_GATE_PHASE:-}"
+  n4_gate_phase="${n4_gate_phase,,}"
+  if ((FORMAL_N4_FULLMODEL_GATE)); then
+    if [[ "${n4_gate_phase}" != "save" && "${n4_gate_phase}" != "load" ]]; then
+      echo "Error: the N=4 gate scale requires FASTWAM_N4_FULLMODEL_GATE_PHASE=save or load." >&2
+      exit 1
+    fi
+    export FASTWAM_N4_FULLMODEL_GATE_PHASE="${n4_gate_phase}"
+  elif [[ -n "${n4_gate_phase}" ]]; then
+    echo "Error: FASTWAM_N4_FULLMODEL_GATE_PHASE is forbidden for the mixed N=2/3/4 main scale." >&2
     exit 1
   fi
 
@@ -419,6 +444,22 @@ if ((FORMAL_32GPU)); then
     echo "Error: formal resume manifest/hash variables require FASTWAM_FORMAL_RESUME_STATE_DIR." >&2
     exit 1
   fi
+  if ((FORMAL_N4_FULLMODEL_GATE)); then
+    expected_gate_state="${FORMAL_OUTPUT_DIR}/checkpoints/state/step_000002"
+    expected_gate_manifest="${FORMAL_OUTPUT_DIR}/checkpoints/state/step_000002.state-tree.json"
+    if [[ "${n4_gate_phase}" == "save" ]]; then
+      if [[ -n "${FORMAL_RESUME_STATE_DIR}" || -n "${FORMAL_RESUME_STATE_MANIFEST}" || \
+        -n "${FORMAL_RESUME_STATE_MANIFEST_SHA256}" || \
+        -n "${FORMAL_RESUME_TRAINER_STATE_SHA256}" ]]; then
+        echo "Error: the N=4 gate save phase must start from the verified official weight checkpoint." >&2
+        exit 1
+      fi
+    elif [[ "${FORMAL_RESUME_STATE_DIR}" != "${expected_gate_state}" || \
+      "${FORMAL_RESUME_STATE_MANIFEST}" != "${expected_gate_manifest}" ]]; then
+      echo "Error: the N=4 gate load phase must restore this run's exact step_000002 full state." >&2
+      exit 1
+    fi
+  fi
 
   cpfs_source_root="${FASTWAM_CPFS_BUNDLE_SOURCE_ROOT:?FASTWAM_CPFS_BUNDLE_SOURCE_ROOT is required}"
   cpfs_bundle_manifest="${FASTWAM_CPFS_BUNDLE_MANIFEST:?FASTWAM_CPFS_BUNDLE_MANIFEST is required}"
@@ -502,6 +543,7 @@ if ((FORMAL_32GPU)); then
     echo "Error: formal run requires the verified Wan2.2 VAE SHA-256 ${OFFICIAL_WAN22_VAE_SHA256}." >&2
     exit 1
   fi
+  export FASTWAM_STATS_SHA256="${OFFICIAL_N234_TRAIN_S42_STATS_SHA256}"
   if [[ "${FASTWAM_LOCAL_EXPECTED_H5_FILES:-24}" != "24" ]]; then
     echo "Error: formal RoboFactory N=2/3/4 bundle requires exactly 24 H5 files." >&2
     exit 1
@@ -564,6 +606,34 @@ if ((FORMAL_32GPU)); then
     exit 1
   fi
 
+  if ((FORMAL_N4_FULLMODEL_GATE)); then
+    if [[ -n "${FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT:-}" || \
+      -n "${FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256:-}" ]]; then
+      echo "Error: the N=4 gate cannot depend on or inherit a prior N=4 gate identity." >&2
+      exit 1
+    fi
+  else
+    n4_gate_root="${FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT:?mixed N=2/3/4 main training requires FASTWAM_N4_FULLMODEL_GATE_OUTPUT_ROOT}"
+    if [[ "${n4_gate_root}" != "${FORMAL_OSS_PREFIX}/"* ]] || \
+      [[ "${n4_gate_root}" == "${FORMAL_OUTPUT_DIR}" || "${n4_gate_root}" == "${FORMAL_OUTPUT_DIR}/"* ]]; then
+      echo "Error: the N=4 full-model gate root must be an independent path under ${FORMAL_OSS_PREFIX}." >&2
+      exit 1
+    fi
+    require_sha256_environment FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256 || exit 1
+    N4_FULLMODEL_GATE_COMPLETE_SHA256="${FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256}"
+    require_sha256_environment FASTWAM_OUTPUT_ZERO_CHECKPOINT_SMOKE_SHA256 || exit 1
+    if ((!LAUNCH_DRY_RUN_ENABLED)); then
+      "${PYTHON_TOOL}" "${SCRIPT_DIR}/finalize_n4_fullmodel_gate.py" \
+        --phase validate-binding \
+        --output-root "${n4_gate_root}" \
+        --allowed-prefix "${FORMAL_OSS_PREFIX}" \
+        --forbidden-output-root "${FORMAL_OUTPUT_DIR}" \
+        --expected-complete-sha256 "${N4_FULLMODEL_GATE_COMPLETE_SHA256}" >/dev/null
+    else
+      echo "[formal_gate] dry-run records but does not authorize N=4 gate COMPLETE ${N4_FULLMODEL_GATE_COMPLETE_SHA256}." >&2
+    fi
+  fi
+
   LOCAL_CPFS_BUNDLE_DIR="${FASTWAM_LOCAL_CACHE_ROOT%/}/cpfs/${FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256}"
   if ((GAUSSIAN_ENABLED)); then
     LOCAL_OSS_BUNDLE_DIR="${FASTWAM_LOCAL_CACHE_ROOT%/}/oss/${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256}"
@@ -612,6 +682,7 @@ if ((FORMAL_32GPU)); then
     --pyproject-sha256 "${PYPROJECT_SHA256}"
     --output-storage "${OUTPUT_STORAGE_KIND}"
     --output-zero-checkpoint-smoke-sha256 "${OUTPUT_ZERO_SMOKE_SHA256}"
+    --n4-fullmodel-gate-complete-sha256 "${N4_FULLMODEL_GATE_COMPLETE_SHA256}"
     --resume-state-dir "${FORMAL_RESUME_STATE_DIR}"
     --resume-state-manifest "${FORMAL_RESUME_STATE_MANIFEST}"
     --resume-state-manifest-sha256 "${FORMAL_RESUME_STATE_MANIFEST_SHA256}"
@@ -834,5 +905,9 @@ else
   # torchrun's global process values. Accelerate recreates them from CLI args.
   unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK
   cd "${REPO_ROOT}"
-  exec "${ACCELERATE_COMMAND[@]}"
+  if ((FORMAL_N4_FULLMODEL_GATE)); then
+    "${ACCELERATE_COMMAND[@]}"
+  else
+    exec "${ACCELERATE_COMMAND[@]}"
+  fi
 fi

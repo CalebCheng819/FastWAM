@@ -10,6 +10,7 @@ gradient_accumulation_steps: 1
 # node-local /tmp official-checkpoint dependency into their final weights.
 checkpoint_state_kind: full
 seal_training_state: true
+seal_training_run: true
 
 # Rank zero may need to serialize, copy, strongly read back, and hash a full
 # multi-billion-parameter checkpoint on a shared object/filesystem mount.

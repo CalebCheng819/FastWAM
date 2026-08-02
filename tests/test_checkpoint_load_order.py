@@ -3,6 +3,7 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,6 +23,7 @@ def _trainer(resume: Path, model=None):
     trainer.resume = str(resume)
     trainer.model = _WeightModel() if model is None else model
     trainer._weight_checkpoint_loaded_before_prepare = False
+    trainer.formal_n4_fullmodel_gate = False
     return trainer
 
 
@@ -132,6 +134,8 @@ def test_saved_trainer_metadata_contains_run_contract(tmp_path):
     trainer.epoch = 2
     trainer.batch_in_epoch = 9
     trainer._uses_agent_count_batch_sampler = False
+    trainer._evaluation_records = [{"step": 10, "val_loss": 1.5}]
+    trainer._last_step_metrics = {"step": 17, "loss": 0.5}
     trainer._training_state_contract = lambda: {
         "contract_version": 1,
         "treatment": {"video_gen": True, "hub": True, "gaussian": True},
@@ -146,6 +150,27 @@ def test_saved_trainer_metadata_contains_run_contract(tmp_path):
         "hub": True,
         "gaussian": True,
     }
+    assert payload["evaluation_records"] == [{"step": 10, "val_loss": 1.5}]
+    assert payload["last_step_metrics"] == {"step": 17, "loss": 0.5}
+
+
+def test_resume_at_max_steps_does_not_republish_existing_checkpoint():
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer._set_dit_only_train_mode = lambda: None
+    trainer._set_train_data_epoch = lambda epoch: None
+    trainer.accelerator = SimpleNamespace(unwrap_model=lambda model: model)
+    trainer.model = object()
+    trainer.max_steps = 5000
+    trainer.global_step = 5000
+    trainer.epoch = 3
+    trainer.train_loader = []
+    trainer.formal_n4_fullmodel_gate = False
+    trainer.save_final_checkpoint_enabled = True
+    trainer.save_checkpoint = lambda: pytest.fail(
+        "resume at max_steps must not recreate an exclusive checkpoint"
+    )
+
+    trainer.train()
 
 
 def test_weights_checkpoint_is_strongly_read_back_and_complete_last(

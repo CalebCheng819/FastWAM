@@ -618,7 +618,7 @@ def test_train_only_stats_exclude_validation_trajectory_values(tmp_path):
     assert payload["action"]["count"] == 80
 
 
-def test_declared_agent_count_scope_rejects_unexpected_cardinality(tmp_path):
+def test_required_agent_counts_select_scope_and_preserve_full_source_provenance(tmp_path):
     one_task = "Synthetic1RobotTask-rf"
     two_task = "Synthetic2RobotTask-rf"
     one_instruction = "one robot completes the synthetic task"
@@ -641,20 +641,68 @@ def test_declared_agent_count_scope_rejects_unexpected_cardinality(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match=r"unexpected=\[1\]"):
-        RoboFactoryMultiRobotDataset(
-            str(tmp_path),
-            video_size=(32, 32),
-            val_set_proportion=0.0,
-            is_training_set=True,
-            required_agent_counts=[2],
-            pretrained_norm_stats=str(stats_path),
-            text_embedding_cache_dir=str(cache_dir),
-            instruction_map={
-                one_task: one_instruction,
-                two_task: two_instruction,
-            },
+    selected = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        val_set_proportion=0.0,
+        is_training_set=True,
+        required_agent_counts=[2],
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={
+            one_task: one_instruction,
+            two_task: two_instruction,
+        },
+    )
+
+    assert set(selected.agent_counts) == {2}
+    assert selected._source_metadata["cardinality"] == {
+        "agent_counts": [1, 2],
+        "trajectories_by_agent_count": {"1": 1, "2": 1},
+    }
+    assert selected._normalization_fit_expected["cardinality"] == {
+        "agent_counts": [1, 2],
+        "trajectories_by_agent_count": {"1": 1, "2": 1},
+    }
+
+
+def test_n4_gate_selection_and_main_n234_scope_use_same_source(tmp_path):
+    instructions = {}
+    cache_dir = None
+    for count in (2, 3, 4):
+        task_name = f"Synthetic{count}RobotTask-rf"
+        instruction = f"{count} robots complete the synthetic task"
+        _, cache_dir = _write_demo(
+            tmp_path,
+            task_name=task_name,
+            num_agents=count,
+            instruction=instruction,
         )
+        instructions[task_name] = instruction
+    stats_path = tmp_path / "unified_stats.json"
+    stats_path.write_text(
+        json.dumps(compute_robofactory_stats(str(tmp_path))),
+        encoding="utf-8",
+    )
+    common = {
+        "video_size": (32, 32),
+        "val_set_proportion": 0.0,
+        "is_training_set": True,
+        "pretrained_norm_stats": str(stats_path),
+        "text_embedding_cache_dir": str(cache_dir),
+        "instruction_map": instructions,
+    }
+
+    gate = RoboFactoryMultiRobotDataset(
+        str(tmp_path), required_agent_counts=[4], **common
+    )
+    main = RoboFactoryMultiRobotDataset(
+        str(tmp_path), required_agent_counts=[2, 3, 4], **common
+    )
+
+    assert set(gate.agent_counts) == {4}
+    assert set(main.agent_counts) == {2, 3, 4}
+    assert gate._source_metadata == main._source_metadata
 
 
 def test_all_indexed_prompt_caches_are_preflighted_at_init(tmp_path):

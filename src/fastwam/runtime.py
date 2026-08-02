@@ -441,13 +441,27 @@ def run_training(cfg: DictConfig):
         is_main_process=rank == 0,
     )
     misc.register_work_dir(cfg.output_dir)
+    formal_n4_gate = bool(cfg.get("formal_n4_fullmodel_gate", False))
+    gate_phase = os.environ.get("FASTWAM_N4_FULLMODEL_GATE_PHASE", "").strip().lower()
+    if formal_n4_gate:
+        if gate_phase not in {"save", "load"}:
+            raise RuntimeError(
+                "formal N=4 gate requires FASTWAM_N4_FULLMODEL_GATE_PHASE=save or load"
+            )
+        config_filename = f"config.{gate_phase}.yaml"
+    else:
+        if gate_phase:
+            raise RuntimeError(
+                "FASTWAM_N4_FULLMODEL_GATE_PHASE is forbidden outside the committed gate scale"
+            )
+        config_filename = "config.yaml"
     config_payload = OmegaConf.to_yaml(cfg, resolve=True, sort_keys=True).encode("utf-8")
     try:
         config_timeout = float(os.environ.get("FASTWAM_CONFIG_BARRIER_TIMEOUT", "300"))
     except ValueError as error:
         raise RuntimeError("FASTWAM_CONFIG_BARRIER_TIMEOUT must be numeric") from error
     config_sha256 = publish_rank_zero_file(
-        Path(cfg.output_dir) / "config.yaml",
+        Path(cfg.output_dir) / config_filename,
         config_payload,
         rank=rank,
         world_size=world_size,
@@ -483,7 +497,21 @@ def run_training(cfg: DictConfig):
         train_dataset=train_ds,
         val_dataset=val_ds,
     )
+    if formal_n4_gate:
+        if gate_phase == "save":
+            trainer.train()
+            trainer.publish_n4_gate_save_proof()
+        else:
+            trainer.publish_n4_gate_load_proof()
+        trainer._finish_wandb()
+        return
+
     trainer.train()
+    trainer._finish_wandb()
+    trainer.publish_training_terminal_artifacts(
+        config_relative_path=config_filename,
+        config_sha256=config_sha256,
+    )
 
 def run_inference(cfg: DictConfig):
     setup_logging(log_level=logging.INFO)

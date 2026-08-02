@@ -1,0 +1,34 @@
+# @package _global_
+
+# Real-model authorization gate for the mixed N=2/3/4 formal arm. This is a
+# separate committed scale profile, not a user override of the main schedule.
+defaults:
+  - robofactory_multi_robot_32gpu
+  - _self_
+
+formal_n4_fullmodel_gate: true
+seal_training_run: false
+
+# Two optimizer updates catch the ZeRO FP32-master update path. The final step
+# writes one full model checkpoint and one sealed Accelerate/ZeRO-2 state tree;
+# a fresh process world reloads that state before the gate can be sealed.
+max_steps: 2
+save_every: 2
+save_final_checkpoint: true
+save_training_state: true
+seal_training_state: true
+log_every: 1
+eval_every: 0
+offline_eval_num_samples: 0
+
+# A native N=4 batch has no padded/masked capacity. With horizon=32 and the
+# fixed 128 real-agent-action token budget, the sampler emits micro-batch 1.
+batch_size: 1
+agent_action_token_budget: 128
+gradient_accumulation_steps: 1
+
+data:
+  train:
+    required_agent_counts: [4]
+  val:
+    required_agent_counts: [4]

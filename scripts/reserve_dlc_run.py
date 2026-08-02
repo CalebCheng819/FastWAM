@@ -114,6 +114,9 @@ def _identity(args: argparse.Namespace) -> dict[str, object]:
         "image_digest": image_digest or None,
         "image_digest_status": args.image_digest_status,
         "image_reference": args.image_reference,
+        "n4_fullmodel_gate_complete_sha256": _optional_sha256(
+            args.n4_fullmodel_gate_complete_sha256
+        ),
         "oss_bundle_manifest_sha256": _optional_sha256(args.oss_bundle_manifest_sha256),
         "output_storage": args.output_storage,
         "output_zero_checkpoint_smoke_sha256": _optional_sha256(
@@ -443,6 +446,7 @@ def main() -> None:
     parser.add_argument("--pyproject-sha256", required=True)
     parser.add_argument("--output-storage", choices=("cpfs", "oss_experimental"), required=True)
     parser.add_argument("--output-zero-checkpoint-smoke-sha256", default="")
+    parser.add_argument("--n4-fullmodel-gate-complete-sha256", default="")
     parser.add_argument("--resume-state-dir", default="")
     parser.add_argument("--resume-state-manifest", default="")
     parser.add_argument("--resume-state-manifest-sha256", default="")

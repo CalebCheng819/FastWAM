@@ -353,3 +353,19 @@ def test_formal_32gpu_profile_changes_only_scale_controls(monkeypatch):
 
     for key in ("data", "model", "seed", "max_steps", "resume"):
         assert scaled[key] == baseline[key]
+
+
+def test_n4_fullmodel_gate_profile_composes_exact_cardinality_scope(monkeypatch):
+    _set_gaussian_env(monkeypatch)
+    cfg = _compose_arm(
+        "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4",
+        "+scale=robofactory_multi_robot_32gpu_n4_fullmodel_gate",
+    )
+
+    assert cfg["formal_n4_fullmodel_gate"] is True
+    assert cfg["seal_training_run"] is False
+    assert cfg["max_steps"] == 2
+    assert cfg["gradient_accumulation_steps"] == 1
+    assert cfg["agent_action_token_budget"] == 128
+    assert cfg["data"]["train"]["required_agent_counts"] == [4]
+    assert cfg["data"]["val"]["required_agent_counts"] == [4]

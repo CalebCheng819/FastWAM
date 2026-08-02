@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,23 @@ from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, Se
 from torch.utils.data import DataLoader
 
 from .utils.fs import ensure_dir
+from .formal_artifacts import (
+    N4_GATE_GLOBAL_TRAIN_BATCH_SIZE,
+    N4_GATE_GRADIENT_ACCUMULATION_STEPS,
+    N4_GATE_LOCAL_MICRO_BATCH_SIZE,
+    N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+    N4_GATE_MAX_PEAK_RESERVED_BYTES,
+    N4_GATE_TRAIN_STEPS,
+    N4_GATE_WORLD_SIZE,
+    canonical_json_sha256,
+    next_rng_sample,
+    normalize_formal_evaluation_records,
+    publish_exclusive_json,
+    publish_failure_marker,
+    publish_training_terminal_seal,
+    read_canonical_json,
+    state_fingerprints,
+)
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
 from .utils.samplers import (
@@ -111,6 +129,32 @@ class Wan22Trainer:
         self.save_training_state_enabled = bool(cfg.get("save_training_state", True))
         self.seal_training_state = bool(cfg.get("seal_training_state", False))
         self.save_final_checkpoint_enabled = bool(cfg.get("save_final_checkpoint", True))
+        self.seal_training_run = bool(cfg.get("seal_training_run", False))
+        self.terminal_rehash_weights = bool(cfg.get("terminal_rehash_weights", True))
+        self.formal_n4_fullmodel_gate = bool(
+            cfg.get("formal_n4_fullmodel_gate", False)
+        )
+        gate_phase = os.environ.get("FASTWAM_N4_FULLMODEL_GATE_PHASE", "").strip().lower()
+        if self.formal_n4_fullmodel_gate:
+            if gate_phase not in {"save", "load"}:
+                raise ValueError(
+                    "formal_n4_fullmodel_gate requires "
+                    "FASTWAM_N4_FULLMODEL_GATE_PHASE=save or load"
+                )
+            self.n4_fullmodel_gate_phase = gate_phase
+            self._gate_process_nonce = secrets.token_hex(16)
+            self._gate_process_pid = os.getpid()
+            self._gate_process_start_ticks = self._process_start_ticks()
+        else:
+            if gate_phase:
+                raise ValueError(
+                    "FASTWAM_N4_FULLMODEL_GATE_PHASE is forbidden outside the "
+                    "committed N=4 gate scale"
+                )
+            self.n4_fullmodel_gate_phase = None
+        self._gate_pre_load_fingerprints = None
+        self._last_step_metrics: dict[str, object] = {}
+        self._evaluation_records: list[dict[str, object]] = []
         self.process_group_timeout_seconds = int(
             cfg.get("process_group_timeout_seconds", 1800)
         )
@@ -250,6 +294,9 @@ class Wan22Trainer:
         self._init_wandb()
         self._resume_training_state_after_prepare()
 
+        if self.formal_n4_fullmodel_gate:
+            self._validate_n4_fullmodel_gate_contract()
+
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
 
@@ -283,6 +330,481 @@ class Wan22Trainer:
             "(real sampler batch sizes vary by agent count).",
             configured,
         )
+
+    @staticmethod
+    def _process_start_ticks() -> int:
+        """Disambiguate fresh process worlds even when Linux reuses a PID."""
+
+        fields = Path("/proc/self/stat").read_text(encoding="utf-8").split()
+        if len(fields) < 22:
+            raise RuntimeError("/proc/self/stat does not contain process start ticks")
+        return int(fields[21])
+
+    def _resolved_n4_gate_batch_accounting(self) -> dict[str, int]:
+        plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        if plugin is None:
+            raise RuntimeError("N=4 full-model gate requires the DeepSpeed plugin")
+        config = plugin.deepspeed_config
+        values = {
+            "global_train_batch_size": config.get("train_batch_size"),
+            "gradient_accumulation_steps": config.get(
+                "gradient_accumulation_steps"
+            ),
+            "local_micro_batch_size": config.get(
+                "train_micro_batch_size_per_gpu"
+            ),
+            "world_size": int(self.accelerator.num_processes),
+        }
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"N=4 gate requires a resolved positive integer {name}, got {value!r}"
+                )
+        expected = {
+            "global_train_batch_size": N4_GATE_GLOBAL_TRAIN_BATCH_SIZE,
+            "gradient_accumulation_steps": N4_GATE_GRADIENT_ACCUMULATION_STEPS,
+            "local_micro_batch_size": N4_GATE_LOCAL_MICRO_BATCH_SIZE,
+            "world_size": N4_GATE_WORLD_SIZE,
+        }
+        if values != expected:
+            raise ValueError(
+                f"N=4 gate DeepSpeed batch accounting mismatch: expected={expected} "
+                f"observed={values}"
+            )
+        zero_stage = config.get("zero_optimization", {}).get("stage")
+        if zero_stage != 2:
+            raise ValueError(f"N=4 gate requires DeepSpeed ZeRO stage 2, got {zero_stage!r}")
+        return values
+
+    def _validate_n4_fullmodel_gate_contract(self) -> None:
+        """Refuse any treatment, data, schedule, or topology drift in the gate."""
+
+        if self.seal_training_run:
+            raise ValueError(
+                "N=4 gate must defer run-level sealing until the fresh load process"
+            )
+        scalar_contract = {
+            "batch_size": (self.batch_size, 1),
+            "gradient_accumulation_steps": (self.gradient_accumulation_steps, 1),
+            "max_steps": (self.max_steps, 2),
+            "save_every": (self.save_every, 2),
+            "eval_every": (self.eval_every, 0),
+            "offline_eval_num_samples": (self.offline_eval_num_samples, 0),
+            "mixed_precision": (self.mixed_precision, "bf16"),
+            "checkpoint_state_kind": (self.checkpoint_state_kind, "full"),
+            "trainable_scope": (self.trainable_scope, "dit"),
+        }
+        mismatches = {
+            name: {"observed": observed, "expected": expected}
+            for name, (observed, expected) in scalar_contract.items()
+            if observed != expected
+        }
+        if mismatches:
+            raise ValueError(f"N=4 gate scalar contract mismatch: {mismatches}")
+        if not (
+            self.save_training_state_enabled
+            and self.seal_training_state
+            and self.save_final_checkpoint_enabled
+        ):
+            raise ValueError(
+                "N=4 gate requires final full weights, full state, and a sealed state tree"
+            )
+        if self.agent_action_token_budget != 128:
+            raise ValueError(
+                "N=4 gate requires agent_action_token_budget=128, got "
+                f"{self.agent_action_token_budget!r}"
+            )
+        if not self._uses_agent_count_batch_sampler:
+            raise ValueError("N=4 gate requires the native variable-agent batch sampler")
+        observed_counts = [int(value) for value in self.train_sampler.observed_agent_counts]
+        if observed_counts != [4]:
+            raise ValueError(f"N=4 gate sampler must observe only cardinality 4: {observed_counts}")
+        batch_sizes = {
+            int(key): int(value)
+            for key, value in self.train_sampler.batch_size_by_agent_count.items()
+        }
+        if batch_sizes != {4: 1}:
+            raise ValueError(f"N=4 gate sampler batch-size map mismatch: {batch_sizes}")
+        for label, dataset in (("train", self.train_dataset), ("val", self.val_dataset)):
+            counts = [int(value) for value in getattr(dataset, "required_agent_counts", [])]
+            if counts != [4]:
+                raise ValueError(
+                    f"N=4 gate {label} dataset must require exactly [4], got {counts}"
+                )
+            if not getattr(dataset, "load_future_video", False):
+                raise ValueError(f"N=4 gate {label} dataset must load future video")
+            if getattr(dataset, "gaussian_cache_dir", None) is None:
+                raise ValueError(f"N=4 gate {label} dataset must bind compact Gaussian cache")
+        model = self.accelerator.unwrap_model(self.model)
+        architecture_builder = getattr(model, "_multi_robot_architecture_metadata", None)
+        if not callable(architecture_builder):
+            raise TypeError("N=4 gate requires FastWAM multi-robot architecture metadata")
+        architecture = architecture_builder()
+        expected_architecture = {
+            "agent_set_representation": "native_variable_length_v1",
+            "hub_enabled": True,
+            "hub_token_policy": "ceil(hub_token_ratio*num_agents)",
+            "hub_token_ratio": 2.0,
+            "enable_gaussian": True,
+            "gaussian_shape": [13, 28, 40],
+        }
+        architecture_mismatches = {
+            key: {"observed": architecture.get(key), "expected": value}
+            for key, value in expected_architecture.items()
+            if architecture.get(key) != value
+        }
+        if architecture_mismatches:
+            raise ValueError(
+                f"N=4 gate architecture contract mismatch: {architecture_mismatches}"
+            )
+        action_expert = getattr(model, "action_expert", None)
+        if action_expert is None or action_expert.num_hub_tokens_for(4) != 8:
+            raise ValueError("N=4 gate requires dynamic K(4)=8 HubTokens")
+        if getattr(model, "training_mode", None) != "joint":
+            raise ValueError("N=4 gate requires joint VideoGen+action training")
+        if self.n4_fullmodel_gate_phase == "save":
+            expected_checkpoint_sha256 = os.environ.get(
+                "FASTWAM_OFFICIAL_CHECKPOINT_SHA256", ""
+            ).strip().lower()
+            loaded_checkpoint_sha256 = str(
+                getattr(model, "_loaded_base_checkpoint_sha256", "")
+            ).strip().lower()
+            if (
+                len(expected_checkpoint_sha256) != 64
+                or loaded_checkpoint_sha256 != expected_checkpoint_sha256
+            ):
+                raise RuntimeError(
+                    "N=4 gate save phase did not load the exact official checkpoint "
+                    f"before DeepSpeed prepare: expected={expected_checkpoint_sha256!r} "
+                    f"observed={loaded_checkpoint_sha256!r}"
+                )
+        self._resolved_n4_gate_batch_accounting()
+
+    def _n4_gate_sample_shapes(self, sample) -> dict[str, list[int]]:
+        required = {
+            "video": [1, 3, 9, 224, 320],
+            "action": [1, 4, 32, 8],
+            "agent_state": [1, 4, 18],
+            "agent_geometry": [1, 4, 7],
+            "agent_gaussian": [1, 4, 13, 28, 40],
+        }
+        observed = {}
+        for name, expected in required.items():
+            value = sample.get(name)
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(f"N=4 gate sample is missing tensor field {name!r}")
+            observed[name] = list(value.shape)
+            if observed[name] != expected:
+                raise ValueError(
+                    f"N=4 gate sample shape mismatch for {name}: "
+                    f"expected={expected} observed={observed[name]}"
+                )
+        counts = torch.as_tensor(sample.get("agent_count")).reshape(-1)
+        if counts.tolist() != [4]:
+            raise ValueError(f"N=4 gate sample must contain one real N=4 item: {counts.tolist()}")
+        if sample["agent_gaussian"].dtype != torch.float16:
+            raise TypeError(
+                "N=4 gate requires FP16 compact Gaussian input, got "
+                f"{sample['agent_gaussian'].dtype}"
+            )
+        return observed
+
+    @staticmethod
+    def _n4_gate_losses(loss, loss_dict) -> dict[str, float]:
+        if "loss_action" not in loss_dict or "loss_video" not in loss_dict:
+            raise RuntimeError(
+                "N=4 joint gate requires both loss_action and loss_video metrics"
+            )
+        losses = {
+            "total": float(loss.detach().float().item()),
+            "action": float(loss_dict["loss_action"]),
+            "video": float(loss_dict["loss_video"]),
+        }
+        if not all(np.isfinite(value) for value in losses.values()):
+            raise RuntimeError(f"N=4 gate produced non-finite losses: {losses}")
+        return losses
+
+    def _n4_gate_gradient_evidence(self, grad_norm) -> dict[str, object]:
+        norm = float(torch.as_tensor(grad_norm).detach().float().item())
+        distributed_type = getattr(self.accelerator, "distributed_type", "")
+        distributed_name = str(getattr(distributed_type, "name", distributed_type))
+        if distributed_name.rsplit(".", 1)[-1].upper() == "DEEPSPEED":
+            # Accelerate 1.12 calls DeepSpeedEngineWrapper.backward(), whose
+            # implementation performs engine.step() (including clipping and
+            # zero_grad) before returning.  Parameter .grad tensors are
+            # therefore intentionally unavailable here.  clip_grad_norm_ in
+            # Accelerate's DeepSpeed branch returns engine.get_global_grad_norm(),
+            # which is the supported post-step evidence for this path.
+            if not np.isfinite(norm) or norm <= 0.0:
+                raise RuntimeError(
+                    "N=4 gate produced missing/non-positive DeepSpeed global "
+                    f"gradient norm: {norm}"
+                )
+            return {
+                "all_finite": True,
+                "norm": norm,
+                "source": "deepspeed_global_grad_norm",
+            }
+
+        tensor_count = 0
+        all_finite = True
+        for parameter in self.model.parameters():
+            gradient = parameter.grad
+            if gradient is None:
+                continue
+            tensor_count += 1
+            if not bool(torch.isfinite(gradient).all().item()):
+                all_finite = False
+                break
+        if tensor_count <= 0 or not all_finite or not np.isfinite(norm) or norm <= 0.0:
+            raise RuntimeError(
+                "N=4 gate produced missing/non-finite gradients: "
+                f"tensor_count={tensor_count} all_finite={all_finite} norm={norm}"
+            )
+        return {
+            "all_finite": True,
+            "norm": norm,
+            "source": "parameter_grad_scan",
+            "tensor_count": tensor_count,
+        }
+
+    def _n4_gate_proof_dir(self) -> Path:
+        proof_dir = Path(self.output_dir) / "gate-proofs"
+        proof_dir.mkdir(parents=True, exist_ok=True)
+        if proof_dir.is_symlink() or not proof_dir.is_dir():
+            raise ValueError(f"N=4 gate proof root must be a non-symlink directory: {proof_dir}")
+        return proof_dir
+
+    def _write_n4_gate_step_proof(
+        self,
+        *,
+        step: int,
+        sample_shapes: dict[str, list[int]],
+        losses: dict[str, float],
+        gradients: dict[str, object],
+    ) -> None:
+        if not torch.cuda.is_available() or self.accelerator.device.type != "cuda":
+            raise RuntimeError("N=4 full-model gate requires CUDA on every rank")
+        allocated = int(torch.cuda.max_memory_allocated(self.accelerator.device))
+        reserved = int(torch.cuda.max_memory_reserved(self.accelerator.device))
+        device_properties = torch.cuda.get_device_properties(self.accelerator.device)
+        total_device_bytes = int(device_properties.total_memory)
+        allocated_limit = min(
+            N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+            total_device_bytes * 90 // 100,
+        )
+        reserved_limit = min(
+            N4_GATE_MAX_PEAK_RESERVED_BYTES,
+            total_device_bytes * 95 // 100,
+        )
+        if allocated > allocated_limit:
+            raise RuntimeError(
+                f"N=4 gate peak allocated memory exceeded: {allocated} > {allocated_limit} "
+                f"for total_device_bytes={total_device_bytes}"
+            )
+        if reserved > reserved_limit:
+            raise RuntimeError(
+                f"N=4 gate peak reserved memory exceeded: {reserved} > {reserved_limit} "
+                f"for total_device_bytes={total_device_bytes}"
+            )
+        model = self.accelerator.unwrap_model(self.model)
+        architecture = model._multi_robot_architecture_metadata()
+        payload = {
+            "agent_count": 4,
+            "batch_accounting": self._resolved_n4_gate_batch_accounting(),
+            "gradients": gradients,
+            "hub_token_policy": architecture["hub_token_policy"],
+            "losses": losses,
+            "memory": {
+                "device_name": str(device_properties.name),
+                "effective_max_allocated_bytes": allocated_limit,
+                "effective_max_reserved_bytes": reserved_limit,
+                "peak_allocated_bytes": allocated,
+                "peak_reserved_bytes": reserved,
+                "required_max_allocated_bytes": N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+                "required_max_reserved_bytes": N4_GATE_MAX_PEAK_RESERVED_BYTES,
+                "total_device_bytes": total_device_bytes,
+            },
+            "num_hub_tokens": int(model.action_expert.num_hub_tokens_for(4)),
+            "phase": "train_step",
+            "process_nonce": self._gate_process_nonce,
+            "process_pid": self._gate_process_pid,
+            "process_start_ticks": self._gate_process_start_ticks,
+            "rank": int(self.accelerator.process_index),
+            "sample_shapes": sample_shapes,
+            "schema_name": "fastwam-n4-fullmodel-step-proof",
+            "schema_version": 1,
+            "step": int(step),
+            "world_size": int(self.accelerator.num_processes),
+        }
+        destination = self._n4_gate_proof_dir() / (
+            f"step-{int(step):06d}-rank-{self.accelerator.process_index:05d}.json"
+        )
+        publish_exclusive_json(destination, payload)
+
+    def _n4_gate_state_fingerprints(
+        self, *, require_optimizer_state: bool = True
+    ) -> dict[str, object]:
+        return state_fingerprints(
+            model=self.accelerator.unwrap_model(self.model),
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            global_step=self.global_step,
+            require_optimizer_state=require_optimizer_state,
+        )
+
+    def publish_n4_gate_save_proof(self) -> None:
+        if not self.formal_n4_fullmodel_gate or self.n4_fullmodel_gate_phase != "save":
+            raise RuntimeError("N=4 save proof is only valid in the committed gate save phase")
+        if self.global_step != N4_GATE_TRAIN_STEPS:
+            raise RuntimeError(
+                f"N=4 save proof requires step {N4_GATE_TRAIN_STEPS}, got {self.global_step}"
+            )
+        fingerprints = self._n4_gate_state_fingerprints()
+        payload = {
+            "batch_accounting": self._resolved_n4_gate_batch_accounting(),
+            "fingerprints": fingerprints,
+            "next_rng_sample": next_rng_sample(self.accelerator.device),
+            "phase": "save_after_full_checkpoint",
+            "process_nonce": self._gate_process_nonce,
+            "process_pid": self._gate_process_pid,
+            "process_start_ticks": self._gate_process_start_ticks,
+            "rank": int(self.accelerator.process_index),
+            "schema_name": "fastwam-n4-fullmodel-save-proof",
+            "schema_version": 1,
+            "world_size": int(self.accelerator.num_processes),
+        }
+        destination = self._n4_gate_proof_dir() / (
+            f"save-state-rank-{self.accelerator.process_index:05d}.json"
+        )
+        publish_exclusive_json(destination, payload)
+        self.accelerator.wait_for_everyone()
+
+    def publish_n4_gate_load_proof(self) -> None:
+        if not self.formal_n4_fullmodel_gate or self.n4_fullmodel_gate_phase != "load":
+            raise RuntimeError("N=4 load proof is only valid in the committed gate load phase")
+        if self.global_step != N4_GATE_TRAIN_STEPS:
+            raise RuntimeError(
+                f"N=4 load proof requires restored step {N4_GATE_TRAIN_STEPS}, got {self.global_step}"
+            )
+        if self._gate_pre_load_fingerprints is None:
+            raise RuntimeError("N=4 load phase did not capture pre-load state")
+        rank = int(self.accelerator.process_index)
+        expected_path = self._n4_gate_proof_dir() / f"save-state-rank-{rank:05d}.json"
+        expected, _, _ = read_canonical_json(expected_path)
+        restored = self._n4_gate_state_fingerprints()
+        expected_fingerprints = expected.get("fingerprints", {})
+        checks = {
+            key: restored.get(key) == expected_fingerprints.get(key)
+            for key in ("global_step", "model", "optimizer", "rng", "scheduler")
+        }
+        observed_next_rng_sample = next_rng_sample(self.accelerator.device)
+        checks["rng_next_sample"] = (
+            observed_next_rng_sample == expected.get("next_rng_sample")
+        )
+        checks["pre_load_was_distinct"] = any(
+            self._gate_pre_load_fingerprints.get(key) != expected_fingerprints.get(key)
+            for key in ("global_step", "model", "optimizer", "rng", "scheduler")
+        )
+        if not all(checks.values()):
+            raise RuntimeError(f"N=4 full-state reload mismatch on rank {rank}: {checks}")
+        payload = {
+            "batch_accounting": self._resolved_n4_gate_batch_accounting(),
+            "checks": checks,
+            "fingerprints": restored,
+            "next_rng_sample": observed_next_rng_sample,
+            "phase": "load_fresh_process",
+            "pre_load_fingerprints": self._gate_pre_load_fingerprints,
+            "process_nonce": self._gate_process_nonce,
+            "process_pid": self._gate_process_pid,
+            "process_start_ticks": self._gate_process_start_ticks,
+            "rank": rank,
+            "schema_name": "fastwam-n4-fullmodel-load-proof",
+            "schema_version": 1,
+            "world_size": int(self.accelerator.num_processes),
+        }
+        publish_exclusive_json(
+            self._n4_gate_proof_dir() / f"load-state-rank-{rank:05d}.json",
+            payload,
+        )
+        self.accelerator.wait_for_everyone()
+
+    def publish_training_terminal_artifacts(
+        self,
+        *,
+        config_relative_path: str,
+        config_sha256: str,
+    ) -> None:
+        if not self.seal_training_run:
+            return
+        if self.formal_n4_fullmodel_gate:
+            raise RuntimeError("N=4 gate terminal seal is owned by its fresh-load finalizer")
+        if self.global_step != self.max_steps:
+            raise RuntimeError(
+                f"refusing terminal seal before max_steps: {self.global_step}/{self.max_steps}"
+            )
+        if self._last_step_metrics.get("step") != self.max_steps:
+            raise RuntimeError("refusing terminal seal without finite final-step metrics")
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        training_mode = str(getattr(unwrapped_model, "training_mode", "")).strip().lower()
+        steps = []
+        if self.save_every > 0:
+            steps.extend(range(self.save_every, self.max_steps + 1, self.save_every))
+        if self.save_final_checkpoint_enabled and self.max_steps not in steps:
+            steps.append(self.max_steps)
+        self.accelerator.wait_for_everyone()
+        complete_path = Path(self.output_dir) / "TRAINING.COMPLETE"
+        failure_path = Path(self.output_dir) / "TRAINING.FAILED.json"
+        if self.accelerator.is_main_process:
+            try:
+                publish_training_terminal_seal(
+                    self.output_dir,
+                    run_id=os.environ.get("RUN_ID", ""),
+                    code_commit=self._git_commit() or "",
+                    config_relative_path=config_relative_path,
+                    config_sha256=config_sha256,
+                    max_steps=self.max_steps,
+                    expected_checkpoint_steps=steps,
+                    expected_evaluation_steps=(
+                        []
+                        if self.eval_every <= 0
+                        else list(
+                            range(
+                                self.eval_every,
+                                self.max_steps + 1,
+                                self.eval_every,
+                            )
+                        )
+                    ),
+                    world_size=int(self.accelerator.num_processes),
+                    last_step_metrics=self._last_step_metrics,
+                    evaluation_records=self._evaluation_records,
+                    training_mode=training_mode,
+                    dataset_contract_sha256=canonical_json_sha256(
+                        self._dataset_run_contract
+                    ),
+                    authorization_gate_complete_sha256=os.environ.get(
+                        "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256", ""
+                    ),
+                    rehash_weights=self.terminal_rehash_weights,
+                )
+            except BaseException as error:
+                if not complete_path.exists() and not complete_path.is_symlink():
+                    publish_failure_marker(
+                        self.output_dir,
+                        marker_name=failure_path.name,
+                        schema_name="fastwam-training-terminal-failure",
+                        error=error,
+                        success_markers=[complete_path.name],
+                    )
+                raise
+        else:
+            self._wait_for_terminal_or_failure(
+                success_path=complete_path,
+                failure_path=failure_path,
+                label="run-level training terminal seal",
+            )
+        self.accelerator.wait_for_everyone()
 
     def _forward_training_loss(self, sample):
         """Run loss computation through the prepared model wrapper.
@@ -659,6 +1181,8 @@ class Wan22Trainer:
             "save_training_state",
             "seal_training_state",
             "save_final_checkpoint",
+            "seal_training_run",
+            "terminal_rehash_weights",
             "allow_legacy_resume",
             "process_group_timeout_seconds",
             "checkpoint_io_timeout_seconds",
@@ -799,6 +1323,65 @@ class Wan22Trainer:
         if saved_base is not None:
             self._restore_base_checkpoint_provenance(saved_base, state_file=state_file)
 
+    def _validate_resumable_terminal_evidence(
+        self, payload: dict, *, state_file: Path
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
+        last_metrics = payload.get("last_step_metrics", {})
+        evaluations = payload.get("evaluation_records", [])
+        if not isinstance(last_metrics, dict) or not isinstance(evaluations, list):
+            raise TypeError(
+                f"Invalid resumable terminal evidence in trainer state: {state_file}"
+            )
+        if last_metrics:
+            required_fields = {
+                "grad_norm",
+                "learning_rate",
+                "loss",
+                "loss_components",
+                "step",
+            }
+            components = last_metrics.get("loss_components")
+            values = {
+                "grad_norm": last_metrics.get("grad_norm"),
+                "learning_rate": last_metrics.get("learning_rate"),
+                "loss": last_metrics.get("loss"),
+                **(
+                    {f"loss_components.{key}": value for key, value in components.items()}
+                    if isinstance(components, dict)
+                    else {"loss_components": float("nan")}
+                ),
+            }
+            if (
+                set(last_metrics) != required_fields
+                or last_metrics.get("step") != int(payload.get("global_step", -1))
+                or not all(np.isfinite(float(value)) for value in values.values())
+            ):
+                raise RuntimeError(
+                    f"Invalid last-step metrics in trainer state: {state_file}"
+                )
+        elif self.seal_training_run and int(payload.get("global_step", 0)) > 0:
+            raise RuntimeError(
+                f"Formal resume lacks last-step terminal evidence: {state_file}"
+            )
+
+        if self.seal_training_run:
+            model = self.accelerator.unwrap_model(self.model)
+            training_mode = str(getattr(model, "training_mode", "")).strip().lower()
+            saved_step = int(payload.get("global_step", -1))
+            expected_steps = (
+                []
+                if self.eval_every <= 0
+                else list(range(self.eval_every, saved_step + 1, self.eval_every))
+            )
+            evaluations = normalize_formal_evaluation_records(
+                evaluations,
+                expected_steps=expected_steps,
+                training_mode=training_mode,
+            )
+        else:
+            evaluations = [dict(record) for record in evaluations]
+        return dict(last_metrics), evaluations
+
     def _restore_base_checkpoint_provenance(self, descriptor, *, state_file: Path) -> None:
         if not isinstance(descriptor, dict) or set(descriptor) != {
             "path",
@@ -900,6 +1483,15 @@ class Wan22Trainer:
         resume_path = Path(str(resume))
         if resume_path.is_dir():
             logger.info("Resuming full training state from directory: %s", resume)
+            if (
+                self.formal_n4_fullmodel_gate
+                and self.n4_fullmodel_gate_phase == "load"
+            ):
+                self._gate_pre_load_fingerprints = (
+                    self._n4_gate_state_fingerprints(
+                        require_optimizer_state=False
+                    )
+                )
             self.load_training_state(str(resume_path))
             return
         if not resume_path.exists():
@@ -1659,6 +2251,35 @@ class Wan22Trainer:
             f"{label}: {path}"
         )
 
+    def _wait_for_terminal_or_failure(
+        self,
+        *,
+        success_path: Path,
+        failure_path: Path,
+        label: str,
+    ) -> None:
+        deadline = time.monotonic() + self.checkpoint_io_timeout_seconds
+        while time.monotonic() < deadline:
+            for path, kind in ((failure_path, "failure"), (success_path, "success")):
+                if path.is_symlink():
+                    raise RuntimeError(f"{label} {kind} marker must not be a symlink: {path}")
+                if not path.exists():
+                    continue
+                if not path.is_file():
+                    raise RuntimeError(f"{label} {kind} marker must be regular: {path}")
+                if kind == "failure":
+                    payload, _, _ = read_canonical_json(path)
+                    raise RuntimeError(
+                        f"{label} failed on rank zero: "
+                        f"{payload.get('error_type')}: {payload.get('error_message')}"
+                    )
+                return
+            time.sleep(0.2)
+        raise TimeoutError(
+            f"timed out after {self.checkpoint_io_timeout_seconds}s waiting for "
+            f"{label}: success={success_path} failure={failure_path}"
+        )
+
     def _assert_checkpoint_targets_absent(self, *, step_tag: str) -> None:
         """Collectively refuse stale or colliding outputs before checkpoint I/O.
 
@@ -1704,6 +2325,8 @@ class Wan22Trainer:
             "global_step": int(self.global_step),
             "epoch": int(self.epoch),
             "batch_in_epoch": int(self.batch_in_epoch),
+            "evaluation_records": self._evaluation_records,
+            "last_step_metrics": self._last_step_metrics,
             "run_contract": self._training_state_contract(),
         }
         if self._uses_agent_count_batch_sampler:
@@ -1715,8 +2338,7 @@ class Wan22Trainer:
                 "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
                 "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
             }
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=True, indent=2)
+        publish_exclusive_json(state_file, payload)
 
     @staticmethod
     def _seal_training_state_tree(state_path: str) -> dict:
@@ -1814,12 +2436,20 @@ class Wan22Trainer:
     def load_training_state(self, state_dir: str):
         state_file = Path(state_dir) / "trainer_state.json"
         payload = None
+        restored_last_step_metrics: dict[str, object] = {}
+        restored_evaluation_records: list[dict[str, object]] = []
         if state_file.exists():
             with open(state_file, "r", encoding="utf-8") as f:
                 payload = json.load(f)
             if not isinstance(payload, dict):
                 raise TypeError(f"Trainer state metadata must be a mapping: {state_file}")
             self._validate_training_state_contract(payload, state_file=state_file)
+            (
+                restored_last_step_metrics,
+                restored_evaluation_records,
+            ) = self._validate_resumable_terminal_evidence(
+                payload, state_file=state_file
+            )
         elif not self.allow_legacy_resume:
             raise RuntimeError(
                 "Full-state resume is missing trainer_state.json and is refused before "
@@ -1832,6 +2462,8 @@ class Wan22Trainer:
         self.accelerator.load_state(input_dir=state_dir)
         if payload is not None:
             self.global_step = int(payload["global_step"])
+            self._last_step_metrics = restored_last_step_metrics
+            self._evaluation_records = restored_evaluation_records
 
             if "epoch" in payload and "batch_in_epoch" in payload:
                 self.epoch = int(payload["epoch"])
@@ -1922,6 +2554,12 @@ class Wan22Trainer:
         self.run_start_time = time.perf_counter()
         self.run_local_samples = 0
         self.run_local_agent_action_tokens = 0
+        if self.formal_n4_fullmodel_gate:
+            if self.n4_fullmodel_gate_phase != "save":
+                raise RuntimeError("the N=4 load phase must verify state without training")
+            if not torch.cuda.is_available():
+                raise RuntimeError("N=4 full-model gate requires CUDA")
+            torch.cuda.reset_peak_memory_stats(self.accelerator.device)
 
         while self.global_step < self.max_steps:
             try:
@@ -1941,11 +2579,24 @@ class Wan22Trainer:
             with self.accelerator.accumulate(self.model):
                 with self.accelerator.autocast():
                     loss, loss_dict = self._forward_training_loss(sample)
+                gate_sample_shapes = None
+                gate_losses = None
+                if self.formal_n4_fullmodel_gate:
+                    gate_sample_shapes = self._n4_gate_sample_shapes(sample)
+                    gate_losses = self._n4_gate_losses(loss, loss_dict)
                 self.accelerator.backward(loss)
 
                 if self.accelerator.sync_gradients:
                     grad_norm = self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    gate_gradients = None
+                    if self.formal_n4_fullmodel_gate:
+                        gate_gradients = self._n4_gate_gradient_evidence(grad_norm)
                     self.optimizer.step()
+                    if (
+                        self.formal_n4_fullmodel_gate
+                        and self.accelerator.optimizer_step_was_skipped
+                    ):
+                        raise RuntimeError("N=4 gate optimizer step was skipped")
                     if not self.accelerator.optimizer_step_was_skipped:
                         self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
@@ -1963,6 +2614,31 @@ class Wan22Trainer:
                     global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
 
                     current_lr = float(self.optimizer.param_groups[0]["lr"])
+                    if not np.isfinite(global_loss) or not np.isfinite(global_grad_norm):
+                        raise RuntimeError(
+                            "training produced non-finite terminal metrics: "
+                            f"loss={global_loss} grad_norm={global_grad_norm}"
+                        )
+                    if not all(np.isfinite(value) for value in global_loss_metrics.values()):
+                        raise RuntimeError(
+                            f"training produced non-finite loss components: {global_loss_metrics}"
+                        )
+                    self._last_step_metrics = {
+                        "grad_norm": global_grad_norm,
+                        "learning_rate": current_lr,
+                        "loss": global_loss,
+                        "loss_components": dict(sorted(global_loss_metrics.items())),
+                        "step": int(self.global_step),
+                    }
+                    if self.formal_n4_fullmodel_gate:
+                        if gate_sample_shapes is None or gate_losses is None or gate_gradients is None:
+                            raise RuntimeError("N=4 gate lost required per-step evidence")
+                        self._write_n4_gate_step_proof(
+                            step=self.global_step,
+                            sample_shapes=gate_sample_shapes,
+                            losses=gate_losses,
+                            gradients=gate_gradients,
+                        )
 
                     should_log = self.log_every > 0 and self.global_step % self.log_every == 0
                     if should_log:
@@ -2020,6 +2696,13 @@ class Wan22Trainer:
                         metrics = self.evaluate()
                         self.accelerator.wait_for_everyone()
                         if metrics is not None and self.accelerator.is_main_process:
+                            evaluation_record = {
+                                key: value
+                                for key, value in metrics.items()
+                                if key != "video_path"
+                            }
+                            evaluation_record["step"] = int(self.global_step)
+                            self._evaluation_records.append(evaluation_record)
                             if metrics.get("evaluation_kind") == "multi_robot_offline_loss":
                                 logger.info(
                                     "[eval] step=%d kind=offline_loss total=%.4f "
@@ -2104,6 +2787,18 @@ class Wan22Trainer:
                             )
                         return
 
+        # The loop is skipped when an exact full-state resume already starts
+        # at max_steps.  Its checkpoint was sealed before that state could be
+        # selected for resume, so never try to recreate the same exclusive
+        # step target; the run-level terminal publisher below will strongly
+        # re-read it and fail closed if it is incomplete or changed.
+        if self.global_step >= self.max_steps:
+            logger.info(
+                "Training state already restored at max_steps=%d; "
+                "skipping duplicate checkpoint publication.",
+                self.max_steps,
+            )
+            return
         if not self.save_final_checkpoint_enabled:
             return
         ckpt_info = self.save_checkpoint()

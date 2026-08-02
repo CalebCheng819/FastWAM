@@ -358,6 +358,18 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                         )
                     if is_val == self.is_training_set:
                         continue
+                    # ``required_agent_counts`` is the exact cardinality scope
+                    # consumed by this dataset instance.  Source inventory and
+                    # normalization provenance above intentionally remain based
+                    # on the complete HDF5 corpus; only the indexed training or
+                    # validation windows are selected here.  This makes a real
+                    # N=4 authorization gate possible without copying data or
+                    # weakening the unified N=2/3/4 stats identity.
+                    if (
+                        self.required_agent_counts is not None
+                        and agent_count not in self.required_agent_counts
+                    ):
+                        continue
                     if length < self.action_horizon:
                         continue
                     split_trajectory_count += 1
