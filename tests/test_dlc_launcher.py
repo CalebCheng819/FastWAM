@@ -150,6 +150,7 @@ def _formal_scale_environment(*, rank: int = 0) -> dict[str, str]:
         "FASTWAM_CPFS_BUNDLE_SOURCE_ROOT": "/cpfs/user/chengjuntao",
         "FASTWAM_CPFS_BUNDLE_MANIFEST": "/cpfs/user/chengjuntao/manifests/formal-bundle.sha256",
         "FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256": "1" * 64,
+        "FASTWAM_TRAINING_ENV_BUNDLE_MANIFEST_SHA256": "6" * 64,
         "FASTWAM_OSS_BUNDLE_SOURCE_ROOT": "/oss-chengjuntao",
         "FASTWAM_OSS_BUNDLE_MANIFEST": "/oss-chengjuntao/manifests/formal-bundle.sha256",
         "FASTWAM_OSS_BUNDLE_MANIFEST_SHA256": "5" * 64,
@@ -700,6 +701,7 @@ def test_formal_non_dry_requires_clean_checkout_and_exact_env_preflight() -> Non
         assert len(python_calls) == 2, python_calls
         assert "reserve_dlc_run.py --mode validate" in python_calls[0]
         assert "--timeout 300 --resume-timeout 21600" in python_calls[0]
+        assert "--training-env-bundle-manifest-sha256 " + "6" * 64 in python_calls[0]
         assert "validate_python_environment.py --pyproject" in python_calls[1]
         assert all("--mode owner" not in call for call in python_calls)
 

@@ -124,6 +124,9 @@ def _identity(args: argparse.Namespace) -> dict[str, object]:
         "schema_version": SCHEMA_VERSION,
         "task": args.task,
         "stats_sha256": _optional_sha256(args.stats_sha256),
+        "training_env_bundle_manifest_sha256": _optional_sha256(
+            args.training_env_bundle_manifest_sha256
+        ),
         "vae_sha256": _optional_sha256(args.vae_sha256),
     }
     payload["identity_sha256"] = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
@@ -429,6 +432,7 @@ def main() -> None:
     parser.add_argument("--erdma-bundle-sha256", default="")
     parser.add_argument("--erdma-source-manifest-sha256", default="")
     parser.add_argument("--erdma-env-sha256", default="")
+    parser.add_argument("--training-env-bundle-manifest-sha256", default="")
     parser.add_argument("--image-reference", required=True)
     parser.add_argument(
         "--image-digest-status",

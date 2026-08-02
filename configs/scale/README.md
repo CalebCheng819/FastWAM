@@ -131,6 +131,7 @@ export FASTWAM_LOCAL_RUNTIME_ROOT=/tmp/fastwam-local-runtime
 export FASTWAM_CPFS_BUNDLE_SOURCE_ROOT=/cpfs/user/chengjuntao
 export FASTWAM_CPFS_BUNDLE_MANIFEST=/oss-chengjuntao/manifests/robofactory-cpfs-bundle.sha256
 export FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256=<64-hex>
+export FASTWAM_TRAINING_ENV_BUNDLE_MANIFEST_SHA256=<64-hex-offline-wheelhouse-SHA256SUMS>
 # The following three OSS bundle variables are required for GAU1 only. Leave
 # them unset for GAU0; the formal launcher rejects a contaminated baseline.
 export FASTWAM_OSS_BUNDLE_SOURCE_ROOT=/oss-chengjuntao
