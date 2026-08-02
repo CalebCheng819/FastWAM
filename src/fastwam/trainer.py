@@ -8,12 +8,13 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import timedelta
 from math import ceil
 from pathlib import Path
 
 import numpy as np
 import torch
-from accelerate import Accelerator, DataLoaderConfiguration
+from accelerate import Accelerator, DataLoaderConfiguration, InitProcessGroupKwargs
 from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
@@ -110,6 +111,22 @@ class Wan22Trainer:
         self.save_training_state_enabled = bool(cfg.get("save_training_state", True))
         self.seal_training_state = bool(cfg.get("seal_training_state", False))
         self.save_final_checkpoint_enabled = bool(cfg.get("save_final_checkpoint", True))
+        self.process_group_timeout_seconds = int(
+            cfg.get("process_group_timeout_seconds", 1800)
+        )
+        self.checkpoint_io_timeout_seconds = int(
+            cfg.get("checkpoint_io_timeout_seconds", 1800)
+        )
+        if self.process_group_timeout_seconds <= 0:
+            raise ValueError(
+                "`process_group_timeout_seconds` must be positive, got "
+                f"{self.process_group_timeout_seconds}"
+            )
+        if self.checkpoint_io_timeout_seconds <= 0:
+            raise ValueError(
+                "`checkpoint_io_timeout_seconds` must be positive, got "
+                f"{self.checkpoint_io_timeout_seconds}"
+            )
         self.mixed_precision = str(cfg.mixed_precision).strip().lower()
         if self.mixed_precision not in {"no", "fp16", "bf16"}:
             raise ValueError(
@@ -122,6 +139,11 @@ class Wan22Trainer:
             gradient_accumulation_steps=self.gradient_accumulation_steps,
             mixed_precision=self.mixed_precision,
             step_scheduler_with_optimizer=False,
+            kwargs_handlers=[
+                InitProcessGroupKwargs(
+                    timeout=timedelta(seconds=self.process_group_timeout_seconds)
+                )
+            ],
             dataloader_config=DataLoaderConfiguration(
                 # Dynamic token-budget batches intentionally have different
                 # sample counts. Their source schedule is explicitly aligned
@@ -638,6 +660,8 @@ class Wan22Trainer:
             "seal_training_state",
             "save_final_checkpoint",
             "allow_legacy_resume",
+            "process_group_timeout_seconds",
+            "checkpoint_io_timeout_seconds",
             "wandb",
             "hydra",
         ):
@@ -1610,6 +1634,31 @@ class Wan22Trainer:
             handle.flush()
             os.fsync(handle.fileno())
 
+    def _wait_for_published_regular_file(self, path: Path, *, label: str) -> None:
+        """Wait outside a collective for a rank-zero COMPLETE artifact.
+
+        Large weight copies and full ZeRO state-tree hashes can take much longer
+        than a normal collective.  Non-main ranks poll the shared filesystem
+        while rank zero publishes the artifact and only enter the next barrier
+        after the atomic COMPLETE/manifest file is visible.
+        """
+
+        deadline = time.monotonic() + self.checkpoint_io_timeout_seconds
+        while time.monotonic() < deadline:
+            if path.is_symlink():
+                raise RuntimeError(f"{label} must not be a symlink: {path}")
+            if path.exists():
+                if not path.is_file():
+                    raise RuntimeError(
+                        f"{label} must be a regular file when published: {path}"
+                    )
+                return
+            time.sleep(0.2)
+        raise TimeoutError(
+            f"timed out after {self.checkpoint_io_timeout_seconds}s waiting for "
+            f"{label}: {path}"
+        )
+
     def _save_trainer_state(self, state_path: str):
         state_file = os.path.join(state_path, "trainer_state.json")
         payload = {
@@ -1675,11 +1724,19 @@ class Wan22Trainer:
 
     def save_checkpoint(self):
         step_tag = f"step_{self.global_step:06d}"
+        weights_complete = (
+            Path(self.weights_dir) / f"{step_tag}.pt.COMPLETE"
+        )
 
         self.accelerator.wait_for_everyone()
         ckpt_path = None
         if self.accelerator.is_main_process:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
+        else:
+            self._wait_for_published_regular_file(
+                weights_complete,
+                label="weights checkpoint COMPLETE marker",
+            )
         self.accelerator.wait_for_everyone()
 
         state_path = None
@@ -1691,9 +1748,18 @@ class Wan22Trainer:
             if self.accelerator.is_main_process:
                 self._save_trainer_state(state_path)
             self.accelerator.wait_for_everyone()
-            if self.seal_training_state and self.accelerator.is_main_process:
-                state_manifest = self._seal_training_state_tree(state_path)
-            self.accelerator.wait_for_everyone()
+            if self.seal_training_state:
+                state_manifest_path = Path(state_path).with_name(
+                    f"{Path(state_path).name}.state-tree.json"
+                )
+                if self.accelerator.is_main_process:
+                    state_manifest = self._seal_training_state_tree(state_path)
+                else:
+                    self._wait_for_published_regular_file(
+                        state_manifest_path,
+                        label="sealed training state-tree manifest",
+                    )
+                self.accelerator.wait_for_everyone()
 
         return {
             "weights_path": ckpt_path,

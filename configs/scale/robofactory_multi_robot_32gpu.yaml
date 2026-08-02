@@ -11,6 +11,14 @@ gradient_accumulation_steps: 1
 checkpoint_state_kind: full
 seal_training_state: true
 
+# Rank zero may need to serialize, copy, strongly read back, and hash a full
+# multi-billion-parameter checkpoint on a shared object/filesystem mount.
+# Other ranks poll COMPLETE/manifest files outside collectives, while this
+# explicit process-group watchdog protects the remaining short barriers and
+# DeepSpeed collectives from the framework's much smaller implicit default.
+process_group_timeout_seconds: 21600
+checkpoint_io_timeout_seconds: 21600
+
 # A deterministic, cardinality-stratified held-out loss check.  This is not a
 # simulator rollout or task-success metric.
 eval_every: 1000

@@ -49,6 +49,11 @@ save_training_state: true
 # state directory into an immutable JSON manifest (path, bytes, SHA-256).
 seal_training_state: false
 save_final_checkpoint: true
+# Operational watchdogs.  Formal multi-node runs override both with a window
+# sized for large checkpoint publication; they are intentionally excluded from
+# the scientific full-state resume contract.
+process_group_timeout_seconds: 1800
+checkpoint_io_timeout_seconds: 1800
 
 # wandb
 wandb:

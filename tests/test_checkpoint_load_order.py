@@ -1,5 +1,7 @@
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -198,6 +200,71 @@ def test_weights_checkpoint_is_strongly_read_back_and_complete_last(
 
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         trainer._save_weights_checkpoint("step_000031")
+
+
+def test_checkpoint_publication_wait_uses_regular_complete_file(tmp_path):
+    marker = tmp_path / "step_000031.pt.COMPLETE"
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.checkpoint_io_timeout_seconds = 2
+
+    def publish():
+        time.sleep(0.05)
+        marker.write_text("{}\n", encoding="utf-8")
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    trainer._wait_for_published_regular_file(marker, label="test marker")
+    publisher.join(timeout=1)
+    assert not publisher.is_alive()
+
+    marker.unlink()
+    target = tmp_path / "target"
+    target.write_text("payload", encoding="utf-8")
+    marker.symlink_to(target)
+    with pytest.raises(RuntimeError, match="must not be a symlink"):
+        trainer._wait_for_published_regular_file(marker, label="test marker")
+
+
+def test_non_main_checkpoint_waits_outside_collectives(tmp_path):
+    events = []
+
+    class _NonMainAccelerator:
+        is_main_process = False
+
+        def wait_for_everyone(self):
+            events.append("barrier")
+
+        def save_state(self, output_dir):
+            events.append("save_state")
+            Path(output_dir, "rank-1.bin").write_bytes(b"state")
+
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.global_step = 31
+    trainer.weights_dir = str(tmp_path / "weights")
+    trainer.state_dir = str(tmp_path / "state")
+    trainer.save_training_state_enabled = True
+    trainer.seal_training_state = True
+    trainer.accelerator = _NonMainAccelerator()
+    trainer._wait_for_published_regular_file = (
+        lambda path, *, label: events.append(f"poll:{Path(path).name}")
+    )
+
+    result = trainer.save_checkpoint()
+
+    assert result == {
+        "weights_path": None,
+        "state_path": str(tmp_path / "state" / "step_000031"),
+        "state_manifest": None,
+    }
+    assert events == [
+        "barrier",
+        "poll:step_000031.pt.COMPLETE",
+        "barrier",
+        "save_state",
+        "barrier",
+        "poll:step_000031.state-tree.json",
+        "barrier",
+    ]
 
 
 def test_full_state_resume_restores_saved_base_provenance(tmp_path):

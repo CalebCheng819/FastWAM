@@ -421,8 +421,8 @@ if ((FORMAL_32GPU)); then
 
   cpfs_source_root="${FASTWAM_CPFS_BUNDLE_SOURCE_ROOT:?FASTWAM_CPFS_BUNDLE_SOURCE_ROOT is required}"
   cpfs_bundle_manifest="${FASTWAM_CPFS_BUNDLE_MANIFEST:?FASTWAM_CPFS_BUNDLE_MANIFEST is required}"
-  oss_source_root="${FASTWAM_OSS_BUNDLE_SOURCE_ROOT:?FASTWAM_OSS_BUNDLE_SOURCE_ROOT is required}"
-  oss_bundle_manifest="${FASTWAM_OSS_BUNDLE_MANIFEST:?FASTWAM_OSS_BUNDLE_MANIFEST is required}"
+  oss_source_root="${FASTWAM_OSS_BUNDLE_SOURCE_ROOT:-}"
+  oss_bundle_manifest="${FASTWAM_OSS_BUNDLE_MANIFEST:-}"
   if [[ "${cpfs_source_root}" != "${FORMAL_CPFS_PREFIX}" && "${cpfs_source_root}" != "${FORMAL_CPFS_PREFIX}/"* ]]; then
     echo "Error: data/checkpoint/VAE bundle source must be on CPFS under ${FORMAL_CPFS_PREFIX}." >&2
     exit 1
@@ -432,10 +432,26 @@ if ((FORMAL_32GPU)); then
     echo "Error: CPFS source manifest must be an immutable file on CPFS or the mounted OSS root." >&2
     exit 1
   fi
-  if [[ "${oss_source_root}" != "${FORMAL_OSS_PREFIX}" && "${oss_source_root}" != "${FORMAL_OSS_PREFIX}/"* ]] || \
-    [[ "${oss_bundle_manifest}" != "${FORMAL_OSS_PREFIX}/"* ]]; then
-    echo "Error: compact/eRDMA bundle root and manifest must be on OSS under ${FORMAL_OSS_PREFIX}." >&2
-    exit 1
+  if ((GAUSSIAN_ENABLED)); then
+    if [[ "${oss_source_root}" != "${FORMAL_OSS_PREFIX}" && "${oss_source_root}" != "${FORMAL_OSS_PREFIX}/"* ]] || \
+      [[ "${oss_bundle_manifest}" != "${FORMAL_OSS_PREFIX}/"* ]]; then
+      echo "Error: Gaussian compact bundle root and manifest must be on OSS under ${FORMAL_OSS_PREFIX}." >&2
+      exit 1
+    fi
+  else
+    for gaussian_name in \
+      FASTWAM_OSS_BUNDLE_SOURCE_ROOT \
+      FASTWAM_OSS_BUNDLE_MANIFEST \
+      FASTWAM_OSS_BUNDLE_MANIFEST_SHA256 \
+      FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT \
+      FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256 \
+      FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256 \
+      FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256; do
+      if [[ -n "${!gaussian_name:-}" ]]; then
+        echo "Error: GAU0 formal arms forbid irrelevant Gaussian OSS input ${gaussian_name}; leave it unset so the baseline has no Gaussian asset dependency." >&2
+        exit 1
+      fi
+    done
   fi
   if [[ -n "${FASTWAM_LOCAL_CACHE_ROOT:-}" && \
     "${FASTWAM_LOCAL_CACHE_ROOT}" != "${FORMAL_LOCAL_CACHE_ROOT}" ]]; then
@@ -451,7 +467,6 @@ if ((FORMAL_32GPU)); then
   export FASTWAM_LOCAL_RUNTIME_ROOT="${FORMAL_LOCAL_RUNTIME_ROOT}"
 
   require_sha256_environment FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256 || exit 1
-  require_sha256_environment FASTWAM_OSS_BUNDLE_MANIFEST_SHA256 || exit 1
   for mapping_name in \
     FASTWAM_LOCAL_CHECKPOINT_RELATIVE_PATH \
     FASTWAM_LOCAL_DATASET_RELATIVE_ROOT \
@@ -462,6 +477,7 @@ if ((FORMAL_32GPU)); then
     validate_safe_relative_path "${mapping_name}" "${!mapping_name:-}" || exit 1
   done
   if ((GAUSSIAN_ENABLED)); then
+    require_sha256_environment FASTWAM_OSS_BUNDLE_MANIFEST_SHA256 || exit 1
     validate_safe_relative_path \
       FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT \
       "${FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT:-}" || exit 1
@@ -524,7 +540,10 @@ if ((FORMAL_32GPU)); then
     fi
     IMAGE_DIGEST_STATUS=resolved
   else
-    if is_enabled "${FASTWAM_ACK_MUTABLE_IMAGE_TAG_RISK:-0}"; then
+    if ((!LAUNCH_DRY_RUN_ENABLED)); then
+      echo "Error: formal non-dry-run launch requires FASTWAM_DLC_IMAGE_DIGEST=sha256:<64hex>; mutable image tags cannot be acknowledged for execution." >&2
+      exit 1
+    elif is_enabled "${FASTWAM_ACK_MUTABLE_IMAGE_TAG_RISK:-0}"; then
       IMAGE_DIGEST_STATUS=unresolved_mutable_tag
       echo "[formal_gate] warning=mutable_image_tag digest=UNRESOLVED reference=${image_reference}" >&2
     else
@@ -542,7 +561,9 @@ if ((FORMAL_32GPU)); then
   fi
 
   LOCAL_CPFS_BUNDLE_DIR="${FASTWAM_LOCAL_CACHE_ROOT%/}/cpfs/${FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256}"
-  LOCAL_OSS_BUNDLE_DIR="${FASTWAM_LOCAL_CACHE_ROOT%/}/oss/${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256}"
+  if ((GAUSSIAN_ENABLED)); then
+    LOCAL_OSS_BUNDLE_DIR="${FASTWAM_LOCAL_CACHE_ROOT%/}/oss/${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256}"
+  fi
   export FASTWAM_LOCAL_CHECKPOINT_PATH="${LOCAL_CPFS_BUNDLE_DIR}/${FASTWAM_LOCAL_CHECKPOINT_RELATIVE_PATH}"
   export FASTWAM_LOCAL_DATASET_ROOT="${LOCAL_CPFS_BUNDLE_DIR}/${FASTWAM_LOCAL_DATASET_RELATIVE_ROOT}"
   export FASTWAM_LOCAL_STATS_SOURCE_PATH="${LOCAL_CPFS_BUNDLE_DIR}/${FASTWAM_LOCAL_STATS_RELATIVE_PATH}"
@@ -569,7 +590,7 @@ if ((FORMAL_32GPU)); then
     --nproc-per-node "${NPROC_PER_NODE}"
     --expected-global-world-size 32
     --cpfs-bundle-manifest-sha256 "${FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256}"
-    --oss-bundle-manifest-sha256 "${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256}"
+    --oss-bundle-manifest-sha256 "${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256:-}"
     --cache-manifest-sha256 "${FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256:-}"
     --cache-selection-sha256 "${FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256:-}"
     --cache-source-identity-sha256 "${FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256:-}"
@@ -591,6 +612,7 @@ if ((FORMAL_32GPU)); then
     --resume-state-manifest-sha256 "${FORMAL_RESUME_STATE_MANIFEST_SHA256}"
     --resume-trainer-state-sha256 "${FORMAL_RESUME_TRAINER_STATE_SHA256}"
     --timeout "${FASTWAM_RUN_RESERVATION_TIMEOUT:-300}"
+    --resume-timeout "${FASTWAM_RESUME_VALIDATION_TIMEOUT:-21600}"
   )
   "${PYTHON_TOOL}" "${SCRIPT_DIR}/reserve_dlc_run.py" \
     --mode validate "${RESERVATION_ARGS[@]}" >/dev/null
@@ -673,9 +695,17 @@ if ((!LAUNCH_DRY_RUN_ENABLED)); then
   fi
 
   if ((FORMAL_32GPU)); then
-    if [[ "${FASTWAM_LOCAL_CPFS_CACHE_MANIFEST_SHA256:-}" != "${FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256}" ]] || \
-      [[ "${FASTWAM_LOCAL_OSS_CACHE_MANIFEST_SHA256:-}" != "${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256}" ]]; then
-      echo "Error: prepared CPFS/OSS node-local bundle identities do not match the formal pins." >&2
+    if [[ "${FASTWAM_LOCAL_CPFS_CACHE_MANIFEST_SHA256:-}" != "${FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256}" ]]; then
+      echo "Error: prepared CPFS node-local bundle identity does not match the formal pin." >&2
+      exit 1
+    fi
+    if ((GAUSSIAN_ENABLED)); then
+      if [[ "${FASTWAM_LOCAL_OSS_CACHE_MANIFEST_SHA256:-}" != "${FASTWAM_OSS_BUNDLE_MANIFEST_SHA256}" ]]; then
+        echo "Error: prepared Gaussian OSS node-local bundle identity does not match the formal pin." >&2
+        exit 1
+      fi
+    elif [[ -n "${FASTWAM_LOCAL_OSS_CACHE_MANIFEST_SHA256:-}" ]]; then
+      echo "Error: GAU0 unexpectedly prepared an OSS Gaussian bundle." >&2
       exit 1
     fi
     if [[ "${FASTWAM_LOCAL_STATS_MANIFEST_SHA256:-}" != "${OFFICIAL_N234_TRAIN_S42_STATS_SHA256}" ]]; then

@@ -172,7 +172,7 @@ def _formal_scale_environment(*, rank: int = 0) -> dict[str, str]:
             "pj4090acr-registry-vpc.cn-beijing.cr.aliyuncs.com/"
             "pj4090/chengjuntao:cjt-multirobot-benchmark"
         ),
-        "FASTWAM_ACK_MUTABLE_IMAGE_TAG_RISK": "1",
+        "FASTWAM_DLC_IMAGE_DIGEST": "sha256:" + "a" * 64,
     }
 
 
@@ -699,8 +699,91 @@ def test_formal_non_dry_requires_clean_checkout_and_exact_env_preflight() -> Non
         python_calls = clean_python_log.read_text(encoding="utf-8").splitlines()
         assert len(python_calls) == 2, python_calls
         assert "reserve_dlc_run.py --mode validate" in python_calls[0]
+        assert "--timeout 300 --resume-timeout 21600" in python_calls[0]
         assert "validate_python_environment.py --pyproject" in python_calls[1]
         assert all("--mode owner" not in call for call in python_calls)
+
+
+def test_formal_image_digest_is_mandatory_for_execution_but_ack_is_dry_run_only() -> None:
+    unresolved = {
+        **_formal_scale_environment(),
+        "FASTWAM_DLC_IMAGE_DIGEST": None,
+        "FASTWAM_ACK_MUTABLE_IMAGE_TAG_RISK": "1",
+        "FASTWAM_LAUNCHER_UNIT_TEST_ALLOW_DIRTY": "0",
+        "FASTWAM_LAUNCHER_UNIT_TEST_SKIP_ENV_PREFLIGHT": "0",
+    }
+    refused = _run_launcher(
+        nproc=None,
+        env_updates=unresolved,
+        dry_run=False,
+        extra_args=_formal_scale_args(),
+    )
+    assert refused.returncode != 0
+    assert "formal non-dry-run launch requires FASTWAM_DLC_IMAGE_DIGEST" in (
+        refused.stderr or ""
+    )
+
+    diagnostic = _run_launcher(
+        nproc=None,
+        env_updates=unresolved,
+        dry_run=True,
+        extra_args=_formal_scale_args(),
+    )
+    assert diagnostic.returncode == 0, diagnostic.stderr
+    assert "warning=mutable_image_tag" in (diagnostic.stderr or "")
+
+
+def test_formal_gau0_has_no_gaussian_oss_asset_dependency() -> None:
+    gaussian_names = (
+        "FASTWAM_OSS_BUNDLE_SOURCE_ROOT",
+        "FASTWAM_OSS_BUNDLE_MANIFEST",
+        "FASTWAM_OSS_BUNDLE_MANIFEST_SHA256",
+        "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT",
+        "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256",
+    )
+    gau0_env = _formal_scale_environment()
+    gau0_env.update({name: None for name in gaussian_names})
+    gau0_args = [
+        "task=robofactory_multi_robot_vg1_hub1_gau0_224_1e-4",
+        "+scale=robofactory_multi_robot_32gpu",
+    ]
+    passed = _run_launcher(
+        nproc=None,
+        env_updates=gau0_env,
+        dry_run=True,
+        extra_args=gau0_args,
+    )
+    assert passed.returncode == 0, passed.stderr
+    assert "gaussian_cache_dir=" not in passed.stdout
+
+    leaked = _run_launcher(
+        nproc=None,
+        env_updates=_formal_scale_environment(),
+        dry_run=True,
+        extra_args=gau0_args,
+    )
+    assert leaked.returncode != 0
+    assert "GAU0 formal arms forbid irrelevant Gaussian OSS input" in (
+        leaked.stderr or ""
+    )
+
+    gau1_missing = _run_launcher(
+        nproc=None,
+        env_updates={
+            **_formal_scale_environment(),
+            "FASTWAM_OSS_BUNDLE_SOURCE_ROOT": None,
+            "FASTWAM_OSS_BUNDLE_MANIFEST": None,
+            "FASTWAM_OSS_BUNDLE_MANIFEST_SHA256": None,
+        },
+        dry_run=True,
+        extra_args=_formal_scale_args(),
+    )
+    assert gau1_missing.returncode != 0
+    assert "Gaussian compact bundle root and manifest must be on OSS" in (
+        gau1_missing.stderr or ""
+    )
 
 
 def test_zero2_launcher_execs_accelerate_and_propagates_status() -> None:
@@ -1468,6 +1551,41 @@ def test_multi_source_cache_combines_cpfs_and_oss_mappings() -> None:
         assert (Path(gaussian_path) / "manifest.json").read_bytes() == b"gaussian"
         assert "mode=multi_source" in result.stderr
 
+        cpfs_only_cache = tmp_path / "local-cpfs-only"
+        cpfs_only_env = dict(env)
+        cpfs_only_env["FASTWAM_LOCAL_CACHE_ROOT"] = str(cpfs_only_cache)
+        for name in (
+            "FASTWAM_OSS_BUNDLE_SOURCE_ROOT",
+            "FASTWAM_OSS_BUNDLE_MANIFEST",
+            "FASTWAM_OSS_BUNDLE_MANIFEST_SHA256",
+            "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT",
+        ):
+            cpfs_only_env.pop(name, None)
+        cpfs_only = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; fastwam_prepare_multi_source_cache; '
+                'printf "%s|%s|%s\\n" "$FASTWAM_LOCAL_CPFS_CACHE_DIR" '
+                '"${FASTWAM_LOCAL_OSS_CACHE_DIR-}" '
+                '"${FASTWAM_LOCAL_OSS_CACHE_MANIFEST_SHA256-}"',
+                "multi-cache-cpfs-only-test",
+                str(MULTI_CACHE_SCRIPT),
+            ],
+            cwd=REPO_ROOT,
+            env=cpfs_only_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert cpfs_only.returncode == 0, cpfs_only.stderr
+        cpfs_only_dest, oss_cache_dir, oss_cache_sha = cpfs_only.stdout.strip().split("|")
+        assert Path(cpfs_only_dest, "checkpoint.pt").read_bytes() == b"checkpoint"
+        assert oss_cache_dir == ""
+        assert oss_cache_sha == ""
+        assert not (cpfs_only_cache / "oss").exists()
+        assert "oss_sha256=none" in cpfs_only.stderr
+
 
 def test_local_cache_default_hit_verification_fails_closed_on_corruption() -> None:
     with tempfile.TemporaryDirectory() as directory:
@@ -1858,6 +1976,8 @@ if __name__ == "__main__":
         test_formal_32gpu_cli_allowlist_seals_treatment_and_schedule,
         test_formal_non_dry_rejects_test_bypasses_before_git_or_python,
         test_formal_non_dry_requires_clean_checkout_and_exact_env_preflight,
+        test_formal_image_digest_is_mandatory_for_execution_but_ack_is_dry_run_only,
+        test_formal_gau0_has_no_gaussian_oss_asset_dependency,
         test_zero2_launcher_execs_accelerate_and_propagates_status,
         test_python_environment_preflight_accepts_exact_pyproject_versions,
         test_python_environment_preflight_rejects_version_drift,

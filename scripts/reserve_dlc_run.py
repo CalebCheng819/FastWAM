@@ -444,8 +444,13 @@ def main() -> None:
     parser.add_argument("--resume-state-manifest-sha256", default="")
     parser.add_argument("--resume-trainer-state-sha256", default="")
     parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--resume-timeout", type=float, default=21600.0)
     args = parser.parse_args()
     try:
+        if args.timeout <= 0:
+            raise ValueError("reservation timeout must be positive")
+        if args.resume_timeout <= 0:
+            raise ValueError("resume validation timeout must be positive")
         output = _validate_output(
             args.output_dir,
             args.allowed_prefix,
@@ -492,7 +497,7 @@ def main() -> None:
                 output,
                 resume_payload,
                 str(expected["identity_sha256"]),
-                args.timeout,
+                args.resume_timeout,
             )
         print(json.dumps(expected, sort_keys=True, separators=(",", ":")))
     except (OSError, RuntimeError, TimeoutError, ValueError) as error:

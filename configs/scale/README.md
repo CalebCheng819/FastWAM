@@ -30,10 +30,11 @@ workaround.
   runtime. The
   full-resolution all-timestep 13-channel FP16 corpus also remains canonical on
   OSS; it is not a per-step training hot path.
-- Every node copies the CPFS and compact-Gaussian training bundles to fixed
-  `/tmp/fastwam-whole-file-cache` roots,
-  verifies every whole-file SHA-256, and publishes READY atomically. Accelerate
-  then receives local dataset/checkpoint/VAE/text/stats/Gaussian paths.
+- Every node copies the CPFS training bundle to a fixed
+  `/tmp/fastwam-whole-file-cache` root, verifies every whole-file SHA-256, and
+  publishes READY atomically. GAU1 arms additionally copy the compact-Gaussian
+  OSS bundle; GAU0 arms forbid all Gaussian OSS inputs and never stage that
+  irrelevant asset. Accelerate receives only the local paths used by its arm.
 - Every formal arm forces `checkpoint_state_kind=full`; VG0/action-only weights
   therefore contain a full `mot` and never serialize a node-local `/tmp` base
   dependency. Every full Accelerate state is sealed after the global save
@@ -130,6 +131,8 @@ export FASTWAM_LOCAL_RUNTIME_ROOT=/tmp/fastwam-local-runtime
 export FASTWAM_CPFS_BUNDLE_SOURCE_ROOT=/cpfs/user/chengjuntao
 export FASTWAM_CPFS_BUNDLE_MANIFEST=/oss-chengjuntao/manifests/robofactory-cpfs-bundle.sha256
 export FASTWAM_CPFS_BUNDLE_MANIFEST_SHA256=<64-hex>
+# The following three OSS bundle variables are required for GAU1 only. Leave
+# them unset for GAU0; the formal launcher rejects a contaminated baseline.
 export FASTWAM_OSS_BUNDLE_SOURCE_ROOT=/oss-chengjuntao
 export FASTWAM_OSS_BUNDLE_MANIFEST=/oss-chengjuntao/manifests/robofactory-oss-bundle.sha256
 export FASTWAM_OSS_BUNDLE_MANIFEST_SHA256=<64-hex>
@@ -140,16 +143,16 @@ export FASTWAM_LOCAL_STATS_RELATIVE_PATH=datasets/robofactory_multi_robot/fastwa
 export FASTWAM_LOCAL_TEXT_EMBEDS_RELATIVE_ROOT=datasets/robofactory_multi_robot/text_embeds_cache_n234
 export FASTWAM_LOCAL_MODEL_CACHE_RELATIVE_ROOT=checkpoints/FastWAM/model-cache
 export FASTWAM_LOCAL_VAE_RELATIVE_PATH=checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors
+# GAU1 only; leave unset for GAU0.
 export FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT=fastwam/gaussian/compact/<version>
 
+# All three semantic identities are GAU1 only; leave unset for GAU0.
 export FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256=<64-hex>
 export FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256=<64-hex>
 export FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256=<64-hex>
 
-export FASTWAM_DLC_IMAGE_REFERENCE=<PAI-image-ID-or-registry-tag>
-# Prefer an OCI sha256 digest. General provenance can explicitly record a
-# mutable-tag risk, but that does not satisfy the stricter OSS-output smoke:
-export FASTWAM_ACK_MUTABLE_IMAGE_TAG_RISK=1
+export FASTWAM_DLC_IMAGE_REFERENCE=dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887
+export FASTWAM_DLC_IMAGE_DIGEST=sha256:a57915104bffd280400d5a2a2a0af8f5987f2752347bd58e05ca91547489f265
 
 bash scripts/train_zero2.sh 8 \
   task=robofactory_multi_robot_vg1_hub1_gau1_224_1e-4 \
@@ -181,6 +184,11 @@ export FASTWAM_FORMAL_RESUME_TRAINER_STATE_SHA256=<64-hex-from-manifest>
 The formal local cache and runtime roots are fixed because dataset and
 normalization absolute paths are part of the strict trainer run contract.
 Changing either path causes resume refusal before `accelerator.load_state`.
+New-run reservation keeps its short 300-second wait, while full-state tree
+validation uses the independent `FASTWAM_RESUME_VALIDATION_TIMEOUT` (21,600
+seconds by default). Formal checkpoint publication likewise uses six-hour
+process-group and filesystem-marker watchdogs; rank-zero weight copies and
+state-tree hashes no longer leave the other ranks blocked inside a collective.
 
 ## Real 32-rank OSS checkpoint smoke
 

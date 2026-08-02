@@ -341,11 +341,15 @@ def test_formal_32gpu_profile_changes_only_scale_controls(monkeypatch):
     assert baseline["offline_eval_num_samples"] == 0
     assert baseline["checkpoint_state_kind"] == "auto"
     assert baseline["seal_training_state"] is False
+    assert baseline["process_group_timeout_seconds"] == 1800
+    assert baseline["checkpoint_io_timeout_seconds"] == 1800
     assert scaled["gradient_accumulation_steps"] == 1
     assert scaled["eval_every"] == 1000
     assert scaled["offline_eval_num_samples"] == 12
     assert scaled["checkpoint_state_kind"] == "full"
     assert scaled["seal_training_state"] is True
+    assert scaled["process_group_timeout_seconds"] == 21600
+    assert scaled["checkpoint_io_timeout_seconds"] == 21600
 
     for key in ("data", "model", "seed", "max_steps", "resume"):
         assert scaled[key] == baseline[key]
