@@ -1,0 +1,73 @@
+{
+  "artifact_binding": {
+    "checkpoint": {
+      "reason": "checkpoint file/hash not both supplied",
+      "status": "UNCERTAIN"
+    },
+    "dataset_stats": {
+      "reason": "dataset stats file/hash not both supplied",
+      "status": "UNCERTAIN"
+    },
+    "resolved_config": {
+      "reason": "resolved config file/hash not both supplied",
+      "status": "UNCERTAIN"
+    }
+  },
+  "candidate": {
+    "root": "/home/chengjuntao/FastWAM-e8/evaluate_results/libero/faildetect_full_20260710_005500",
+    "summary_csv_sha256": "d6d49f38eddfad949abb44c7a1030a35fc0b50dddeafebff863d1d4212666b3f",
+    "summary_json_sha256": "e7939973dd24df8ed82fce31f6e7515d9cd489803f9da215e8a2c31b89e39483",
+    "task_success_rates_csv_sha256": "adf3318b66c91fc0cb28340834fd967cf6091b3eb67535282ec0fe12731471bd"
+  },
+  "kind": "mf_wam_g0_reproduction_audit",
+  "outcome_reproduction": {
+    "candidate_better_count": 0,
+    "candidate_successes": 1936,
+    "candidate_worse_count": 0,
+    "episode_count": 2000,
+    "exact_episode_outcome_match": true,
+    "point_difference": 0.0,
+    "reference_successes": 1936,
+    "status": "PASS",
+    "suite_differences": {
+      "libero_10": 0.0,
+      "libero_goal": 0.0,
+      "libero_object": 0.0,
+      "libero_spatial": 0.0
+    },
+    "task_bootstrap_95ci": [
+      0.0,
+      0.0
+    ]
+  },
+  "policy": {
+    "bootstrap_replicates": 10000,
+    "bootstrap_seed": 42,
+    "overall_equivalence_margin": 0.02,
+    "suite_drop_margin": 0.03,
+    "suites": [
+      "libero_spatial",
+      "libero_object",
+      "libero_goal",
+      "libero_10"
+    ],
+    "tasks_per_suite": 10,
+    "trials_per_task": 50
+  },
+  "reference": {
+    "root": "/home/chengjuntao/FastWAM-e8/evaluate_results/libero/libero_uncond_2cam224_1e-4/20260708_081156",
+    "summary_csv_sha256": "65feb80bec4afca69c56dce2ab5ff6459b2697b11ab7eb0f23143a126ccbcdcd",
+    "summary_json_sha256": "7b4b0c7c90366a202a44d7282d28229cc6769ff2e4dd4a87df33d5a9fb7b29b2",
+    "task_success_rates_csv_sha256": "adf3318b66c91fc0cb28340834fd967cf6091b3eb67535282ec0fe12731471bd"
+  },
+  "schema_version": 1,
+  "status": "UNCERTAIN",
+  "traces": {
+    "episode_count": 2000,
+    "missing_trace_count": 0,
+    "non_finite_count": 0,
+    "record_count": 31804,
+    "root": "/home/chengjuntao/FastWAM-e8/evaluate_results/libero/faildetect_full_20260710_005500/faildetect_traces",
+    "tree_sha256": "d050e1a58d46465bab81ee5fd00919df52c51a5bebea5a2883608c74220f9a94"
+  }
+}

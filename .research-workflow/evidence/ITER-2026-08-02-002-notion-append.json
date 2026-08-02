@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "operation": "append_blocks",
+  "page_id": "3b021e77-89cc-81b9-8238-e3cdbf44dda2",
+  "request_id": "2c6a29a3-9918-4684-9c39-888b3afafdf9",
+  "written_at": "2026-08-02T17:40:00+08:00",
+  "heading": "ITER-2026-08-02-002 update — validation harness completed, formal training blocked",
+  "block_ids": [
+    "3b021e77-89cc-8121-9011-ec3bb0b2d421",
+    "3b021e77-89cc-8183-9a38-e35101f5d1b5",
+    "3b021e77-89cc-8165-b0d4-fd5c42f016f6",
+    "3b021e77-89cc-8192-b6ad-e1cec105bd7b",
+    "3b021e77-89cc-810c-9309-fd31900beb17",
+    "3b021e77-89cc-8112-b026-d47cfba54e29"
+  ],
+  "readback_verified": true,
+  "formal_training_allowed": false
+}

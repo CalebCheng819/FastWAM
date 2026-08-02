@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "operation": "append_blocks",
+  "page_id": "3b021e77-89cc-81b9-8238-e3cdbf44dda2",
+  "request_id": "644611d1-be21-48f7-a199-0c6bd450525e",
+  "written_at": "2026-08-02T17:41:00+08:00",
+  "block_id": "3b021e77-89cc-81bb-b747-e436c590f8ff",
+  "queried_at_utc": "2026-08-02T09:40:51Z",
+  "running_job_count": 4,
+  "active_gpu_sum": 32,
+  "quota_api_available": false,
+  "cloud_mutations_called": [],
+  "formal_training_allowed": false
+}

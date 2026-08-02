@@ -1,0 +1,195 @@
+{
+  "artifact_binding": {
+    "candidate_contract": {
+      "reason": "Data inventory, seed schedule, resolved config, and GPU image must be frozen in a committed policy before a new G0 run.",
+      "status": "UNCERTAIN"
+    },
+    "checkpoint": {
+      "reason": "checkpoint file/hash not both supplied",
+      "status": "UNCERTAIN"
+    },
+    "data_manifest": {
+      "reason": "data manifest file not supplied",
+      "status": "UNCERTAIN"
+    },
+    "dataset_stats": {
+      "reason": "dataset stats file/hash not both supplied",
+      "status": "UNCERTAIN"
+    },
+    "resolved_config": {
+      "reason": "resolved config file/hash not both supplied",
+      "status": "UNCERTAIN"
+    },
+    "run_manifest": {
+      "reason": "run manifest file not supplied",
+      "status": "UNCERTAIN"
+    },
+    "seed_manifest": {
+      "reason": "seed manifest file not supplied",
+      "status": "UNCERTAIN"
+    },
+    "source_git": {
+      "reason": "source root not supplied",
+      "status": "UNCERTAIN"
+    },
+    "trace_seed_binding": {
+      "missing_seed_binding_count": 2000,
+      "status": "UNCERTAIN"
+    }
+  },
+  "candidate": {
+    "root": "/home/chengjuntao/FastWAM-e8/evaluate_results/libero/faildetect_full_20260710_005500",
+    "run_id": "faildetect_full_20260710_005500",
+    "summary_csv_sha256": "d6d49f38eddfad949abb44c7a1030a35fc0b50dddeafebff863d1d4212666b3f",
+    "summary_json_sha256": "e7939973dd24df8ed82fce31f6e7515d9cd489803f9da215e8a2c31b89e39483",
+    "task_result_tree_sha256": "6ddb75609383d3c93c57426e8958b2cfa54e11597de9dcebad5c2f509f1ab16c",
+    "task_success_rates_csv_sha256": "adf3318b66c91fc0cb28340834fd967cf6091b3eb67535282ec0fe12731471bd"
+  },
+  "gate_evidence": {
+    "artifact_bindings_complete": false,
+    "candidate_contract_locked": false,
+    "data_manifest_bound": false,
+    "episode_count": 2000,
+    "evidence_complete": false,
+    "first_replan_env_step": 30,
+    "minimum_trace_records_per_episode": 7,
+    "missing_seed_binding_count": 2000,
+    "missing_trace_count": 0,
+    "non_finite_count": 0,
+    "overall_success_delta": {
+      "ci_lower": 0.0,
+      "ci_upper": 0.0,
+      "estimate": 0.0
+    },
+    "paired_episode_identity_complete": true,
+    "run_manifest_bound": false,
+    "seed_manifest_bound": false,
+    "source_git_clean": false,
+    "suite_count": 4,
+    "suite_success_deltas": {
+      "libero_10": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      },
+      "libero_goal": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      },
+      "libero_object": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      },
+      "libero_spatial": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      }
+    },
+    "tasks_per_suite": 10,
+    "trace_seeds_bound": false,
+    "trials_per_task": 50
+  },
+  "kind": "mf_wam_g0_reproduction_audit",
+  "outcome_reproduction": {
+    "candidate_better_count": 0,
+    "candidate_successes": 1936,
+    "candidate_worse_count": 0,
+    "episode_count": 2000,
+    "exact_episode_outcome_match": true,
+    "point_difference": 0.0,
+    "reference_successes": 1936,
+    "status": "PASS",
+    "suite_difference_intervals": {
+      "libero_10": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      },
+      "libero_goal": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      },
+      "libero_object": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      },
+      "libero_spatial": {
+        "ci_lower": 0.0,
+        "ci_upper": 0.0,
+        "estimate": 0.0
+      }
+    },
+    "suite_differences": {
+      "libero_10": 0.0,
+      "libero_goal": 0.0,
+      "libero_object": 0.0,
+      "libero_spatial": 0.0
+    },
+    "task_bootstrap_95ci": [
+      0.0,
+      0.0
+    ]
+  },
+  "policy": {
+    "baseline_policy_path": "/home/chengjuntao/FastWAM-mfwam/configs/validation/mf_wam_g0_baseline.json",
+    "baseline_policy_sha256": "de25fee328c3ddeb22bc1bdb445467b81a818f8630b9d3c6557ba373433a5cfb",
+    "bootstrap_replicates": 10000,
+    "bootstrap_seed": 42,
+    "expected_action_dimension": 7,
+    "expected_first_replan_env_step": 30,
+    "expected_state_dimension": 8,
+    "minimum_trace_records_per_episode": 7,
+    "overall_equivalence_margin": 0.02,
+    "reference_identity": {
+      "artifact_sha256": {
+        "summary_csv_sha256": "65feb80bec4afca69c56dce2ab5ff6459b2697b11ab7eb0f23143a126ccbcdcd",
+        "summary_json_sha256": "7b4b0c7c90366a202a44d7282d28229cc6769ff2e4dd4a87df33d5a9fb7b29b2",
+        "task_result_tree_sha256": "7739066afd87cb6fd41da26485f2d9fc3a6b0495c853af58cd53ce45237ccd96",
+        "task_success_rates_csv_sha256": "adf3318b66c91fc0cb28340834fd967cf6091b3eb67535282ec0fe12731471bd"
+      },
+      "baseline_id": "FASTWAM-LIBERO-2000-20260708-v1",
+      "labels": {
+        "ckpt": "./checkpoints/fastwam_release/libero_uncond_2cam224.pt",
+        "config": "libero_uncond_2cam224_1e-4",
+        "run_id": "20260708_081156"
+      },
+      "source_commit": "45d8e1458921d83f8ad6cf9ce993d371208dabd0",
+      "status": "PASS"
+    },
+    "suite_drop_margin": 0.03,
+    "suites": [
+      "libero_spatial",
+      "libero_object",
+      "libero_goal",
+      "libero_10"
+    ],
+    "tasks_per_suite": 10,
+    "trials_per_task": 50
+  },
+  "reference": {
+    "root": "/home/chengjuntao/FastWAM-e8/evaluate_results/libero/libero_uncond_2cam224_1e-4/20260708_081156",
+    "summary_csv_sha256": "65feb80bec4afca69c56dce2ab5ff6459b2697b11ab7eb0f23143a126ccbcdcd",
+    "summary_json_sha256": "7b4b0c7c90366a202a44d7282d28229cc6769ff2e4dd4a87df33d5a9fb7b29b2",
+    "task_result_tree_sha256": "7739066afd87cb6fd41da26485f2d9fc3a6b0495c853af58cd53ce45237ccd96",
+    "task_success_rates_csv_sha256": "adf3318b66c91fc0cb28340834fd967cf6091b3eb67535282ec0fe12731471bd"
+  },
+  "schema_version": 1,
+  "status": "UNCERTAIN",
+  "traces": {
+    "episode_count": 2000,
+    "first_replan_env_step": 30,
+    "minimum_records_per_episode": 7,
+    "missing_seed_binding_count": 2000,
+    "missing_trace_count": 0,
+    "non_finite_count": 0,
+    "record_count": 31804,
+    "root": "/home/chengjuntao/FastWAM-e8/evaluate_results/libero/faildetect_full_20260710_005500/faildetect_traces",
+    "seed_binding_status": "UNCERTAIN",
+    "tree_sha256": "d050e1a58d46465bab81ee5fd00919df52c51a5bebea5a2883608c74220f9a94"
+  }
+}

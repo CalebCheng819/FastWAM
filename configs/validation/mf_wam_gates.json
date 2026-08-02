@@ -1,0 +1,869 @@
+{
+  "schema_version": 1,
+  "policy_id": "MF-WAM-G0-G3-2026-08-02-v2",
+  "iteration_id": "ITER-2026-08-02-002",
+  "statuses": [
+    "PASS",
+    "FAIL",
+    "UNCERTAIN"
+  ],
+  "decision_semantics": {
+    "formal_training_rule": "G0 && G1 && G2 && G3 == PASS && specialized_audited_bundle_verified",
+    "gate_precedence": [
+      "FAIL",
+      "UNCERTAIN",
+      "PASS"
+    ],
+    "missing_or_non_finite": "UNCERTAIN",
+    "confidence_interval_crosses_boundary": "UNCERTAIN",
+    "confidence_interval_entirely_in_failure_region": "FAIL"
+  },
+  "evidence_contract": {
+    "interval_fields": [
+      "estimate",
+      "ci_lower",
+      "ci_upper"
+    ],
+    "interval_invariant": "ci_lower <= estimate <= ci_upper",
+    "all_numbers_must_be_finite": true,
+    "required_literals": [
+      {
+        "id": "evidence_complete",
+        "field": "evidence_complete",
+        "expected": true,
+        "mismatch_status": "UNCERTAIN"
+      }
+    ]
+  },
+  "gates": {
+    "G0": {
+      "title": "Baseline parity",
+      "required_literals": [
+        {
+          "id": "episode_count",
+          "field": "episode_count",
+          "expected": 2000,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "suite_count",
+          "field": "suite_count",
+          "expected": 4,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "tasks_per_suite",
+          "field": "tasks_per_suite",
+          "expected": 10,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "trials_per_task",
+          "field": "trials_per_task",
+          "expected": 50,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "missing_trace_count",
+          "field": "missing_trace_count",
+          "expected": 0,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "non_finite_count",
+          "field": "non_finite_count",
+          "expected": 0,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "missing_seed_binding_count",
+          "field": "missing_seed_binding_count",
+          "expected": 0,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "first_replan_env_step",
+          "field": "first_replan_env_step",
+          "expected": 30,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "minimum_trace_records_per_episode",
+          "field": "minimum_trace_records_per_episode",
+          "expected": 7,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "artifact_bindings_complete",
+          "field": "artifact_bindings_complete",
+          "expected": true,
+          "mismatch_status": "UNCERTAIN"
+        },
+        {
+          "id": "paired_episode_identity_complete",
+          "field": "paired_episode_identity_complete",
+          "expected": true,
+          "mismatch_status": "UNCERTAIN"
+        }
+      ],
+      "checks": [
+        {
+          "id": "overall_delta_not_below_minus_2pp",
+          "type": "interval",
+          "metric": "overall_success_delta",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": -0.02
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": -0.02
+          }
+        },
+        {
+          "id": "overall_delta_not_above_plus_2pp",
+          "type": "interval",
+          "metric": "overall_success_delta",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": 0.02
+          },
+          "fail": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": 0.02
+          }
+        },
+        {
+          "id": "each_suite_delta_not_below_minus_3pp",
+          "type": "interval_each",
+          "collection": "suite_success_deltas",
+          "expected_ids": [
+            "libero_spatial",
+            "libero_object",
+            "libero_goal",
+            "libero_10"
+          ],
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": -0.03
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": -0.03
+          }
+        }
+      ]
+    },
+    "G1": {
+      "title": "Action-conditioned failure detection",
+      "required_literals": [
+        {
+          "id": "conformal_alpha",
+          "field": "conformal_alpha",
+          "expected": 0.05,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "split_unit",
+          "field": "split_unit",
+          "expected": "base_episode",
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "split_fractions",
+          "field": "split_fractions",
+          "expected": [
+            0.6,
+            0.15,
+            0.1,
+            0.15
+          ],
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "base_episode_grouping_complete",
+          "field": "base_episode_grouping_complete",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "test_split_locked",
+          "field": "test_split_locked",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "tpr_operating_point_fpr_max",
+          "field": "tpr_operating_point_fpr_max",
+          "expected": 0.05,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "missed_failures_in_delay",
+          "field": "missed_failures_in_delay",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "action_shuffled_control_included",
+          "field": "action_shuffled_control_included",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "fastwam_backbone_frozen",
+          "field": "fastwam_backbone_frozen",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "ci_contract_id",
+          "field": "ci_contract_id",
+          "expected": "MF-WAM-G1-CI-v1",
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "confidence_level",
+          "field": "confidence_level",
+          "expected": 0.95,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "bootstrap_replicates",
+          "field": "bootstrap_replicates",
+          "expected": 10000,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "bootstrap_seed",
+          "field": "bootstrap_seed",
+          "expected": 42,
+          "mismatch_status": "FAIL"
+        }
+      ],
+      "checks": [
+        {
+          "id": "false_positive_rate",
+          "type": "interval",
+          "metric": "false_positive_rate",
+          "valid_range": {
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": 0.075
+          },
+          "fail": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": 0.075
+          }
+        },
+        {
+          "id": "true_positive_rate",
+          "type": "interval",
+          "metric": "true_positive_rate",
+          "valid_range": {
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.8
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.8
+          }
+        },
+        {
+          "id": "auroc",
+          "type": "interval",
+          "metric": "auroc",
+          "valid_range": {
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.85
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.85
+          }
+        },
+        {
+          "id": "median_detection_delay_replans",
+          "type": "interval",
+          "metric": "median_detection_delay_replans",
+          "valid_range": {
+            "minimum": 0.0
+          },
+          "pass": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": 1.0
+          },
+          "fail": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": 1.0
+          }
+        },
+        {
+          "id": "action_conditioned_improves_over_observation_only",
+          "type": "interval",
+          "metric": "action_conditioned_minus_observation_only",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": 0.0
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": 0.0
+          }
+        },
+        {
+          "id": "g1_audited_receipt",
+          "type": "audited_receipt",
+          "field": "audit_receipt",
+          "ci_contract_id": "MF-WAM-G1-CI-v1",
+          "required_scope": {
+            "split_unit": "base_episode",
+            "confidence_level": 0.95,
+            "bootstrap_replicates": 10000,
+            "bootstrap_seed": 42
+          },
+          "required_artifact_digests": [
+            "source_manifest_sha256",
+            "split_manifest_sha256",
+            "identity_inventory_sha256",
+            "metric_rows_sha256",
+            "bootstrap_draws_sha256"
+          ]
+        }
+      ]
+    },
+    "G2": {
+      "title": "Non-collapsed typed router",
+      "required_literals": [
+        {
+          "id": "expert_count",
+          "field": "expert_count",
+          "expected": 4,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "top_k",
+          "field": "top_k",
+          "expected": 2,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "fastwam_backbone_frozen",
+          "field": "fastwam_backbone_frozen",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "active_compute_matched_dense_control",
+          "field": "active_compute_matched_dense_control",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "shuffled_routing_control",
+          "field": "shuffled_routing_control",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "task_id_routing_control",
+          "field": "task_id_routing_control",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "oracle_semantic_mode_control",
+          "field": "oracle_semantic_mode_control",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "semantic_labels_from_simulator_predicates",
+          "field": "semantic_labels_from_simulator_predicates",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "training_seed_count",
+          "field": "training_seed_count",
+          "expected": 3,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "ci_contract_id",
+          "field": "ci_contract_id",
+          "expected": "MF-WAM-G2-CI-v1",
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "confidence_level",
+          "field": "confidence_level",
+          "expected": 0.95,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "bootstrap_replicates",
+          "field": "bootstrap_replicates",
+          "expected": 10000,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "bootstrap_seed",
+          "field": "bootstrap_seed",
+          "expected": 42,
+          "mismatch_status": "FAIL"
+        }
+      ],
+      "checks": [
+        {
+          "id": "relative_improvement",
+          "type": "interval",
+          "metric": "relative_improvement",
+          "valid_range": {
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.05
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.05
+          }
+        },
+        {
+          "id": "each_expert_dispatch_floor",
+          "type": "interval_each",
+          "collection": "expert_dispatch_loads",
+          "expected_ids": [
+            "expert_0",
+            "expert_1",
+            "expert_2",
+            "expert_3"
+          ],
+          "valid_range": {
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.05
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.05
+          }
+        },
+        {
+          "id": "each_expert_dispatch_ceiling",
+          "type": "interval_each",
+          "collection": "expert_dispatch_loads",
+          "expected_ids": [
+            "expert_0",
+            "expert_1",
+            "expert_2",
+            "expert_3"
+          ],
+          "valid_range": {
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": 0.5
+          },
+          "fail": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": 0.5
+          }
+        },
+        {
+          "id": "dispatch_estimates_sum_to_one",
+          "type": "estimate_sum",
+          "collection": "expert_dispatch_loads",
+          "expected_ids": [
+            "expert_0",
+            "expert_1",
+            "expert_2",
+            "expert_3"
+          ],
+          "target": 1.0,
+          "absolute_tolerance": 1e-06
+        },
+        {
+          "id": "effective_expert_count",
+          "type": "interval",
+          "metric": "effective_expert_count",
+          "valid_range": {
+            "minimum": 1.0,
+            "maximum": 4.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 2.4
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 2.4
+          }
+        },
+        {
+          "id": "adjusted_mutual_information",
+          "type": "interval",
+          "metric": "adjusted_mutual_information",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.5
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.5
+          }
+        },
+        {
+          "id": "g2_audited_receipt",
+          "type": "audited_receipt",
+          "field": "audit_receipt",
+          "ci_contract_id": "MF-WAM-G2-CI-v1",
+          "required_scope": {
+            "training_seed_count": 3,
+            "expert_count": 4,
+            "top_k": 2,
+            "confidence_level": 0.95,
+            "bootstrap_replicates": 10000,
+            "bootstrap_seed": 42,
+            "bootstrap_unit": "task_and_training_seed_stratified_paired"
+          },
+          "required_artifact_digests": [
+            "source_manifest_sha256",
+            "training_seed_manifest_sha256",
+            "identity_inventory_sha256",
+            "metric_rows_sha256",
+            "bootstrap_draws_sha256"
+          ]
+        }
+      ]
+    },
+    "G3": {
+      "title": "Closed-loop recovery benefit without nominal harm",
+      "required_literals": [
+        {
+          "id": "fastwam_backbone_frozen",
+          "field": "fastwam_backbone_frozen",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "controller_identity_matched",
+          "field": "controller_identity_matched",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "paired_disturbance_draws",
+          "field": "paired_disturbance_draws",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "horizon_matched",
+          "field": "horizon_matched",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "replan_policy_matched",
+          "field": "replan_policy_matched",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "recovery_attempt_cap_matched",
+          "field": "recovery_attempt_cap_matched",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "controller_trace_complete",
+          "field": "controller_trace_complete",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "strict_success_predicate_bound",
+          "field": "strict_success_predicate_bound",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "conditional_recovery_eligibility",
+          "field": "conditional_recovery_eligibility",
+          "expected": "paired_saved_intervention_states",
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "eligibility_count_matched",
+          "field": "eligibility_count_matched",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "reach_exposure_counts_reported",
+          "field": "reach_exposure_counts_reported",
+          "expected": true,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "ci_contract_id",
+          "field": "ci_contract_id",
+          "expected": "MF-WAM-G3-CI-v1",
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "confidence_level",
+          "field": "confidence_level",
+          "expected": 0.95,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "bootstrap_replicates",
+          "field": "bootstrap_replicates",
+          "expected": 10000,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "bootstrap_seed",
+          "field": "bootstrap_seed",
+          "expected": 42,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "training_seed_count",
+          "field": "training_seed_count",
+          "expected": 3,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "scope_unit",
+          "field": "scope_unit",
+          "expected": "per_model_per_training_seed",
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "nominal_task_count_per_seed",
+          "field": "nominal_task_count_per_seed",
+          "expected": 40,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "nominal_trials_per_task",
+          "field": "nominal_trials_per_task",
+          "expected": 50,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "nominal_episode_count_per_seed",
+          "field": "nominal_episode_count_per_seed",
+          "expected": 2000,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "nominal_episode_count_total_per_model",
+          "field": "nominal_episode_count_total_per_model",
+          "expected": 6000,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "disturbed_task_count_per_seed",
+          "field": "disturbed_task_count_per_seed",
+          "expected": 10,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "disturbed_trials_per_task",
+          "field": "disturbed_trials_per_task",
+          "expected": 50,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "disturbed_episode_count_per_seed",
+          "field": "disturbed_episode_count_per_seed",
+          "expected": 500,
+          "mismatch_status": "FAIL"
+        },
+        {
+          "id": "disturbed_episode_count_total_per_model",
+          "field": "disturbed_episode_count_total_per_model",
+          "expected": 1500,
+          "mismatch_status": "FAIL"
+        }
+      ],
+      "checks": [
+        {
+          "id": "disturbed_success_improvement",
+          "type": "interval",
+          "metric": "disturbed_success_improvement",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.05
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.05
+          }
+        },
+        {
+          "id": "conditional_recovery_improvement",
+          "type": "interval",
+          "metric": "conditional_recovery_improvement",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">=",
+            "threshold": 0.1
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<",
+            "threshold": 0.1
+          }
+        },
+        {
+          "id": "nominal_success_delta",
+          "type": "interval",
+          "metric": "nominal_success_delta",
+          "valid_range": {
+            "minimum": -1.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": -0.02
+          },
+          "fail": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": -0.02
+          }
+        },
+        {
+          "id": "harmful_trigger_rate",
+          "type": "interval",
+          "metric": "harmful_trigger_rate",
+          "valid_range": {
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "pass": {
+            "bound": "ci_upper",
+            "operator": "<=",
+            "threshold": 0.02
+          },
+          "fail": {
+            "bound": "ci_lower",
+            "operator": ">",
+            "threshold": 0.02
+          }
+        },
+        {
+          "id": "g3_audited_receipt",
+          "type": "audited_receipt",
+          "field": "audit_receipt",
+          "ci_contract_id": "MF-WAM-G3-CI-v1",
+          "required_scope": {
+            "training_seed_count": 3,
+            "scope_unit": "per_model_per_training_seed",
+            "nominal_task_count_per_seed": 40,
+            "nominal_trials_per_task": 50,
+            "nominal_episode_count_per_seed": 2000,
+            "nominal_episode_count_total_per_model": 6000,
+            "disturbed_task_count_per_seed": 10,
+            "disturbed_trials_per_task": 50,
+            "disturbed_episode_count_per_seed": 500,
+            "disturbed_episode_count_total_per_model": 1500,
+            "confidence_level": 0.95,
+            "bootstrap_replicates": 10000,
+            "bootstrap_seed": 42,
+            "bootstrap_unit": "task_and_training_seed_stratified_paired"
+          },
+          "required_artifact_digests": [
+            "source_manifest_sha256",
+            "training_seed_manifest_sha256",
+            "nominal_identity_inventory_sha256",
+            "disturbed_identity_inventory_sha256",
+            "saved_state_inventory_sha256",
+            "metric_rows_sha256",
+            "bootstrap_draws_sha256"
+          ]
+        }
+      ]
+    }
+  }
+}
