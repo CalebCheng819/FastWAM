@@ -1,0 +1,20 @@
+{
+  "details": {
+    "branch": "exp/mf-wam-validation",
+    "captured_at": "2026-08-02T08:15:52.934907+00:00",
+    "dirty": false,
+    "head": "45d8e1458921d83f8ad6cf9ce993d371208dabd0",
+    "head_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "origin": "https://github.com/yuantianyuan01/FastWAM.git",
+    "repo_root": "/home/chengjuntao/FastWAM-mfwam",
+    "snapshot_sha256": "e7859e9774d8245465162fd1228078dac9a8e60ef5891d63d338fa5d4058eb1f",
+    "staged_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "status_porcelain": [],
+    "unborn": false,
+    "unstaged_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked": []
+  },
+  "errors": [],
+  "ok": true,
+  "subject": "git-snapshot"
+}

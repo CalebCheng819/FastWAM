@@ -1,0 +1,19 @@
+schema_version = 1
+
+[project]
+id = "MF-WAM"
+name = "Modular Fail-Aware WAM"
+experiment_id_prefix = "MFWAM"
+repository_url = "https://github.com/CalebCheng819/FastWAM.git"
+
+[notion]
+project_page_id = "3b021e77-89cc-81b9-8238-e3cdbf44dda2"
+experiments_database_id = "110f6b6f-9069-4a26-864c-f0f82fc0a215"
+experiments_data_source_id = "a693d9d0-b4ed-44e8-a4e0-a153ef7deda6"
+workspace_id = "2dc05352-6acc-48e1-a630-f42652151140"
+workflow_page_id = "39e21e77-89cc-8032-9342-fde858da46f1"
+calendar_date_property = "Experiment Window"
+
+[storage]
+artifact_root = "/cpfs/user/chengjuntao/eval/MF-WAM"
+outbox_directory = ".research-workflow/outbox"

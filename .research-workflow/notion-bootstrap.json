@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "created_at": "2026-08-02T16:13:00+08:00",
+  "workspace_id": "2dc05352-6acc-48e1-a630-f42652151140",
+  "project": {
+    "project_id": "MF-WAM",
+    "page_id": "3b021e77-89cc-81b9-8238-e3cdbf44dda2",
+    "parent_page_id": "3a521e77-89cc-8050-baac-cd4a93e35e67",
+    "readback_truncated": false,
+    "unknown_block_ids": []
+  },
+  "experiments": {
+    "database_id": "110f6b6f-9069-4a26-864c-f0f82fc0a215",
+    "data_source_id": "a693d9d0-b4ed-44e8-a4e0-a153ef7deda6",
+    "title": "MF-WAM Experiments",
+    "initial_exact_query_count": 0,
+    "schema_verified": true
+  },
+  "create_request_sha256": "b400cc83b096f180e511caaa430fe34dfaeb8d9f3919d80da3f3fa4972bc2c7c"
+}
