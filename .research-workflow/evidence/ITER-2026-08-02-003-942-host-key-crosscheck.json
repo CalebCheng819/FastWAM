@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_942_host_key_crosscheck",
+  "checked_at": "2026-08-02T21:59:32+08:00",
+  "endpoint": "123.57.187.96:942",
+  "presented_ed25519_fingerprint": "SHA256:2MX8ip7Hh83W0bwHghgoA0+Y1A4OXDUsfeqxRnSe5H0",
+  "stored_942_ed25519_fingerprint": "SHA256:r0C0Z3i3GNES3lEGIGI+SxdthlMTYeA7CSQTlZOSPVE",
+  "trusted_970_ed25519_fingerprint": "SHA256:2MX8ip7Hh83W0bwHghgoA0+Y1A4OXDUsfeqxRnSe5H0",
+  "presented_matches_trusted_970": true,
+  "direct_942_known_hosts_entry_is_stale": true,
+  "safe_connection_policy": "StrictHostKeyChecking=yes with HostKeyAlias=[123.57.187.96]:970",
+  "known_hosts_modified": false,
+  "host_key_check_disabled": false,
+  "cloud_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "formal_training_allowed": false
+}

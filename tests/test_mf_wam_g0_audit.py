@@ -432,6 +432,14 @@ class G0AuditTest(unittest.TestCase):
             )
             result = self._audit(self._args(reference, candidate, **overrides))
         self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["scientific_gate_status"], "UNCERTAIN")
+        self.assertEqual(
+            result["evidence_classification"], "LEGACY_DIAGNOSTIC_ONLY"
+        )
+        self.assertFalse(result["formal_training_allowed"])
+        self.assertEqual(
+            result["superseded_by"], "scripts/audit_mf_wam_g0_bundle.py"
+        )
         self.assertTrue(result["gate_evidence"]["artifact_bindings_complete"])
         self.assertEqual(result["artifact_binding"]["run_manifest"]["status"], "PASS")
 

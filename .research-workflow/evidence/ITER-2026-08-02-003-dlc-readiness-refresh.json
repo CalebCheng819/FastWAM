@@ -1,0 +1,69 @@
+{
+  "acr": {
+    "api_results": {
+      "GetAuthorizationToken": "AUTHENTICATION_FAILED",
+      "GetRepository": "AUTHENTICATION_FAILED"
+    },
+    "instance_id": "cri-du2l5gx1gu03x3xd",
+    "minimal_read_api_resolution": [
+      "cr:GetRepository",
+      "cr:ListRepositoryTag"
+    ],
+    "repository": "pj4090/chengjuntao",
+    "repository_id_received": false,
+    "temporary_registry_credential_received": false
+  },
+  "active_gpu_sum": 32,
+  "active_jobs": [
+    {
+      "display_name": "fastwam-mr-n234-vg1h1-acv0-rtinit-s42-finalonly-5000-20260802t092800z",
+      "gpu": 8,
+      "job_id": "dlcgm7tai1vrpnvr",
+      "status": "Running"
+    },
+    {
+      "display_name": "fastwam-mr-n234-vg1h1-acv1-rtinit-s42-finalonly-5000-20260802t092800z",
+      "gpu": 8,
+      "job_id": "dlcgm7tairn247c3",
+      "status": "Running"
+    },
+    {
+      "display_name": "fastwam-mr-n234-vg1h1-acv1-s42-5000-20260802t073651z",
+      "gpu": 8,
+      "job_id": "dlcena4uivun5w8n",
+      "status": "Running"
+    },
+    {
+      "display_name": "fastwam-mr-n234-vg1hub1-s42-formal-20260801",
+      "gpu": 8,
+      "job_id": "dlc1hqocuisxxdkb",
+      "status": "Running"
+    }
+  ],
+  "cloud_mutations_called": [],
+  "credentials_printed": false,
+  "dlc_list_jobs": {
+    "active_job_count": 4,
+    "request_count": 1,
+    "resource_id": "quotaksvqq2oh2pg",
+    "status_counts": {
+      "Failed": 12,
+      "Running": 4,
+      "Stopped": 1,
+      "Succeeded": 9
+    },
+    "total_jobs": 26,
+    "workspace_id": "270969"
+  },
+  "formal_training_allowed": false,
+  "image": {
+    "anonymous_registry_bearer_token_received": true,
+    "anonymous_bearer_manifest_head_status": 401,
+    "immutable_digest_available": false,
+    "mutable_reference": "pj4090acr-registry-vpc.cn-beijing.cr.aliyuncs.com/pj4090/chengjuntao:cjt-multirobot-benchmark"
+  },
+  "kind": "mf_wam_dlc_readiness_refresh",
+  "queried_at_utc": "2026-08-02T11:19:14Z",
+  "schema_version": 1,
+  "temporary_sdk_removed": true
+}

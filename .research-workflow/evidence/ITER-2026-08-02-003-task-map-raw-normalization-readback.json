@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_task_map_raw_normalization_readback",
+  "checked_at": "2026-08-03T00:05:57+08:00",
+  "repository_relative_path": "configs/validation/mf_wam_g0_task_map.json",
+  "normalization": "removed one redundant blank line at EOF; retained one canonical POSIX newline",
+  "before": {
+    "size_bytes": 16305,
+    "file_sha256": "bb358902176fa8651a70c895b386fbffe3405111712275d01df053c4e0c6dd8c",
+    "canonical_sha256": "b5ec2f546ff7b6386b6af181af1b1dd297b2b37f33274f8f411aab9e003f021f"
+  },
+  "after": {
+    "size_bytes": 16304,
+    "file_sha256": "71b79aa08e9f73a1107ccc54fb7070da67b56c147b0f77f73a72201582e4b96b",
+    "canonical_sha256": "b5ec2f546ff7b6386b6af181af1b1dd297b2b37f33274f8f411aab9e003f021f"
+  },
+  "semantic_json_changed": false,
+  "historical_evidence_preserved": [
+    ".research-workflow/evidence/ITER-2026-08-02-003-g0-cpu-preflight.json",
+    ".research-workflow/evidence/ITER-2026-08-02-003-approved-assets-live-readback.json"
+  ],
+  "approved_assets_manifest_updated": true,
+  "approved_assets_manifest_raw_sha256": {
+    "before": "67015408fd70219e07e1869fb20152097438ac25fb5452a1e4e14c54753c1690",
+    "after": "f4cbb8ce0f518782f7083ce9e0c90dfd0c8f1000a624ea3e46251488b62bc690"
+  },
+  "specialized_auditor_literal_updated": true,
+  "formal_training_allowed": false
+}

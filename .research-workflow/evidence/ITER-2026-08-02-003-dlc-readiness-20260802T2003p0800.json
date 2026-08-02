@@ -1,0 +1,47 @@
+{
+  "active_gpu_sum": 32,
+  "active_job_count": 4,
+  "active_jobs": [
+    {
+      "display_name": "fastwam-mr-n234-vg1h1-acv0-rtinit-s42-finalonly-5000-20260802t092800z",
+      "gpu": 8,
+      "job_id": "dlcgm7tai1vrpnvr",
+      "status": "Running"
+    },
+    {
+      "display_name": "fastwam-mr-n234-vg1h1-acv1-rtinit-s42-finalonly-5000-20260802t092800z",
+      "gpu": 8,
+      "job_id": "dlcgm7tairn247c3",
+      "status": "Running"
+    },
+    {
+      "display_name": "fastwam-mr-n234-vg1h1-acv1-s42-5000-20260802t073651z",
+      "gpu": 8,
+      "job_id": "dlcena4uivun5w8n",
+      "status": "Running"
+    },
+    {
+      "display_name": "fastwam-mr-n234-vg1hub1-s42-formal-20260801",
+      "gpu": 8,
+      "job_id": "dlc1hqocuisxxdkb",
+      "status": "Running"
+    }
+  ],
+  "checked_at": "2026-08-02T20:03:24+08:00",
+  "cloud_mutations_called": [],
+  "control_instance": "root@123.57.187.96:942",
+  "credentials_printed": false,
+  "formal_training_allowed": false,
+  "kind": "mf_wam_dlc_readiness_refresh",
+  "resource_id": "quotaksvqq2oh2pg",
+  "schema_version": 1,
+  "status_counts": {
+    "Failed": 12,
+    "Running": 4,
+    "Stopped": 1,
+    "Succeeded": 9
+  },
+  "temporary_sdk_removed": true,
+  "total_jobs": 26,
+  "workspace_id": "270969"
+}

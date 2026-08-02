@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_python_minimal_environment_readback",
+  "checked_at": "2026-08-02T21:29:00+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "python_executable": "/usr/bin/python3",
+  "uncontrolled_probe": {
+    "requested_environment": {
+      "TEST": "1"
+    },
+    "observed_environment": {
+      "LC_CTYPE": "C.UTF-8",
+      "TEST": "1"
+    },
+    "implicit_locale_key_added": true
+  },
+  "controlled_probe": {
+    "requested_environment": {
+      "LC_ALL": "C.UTF-8",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONNOUSERSITE": "1",
+      "TEST": "1",
+      "TZ": "UTC"
+    },
+    "observed_environment": {
+      "LC_ALL": "C.UTF-8",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONNOUSERSITE": "1",
+      "TEST": "1",
+      "TZ": "UTC"
+    },
+    "exact_match": true
+  },
+  "decision": "The formal child environment must explicitly set locale and Python isolation keys before exact observed-environment hashing.",
+  "cloud_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "formal_training_allowed": false
+}

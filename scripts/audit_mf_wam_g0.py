@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Fail-closed audit of a paired FastWAM LIBERO reproduction.
+"""Legacy diagnostic audit of a paired FastWAM LIBERO reproduction.
 
 The audit separates outcome reproduction from artifact binding.  A candidate
 can reproduce all episode outcomes while the full G0 gate remains UNCERTAIN if
 the checkpoint, statistics, or resolved configuration cannot be hashed in the
-current audit.  Results are written to stdout; callers decide how to persist a
-preregistered receipt.
+current audit.  This module predates the canonical schema-v2 trace/receipt
+contract and MUST NOT be used for scientific G0 authorization.  Its historical
+``status`` field is retained only for compatibility; every result explicitly
+keeps ``scientific_gate_status=UNCERTAIN`` and
+``formal_training_allowed=false``.  Use ``audit_mf_wam_g0_bundle.py`` for the
+canonical specialized audit.
 """
 
 from __future__ import annotations
@@ -1532,6 +1536,10 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "kind": "mf_wam_g0_reproduction_audit",
         "status": status,
+        "scientific_gate_status": "UNCERTAIN",
+        "evidence_classification": "LEGACY_DIAGNOSTIC_ONLY",
+        "formal_training_allowed": False,
+        "superseded_by": "scripts/audit_mf_wam_g0_bundle.py",
         "outcome_reproduction": outcome,
         "artifact_binding": bindings,
         "reference": {"root": str(reference_root), **reference_receipt},
@@ -1643,6 +1651,10 @@ def main() -> int:
             "schema_version": 1,
             "kind": "mf_wam_g0_reproduction_audit",
             "status": "FAIL",
+            "scientific_gate_status": "UNCERTAIN",
+            "evidence_classification": "LEGACY_DIAGNOSTIC_ONLY",
+            "formal_training_allowed": False,
+            "superseded_by": "scripts/audit_mf_wam_g0_bundle.py",
             "error": str(exc),
         }
     print(json.dumps(result, indent=2, sort_keys=True, allow_nan=False))

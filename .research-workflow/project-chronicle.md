@@ -15,6 +15,9 @@ The Notion page is the canonical append-only project history. This file binds th
 local checkout to its exact remote identities and is not a substitute for the
 full Chronicle.
 
-Formal MF-WAM training is permitted only when `G0 && G1 && G2 && G3 == PASS`.
-Detection, router probes, sidecar recovery, training, and final evaluation use
-separate globally unique Experiment IDs and pages.
+A bounded S1 probe is eligible only after specialized-auditor-verified G0. Paired
+S2 confirmatory training is eligible only after verified G1 plus the frozen
+single-seed G2/G3 feasibility pilot; the paper-level positive conclusion still
+requires `G0 && G1 && G2 && G3 == PASS`. Detection, router probes, sidecar
+recovery, training, and final evaluation use separate globally unique
+Experiment IDs and pages. The current runtime authorizer remains hard-disabled.

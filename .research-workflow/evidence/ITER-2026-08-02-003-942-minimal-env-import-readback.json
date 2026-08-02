@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_minimal_environment_import_readback",
+  "checked_at": "2026-08-02T21:36:00+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "fixed_environment_keys": [
+    "HOME",
+    "LC_ALL",
+    "PATH",
+    "PYTHONDONTWRITEBYTECODE",
+    "PYTHONNOUSERSITE",
+    "PYTHONUTF8",
+    "TMPDIR",
+    "TZ"
+  ],
+  "probes": [
+    {
+      "python_executable": "/usr/bin/python3",
+      "imports": {
+        "hydra": "ModuleNotFoundError",
+        "mujoco": "ModuleNotFoundError",
+        "numpy": "ModuleNotFoundError",
+        "omegaconf": "ModuleNotFoundError",
+        "torch": "ModuleNotFoundError"
+      },
+      "decision": "reject for the G0 worker"
+    },
+    {
+      "python_executable": "/usr/local/bin/python3",
+      "imports": {
+        "hydra": "1.3.4",
+        "mujoco": "ModuleNotFoundError",
+        "numpy": "2.5.1",
+        "omegaconf": "2.3.0",
+        "torch": "2.10.0+cu128"
+      },
+      "decision": "control-host contract tests are possible, but formal LIBERO execution remains unproven because mujoco is absent and this is not the DLC worker image"
+    }
+  ],
+  "environment_exact_after_python_start": true,
+  "cloud_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "formal_training_allowed": false
+}

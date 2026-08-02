@@ -145,6 +145,114 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(raw_policy["policy_id"], load_policy()["policy_id"])
         self.assertEqual(list(raw_policy["gates"]), ["G0", "G1", "G2", "G3"])
 
+    def test_staged_protocol_is_explicitly_non_authorizing(self) -> None:
+        policy = load_policy()
+        semantics = policy["decision_semantics"]
+        runtime = semantics["runtime_authorization"]
+        self.assertEqual(runtime["state"], "HARD_DISABLED")
+        self.assertFalse(runtime["implemented"])
+        self.assertFalse(runtime["formal_training_allowed"])
+        self.assertEqual(
+            semantics["stage_order"],
+            [
+                "S1_PROBE_SINGLE_SEED_PILOT",
+                "S2_PAIRED_CONFIRMATORY_TRAINING",
+                "S3_PAPER_LEVEL_CONFIRMATORY_CONCLUSION",
+            ],
+        )
+        self.assertEqual(
+            set(policy["authorization_stages"]), set(semantics["stage_order"])
+        )
+        self.assertTrue(
+            all(
+                stage["grants_runtime_authority"] is False
+                for stage in policy["authorization_stages"].values()
+            )
+        )
+
+    def test_policy_mutations_fail_closed(self) -> None:
+        def remove_decision_semantics(policy: dict) -> None:
+            del policy["decision_semantics"]
+
+        def add_unknown_semantic(policy: dict) -> None:
+            policy["decision_semantics"]["unknown_authority"] = True
+
+        def reorder_stages(policy: dict) -> None:
+            policy["decision_semantics"]["stage_order"].reverse()
+
+        def reorder_stage_objects(policy: dict) -> None:
+            stages = policy["authorization_stages"]
+            policy["authorization_stages"] = dict(reversed(list(stages.items())))
+
+        def remove_stage_field(policy: dict) -> None:
+            del policy["authorization_stages"][
+                "S1_PROBE_SINGLE_SEED_PILOT"
+            ]["entry_rule"]
+
+        def add_unknown_stage_field(policy: dict) -> None:
+            policy["authorization_stages"][
+                "S2_PAIRED_CONFIRMATORY_TRAINING"
+            ]["implicit_permission"] = True
+
+        def grant_runtime_authority(policy: dict) -> None:
+            policy["authorization_stages"][
+                "S1_PROBE_SINGLE_SEED_PILOT"
+            ]["grants_runtime_authority"] = True
+
+        def exceed_per_program_cap(policy: dict) -> None:
+            policy["authorization_stages"][
+                "S2_PAIRED_CONFIRMATORY_TRAINING"
+            ]["gpu_budget"]["maximum_gpus_per_program"] = 9
+
+        def exceed_total_cap(policy: dict) -> None:
+            policy["authorization_stages"][
+                "S3_PAPER_LEVEL_CONFIRMATORY_CONCLUSION"
+            ]["gpu_budget"]["maximum_concurrent_mf_wam_gpus"] = 17
+
+        def remove_gpu_cap(policy: dict) -> None:
+            del policy["authorization_stages"][
+                "S1_PROBE_SINGLE_SEED_PILOT"
+            ]["gpu_budget"]["maximum_gpus_per_program"]
+
+        def remove_specialized_entry_receipt(policy: dict) -> None:
+            policy["authorization_stages"][
+                "S1_PROBE_SINGLE_SEED_PILOT"
+            ]["required_entry_evidence"].remove(
+                "specialized_g0_audit_receipt"
+            )
+
+        def remove_g0_receipt_check(policy: dict) -> None:
+            policy["gates"]["G0"]["checks"].pop()
+
+        def remove_s2_specialized_receipt(policy: dict) -> None:
+            policy["authorization_stages"][
+                "S2_PAIRED_CONFIRMATORY_TRAINING"
+            ]["required_entry_evidence"].remove(
+                "specialized_g1_audit_receipt"
+            )
+
+        mutations = {
+            "missing decision semantics": remove_decision_semantics,
+            "unknown semantic field": add_unknown_semantic,
+            "reordered stages": reorder_stages,
+            "reordered stage objects": reorder_stage_objects,
+            "missing stage field": remove_stage_field,
+            "unknown stage field": add_unknown_stage_field,
+            "runtime authority": grant_runtime_authority,
+            "per-program GPU cap": exceed_per_program_cap,
+            "total GPU cap": exceed_total_cap,
+            "missing GPU cap": remove_gpu_cap,
+            "missing specialized stage receipt": remove_specialized_entry_receipt,
+            "missing S2 specialized receipt": remove_s2_specialized_receipt,
+            "missing G0 receipt check": remove_g0_receipt_check,
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                policy = load_policy()
+                mutate(policy)
+                with self.assertRaises(ValueError):
+                    evaluate_policy({}, policy)
+
     @staticmethod
     def _reject_constant(value: str) -> None:
         raise AssertionError(f"non-standard JSON constant: {value}")
@@ -207,25 +315,162 @@ class GateDecisionTests(unittest.TestCase):
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
 
+    def _attach_structural_g0_receipt(self, policy: dict | None = None) -> Path:
+        policy = load_policy() if policy is None else policy
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        check = next(
+            item
+            for item in policy["gates"]["G0"]["checks"]
+            if item["type"] == "specialized_audited_receipt"
+        )
+        gate_evidence = self.evidence["G0"]
+        evidence_sha256 = self._canonical_sha256(gate_evidence)
+        artifact_digests = {
+            name: hashlib.sha256(f"G0-{name}".encode("ascii")).hexdigest()
+            for name in check["required_artifact_digests"]
+        }
+        receipt = {
+            "schema_version": check["receipt_schema_version"],
+            "kind": check["receipt_kind"],
+            "gate_id": "G0",
+            "policy_id": policy["policy_id"],
+            "policy_sha256": self._canonical_sha256(policy),
+            "ci_contract_id": check["ci_contract_id"],
+            "evidence_sha256": evidence_sha256,
+            "terminal": True,
+            "scientific_status": "SPECIALIZED_G0_PASS",
+            "formal_training_allowed": False,
+            "source_manifest_sha256": artifact_digests[
+                "source_manifest_sha256"
+            ],
+            "scope": check["required_scope"],
+            "auditor": {"source_commit": "a" * 40, "clean": True},
+            "artifact_digests": artifact_digests,
+            "anchor_lineage": [
+                {
+                    "anchor_type": anchor_type,
+                    "anchor_id": f"test-{anchor_type}",
+                    "artifact_sha256": hashlib.sha256(
+                        f"G0-anchor-{anchor_type}".encode("ascii")
+                    ).hexdigest(),
+                }
+                for anchor_type in check["required_external_anchor_types"]
+            ],
+        }
+        path = root / "g0-specialized-receipt.json"
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+        gate_evidence[check["field"]] = {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        return path
+
+    def test_g0_receipt_authorization_claim_is_required_false(self) -> None:
+        for mode in ("missing", "true"):
+            with self.subTest(mode=mode):
+                self.evidence = passing_evidence()
+                path = self._attach_structural_g0_receipt()
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if mode == "missing":
+                    del payload["formal_training_allowed"]
+                else:
+                    payload["formal_training_allowed"] = True
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                reference = self.evidence["G0"]["specialized_g0_audit_receipt"]
+                reference["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                result = evaluate_gate("G0", self.evidence["G0"])
+                self.assertEqual(result["status"], FAIL)
+                self.assertFalse(result["stage_eligibility"])
+                self.assertFalse(result["formal_training_allowed"])
+
     def test_safe_intervals_and_receipt_envelopes_do_not_authorize(self) -> None:
         self._attach_audited_receipts()
         result = evaluate_policy(self.evidence)
         self.assertEqual(result["status"], UNCERTAIN)
-        self.assertEqual(result["gates"]["G0"]["status"], PASS)
+        g0 = result["gates"]["G0"]
+        self.assertEqual(g0["status"], UNCERTAIN)
+        self.assertEqual(g0["outcome_parity_status"], PASS)
+        self.assertEqual(g0["scientific_gate_status"], UNCERTAIN)
+        self.assertEqual(g0["evidence_classification"], "OUTCOME_PARITY_ONLY")
         self.assertTrue(
             all(
                 result["gates"][gate_id]["status"] == UNCERTAIN
                 for gate_id in ("G1", "G2", "G3")
             )
         )
+        self.assertTrue(
+            all(
+                next(
+                    check
+                    for check in result["gates"][gate_id]["checks"]
+                    if check["type"] == "audited_receipt"
+                )["evidence_classification"]
+                == "STRUCTURAL_PASS_ONLY"
+                for gate_id in ("G1", "G2", "G3")
+            )
+        )
         self.assertFalse(result["formal_training_allowed"])
         self.assertFalse(result["gate_thresholds_passed"])
+        self.assertTrue(not any(result["stage_eligibility"].values()))
 
     def test_raw_passing_dictionary_cannot_authorize_training(self) -> None:
         result = evaluate_policy(self.evidence)
         self.assertEqual(result["status"], UNCERTAIN)
         self.assertFalse(result["formal_training_allowed"])
+        self.assertEqual(result["gates"]["G0"]["outcome_parity_status"], PASS)
+        self.assertEqual(result["gates"]["G0"]["status"], UNCERTAIN)
+        self.assertEqual(
+            result["gates"]["G0"]["evidence_classification"],
+            "OUTCOME_PARITY_ONLY",
+        )
         self.assertEqual(result["gates"]["G1"]["status"], UNCERTAIN)
+
+    def test_deleted_g0_specialized_receipt_cannot_pass(self) -> None:
+        self._attach_structural_g0_receipt()
+        del self.evidence["G0"]["specialized_g0_audit_receipt"]
+        result = evaluate_gate("G0", self.evidence["G0"])
+        self.assertEqual(result["outcome_parity_status"], PASS)
+        self.assertEqual(result["scientific_gate_status"], UNCERTAIN)
+        self.assertEqual(result["evidence_classification"], "OUTCOME_PARITY_ONLY")
+        self.assertFalse(result["stage_eligibility"])
+
+    def test_forged_resealed_g0_receipt_is_only_structural(self) -> None:
+        self._attach_structural_g0_receipt()
+        result = evaluate_gate("G0", self.evidence["G0"])
+        self.assertEqual(result["outcome_parity_status"], PASS)
+        self.assertEqual(result["scientific_gate_status"], UNCERTAIN)
+        self.assertEqual(result["evidence_classification"], "STRUCTURAL_PASS_ONLY")
+        self.assertFalse(result["stage_eligibility"])
+        receipt_check = next(
+            check
+            for check in result["checks"]
+            if check["type"] == "specialized_audited_receipt"
+        )
+        self.assertTrue(receipt_check["envelope_verified"])
+        self.assertFalse(receipt_check["specialized_artifact_recomputation_verified"])
+        self.assertFalse(receipt_check["external_anchor_lineage_verified"])
+
+    def test_structural_status_strings_cannot_create_g0_pass(self) -> None:
+        self.evidence["G0"].update(
+            {
+                "status": PASS,
+                "scientific_status": "SPECIALIZED_G0_PASS",
+                "evidence_classification": "SPECIALIZED_G0_PASS",
+                "stage_eligibility": True,
+            }
+        )
+        gate_result = evaluate_gate("G0", self.evidence["G0"])
+        policy_result = evaluate_policy(self.evidence)
+        self.assertEqual(gate_result["outcome_parity_status"], PASS)
+        self.assertEqual(gate_result["scientific_gate_status"], UNCERTAIN)
+        self.assertEqual(
+            gate_result["evidence_classification"], "OUTCOME_PARITY_ONLY"
+        )
+        self.assertFalse(gate_result["stage_eligibility"])
+        self.assertTrue(not any(policy_result["stage_eligibility"].values()))
+        self.assertFalse(policy_result["formal_training_allowed"])
 
     def test_missing_gate_and_missing_metric_are_uncertain(self) -> None:
         del self.evidence["G1"]["auroc"]

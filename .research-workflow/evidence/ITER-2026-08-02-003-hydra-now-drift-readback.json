@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_hydra_now_drift_readback",
+  "checked_at": "2026-08-02T21:28:06+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "official_root": "/mnt/workspace/FastWAM",
+  "hydra_version_base": "1.3",
+  "config_name": "sim_libero",
+  "fixed_overrides": {
+    "task": "libero_uncond_2cam224_1e-4",
+    "EVALUATION.output_dir": "/mnt/workspace/eval/MF-WAM/synthetic"
+  },
+  "compositions": [
+    {
+      "output_dir": "./runs/train/2026-08-02_21-27-58",
+      "EVALUATION.output_dir": "/mnt/workspace/eval/MF-WAM/synthetic"
+    },
+    {
+      "output_dir": "./runs/train/2026-08-02_21-28-00",
+      "EVALUATION.output_dir": "/mnt/workspace/eval/MF-WAM/synthetic"
+    }
+  ],
+  "sleep_seconds_between_compositions": 2,
+  "top_level_output_dir_drift_observed": true,
+  "decision": "Formal worker commands must override and seal top-level output_dir; locking only EVALUATION.output_dir is insufficient.",
+  "cloud_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "formal_training_allowed": false
+}

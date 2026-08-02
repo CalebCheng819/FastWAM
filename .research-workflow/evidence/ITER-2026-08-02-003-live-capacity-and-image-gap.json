@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "queried_at_utc": "2026-08-02T10:11:21Z",
+  "control_host": {
+    "ssh_port": 942,
+    "role": "new_dsw_same_cpfs",
+    "host_key_verification": "strict_trusted_key_alias_from_port_970"
+  },
+  "dlc": {
+    "workspace_id": "270969",
+    "resource_id": "quotaksvqq2oh2pg",
+    "active_gpu_sum": 32,
+    "active_job_count": 4,
+    "active_jobs": [
+      {
+        "job_id": "dlcgm7tai1vrpnvr",
+        "display_name": "fastwam-mr-n234-vg1h1-acv0-rtinit-s42-finalonly-5000-20260802t092800z",
+        "status": "Running",
+        "gpu": 8
+      },
+      {
+        "job_id": "dlcgm7tairn247c3",
+        "display_name": "fastwam-mr-n234-vg1h1-acv1-rtinit-s42-finalonly-5000-20260802t092800z",
+        "status": "Running",
+        "gpu": 8
+      },
+      {
+        "job_id": "dlcena4uivun5w8n",
+        "display_name": "fastwam-mr-n234-vg1h1-acv1-s42-5000-20260802t073651z",
+        "status": "Running",
+        "gpu": 8
+      },
+      {
+        "job_id": "dlc1hqocuisxxdkb",
+        "display_name": "fastwam-mr-n234-vg1hub1-s42-formal-20260801",
+        "status": "Running",
+        "gpu": 8
+      }
+    ],
+    "quota_api_available": false,
+    "quota_error": {
+      "code": "RAMForbidden",
+      "status_code": 403
+    },
+    "cloud_mutations_called": []
+  },
+  "image_identity": {
+    "observed_job_id": "dlc1hqocuisxxdkb",
+    "mutable_uri": "pj4090acr-registry-vpc.cn-beijing.cr.aliyuncs.com/pj4090/chengjuntao:cjt-multirobot-benchmark",
+    "immutable_digest_available": false,
+    "registry_manifest_head_status": 401,
+    "decision": "Do not preregister or launch G0 until an immutable image digest is obtained from a trusted registry response or the new GPU pod runtime."
+  },
+  "credentials_printed": false,
+  "formal_training_allowed": false
+}

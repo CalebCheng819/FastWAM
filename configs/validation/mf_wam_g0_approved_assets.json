@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_approved_assets",
+  "source": {
+    "fastwam_commit": "45d8e1458921d83f8ad6cf9ce993d371208dabd0",
+    "libero_commit": "8f1084e3132a39270c3a13ebe37270a43ece2a01"
+  },
+  "dataset": {
+    "dataset_id": "libero-40",
+    "root": "/mnt/workspace/LIBERO/libero/libero",
+    "revision": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
+    "tree_algorithm": "sha256sum-posix-path-v1",
+    "tree_sha256": "839db05f1ab9a26966d95c39bf2d292d586c7de1d0d2cd02fae27a04a1a8a21d",
+    "task_count": 40,
+    "file_count": 80,
+    "total_size_bytes": 1806808
+  },
+  "task_map": {
+    "repository_relative_path": "configs/validation/mf_wam_g0_task_map.json",
+    "file_sha256": "71b79aa08e9f73a1107ccc54fb7070da67b56c147b0f77f73a72201582e4b96b",
+    "canonical_sha256": "b5ec2f546ff7b6386b6af181af1b1dd297b2b37f33274f8f411aab9e003f021f",
+    "size_bytes": 16304
+  },
+  "checkpoint": {
+    "path": "/mnt/workspace/checkpoints/FastWAM/yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/libero_uncond_2cam224.pt",
+    "sha256": "1000437cfcf55c000094f79a2600634c502bcb5b492476b94bf8509883a49579",
+    "size_bytes": 12041735140
+  },
+  "dataset_stats": {
+    "path": "/mnt/workspace/checkpoints/FastWAM/yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/libero_uncond_2cam224_dataset_stats.json",
+    "sha256": "30f81ad7d5076e97323e3328bce003e01a04cb21327b5bacd21bb72846768638",
+    "size_bytes": 40939
+  },
+  "model_cache": {
+    "root": "/mnt/workspace/checkpoints/FastWAM/model-cache",
+    "algorithm": "model-cache-per-file-sha256-v1",
+    "file_count": 6,
+    "files": [
+      {
+        "role": "text_encoder_weights",
+        "path": "DiffSynth-Studio/Wan-Series-Converted-Safetensors/models_t5_umt5-xxl-enc-bf16.safetensors",
+        "sha256": "d92de679881d38af9c89eff7bb1b6d6c9d96cb2b69831e4027e9ecabdd38eb23",
+        "size_bytes": 11361845432
+      },
+      {
+        "role": "vae_weights",
+        "path": "DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors",
+        "sha256": "0e913a2ca571c75fcb63385a8edadcca73454af5842596cb1ad11e4142590996",
+        "size_bytes": 1409401152
+      },
+      {
+        "role": "tokenizer_config",
+        "path": "Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/tokenizer_config.json",
+        "sha256": "ed9a3a8b0faa71a70a32847e0435fe036e6e112d4df4edb7bb48a921e344dc05",
+        "size_bytes": 61728
+      },
+      {
+        "role": "tokenizer_json",
+        "path": "Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/tokenizer.json",
+        "sha256": "6e197b4d3dbd71da14b4eb255f4fa91c9c1f2068b20a2de2472967ca3d22602b",
+        "size_bytes": 16837417
+      },
+      {
+        "role": "tokenizer_special_tokens_map",
+        "path": "Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/special_tokens_map.json",
+        "sha256": "7b8a9f5040adb67b5805abdfd42c1f8d0f3d0e711f10726580eb3789cd0ad61d",
+        "size_bytes": 6623
+      },
+      {
+        "role": "tokenizer_model",
+        "path": "Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/spiece.model",
+        "sha256": "e3909a67b780650b35cf529ac782ad2b6b26e6d1f849d3fbb6a872905f452458",
+        "size_bytes": 4548313
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "checked_at": "2026-08-02T19:56:17+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "formal_training_allowed": false,
+  "gpu_runtime": {
+    "local_nvidia_smi_available": false,
+    "scope": "control-instance-only; DLC worker evidence remains required"
+  },
+  "hostname": "dsw-473663-68974db5d7-wz9c6",
+  "kind": "mf_wam_942_shared_mount_refresh",
+  "schema_version": 1,
+  "shared_mount": {
+    "available_bytes_human": "27T",
+    "capacity_bytes_human": "600T",
+    "device_inode_cpfs_user_chengjuntao": "1048633:79458992131",
+    "device_inode_mnt_workspace": "1048633:79458992131",
+    "same_device_and_inode": true,
+    "used_bytes_human": "574T",
+    "used_percent": 96
+  }
+}

@@ -1,0 +1,326 @@
+{
+  "kind": "mf_wam_g0_task_map",
+  "schema_version": 1,
+  "tasks": [
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate.pruned_init",
+      "task_id": 0,
+      "task_name": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate.pruned_init",
+      "task_id": 1,
+      "task_name": "pick_up_the_black_bowl_next_to_the_ramekin_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate.pruned_init",
+      "task_id": 2,
+      "task_name": "pick_up_the_black_bowl_from_table_center_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate.pruned_init",
+      "task_id": 3,
+      "task_name": "pick_up_the_black_bowl_on_the_cookie_box_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate.pruned_init",
+      "task_id": 4,
+      "task_name": "pick_up_the_black_bowl_in_the_top_drawer_of_the_wooden_cabinet_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate.pruned_init",
+      "task_id": 5,
+      "task_name": "pick_up_the_black_bowl_on_the_ramekin_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate.pruned_init",
+      "task_id": 6,
+      "task_name": "pick_up_the_black_bowl_next_to_the_cookie_box_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate.pruned_init",
+      "task_id": 7,
+      "task_name": "pick_up_the_black_bowl_on_the_stove_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate.pruned_init",
+      "task_id": 8,
+      "task_name": "pick_up_the_black_bowl_next_to_the_plate_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_spatial/pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_spatial/pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate.pruned_init",
+      "task_id": 9,
+      "task_name": "pick_up_the_black_bowl_on_the_wooden_cabinet_and_place_it_on_the_plate",
+      "task_suite": "libero_spatial",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_alphabet_soup_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_alphabet_soup_and_place_it_in_the_basket.pruned_init",
+      "task_id": 0,
+      "task_name": "pick_up_the_alphabet_soup_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_cream_cheese_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_cream_cheese_and_place_it_in_the_basket.pruned_init",
+      "task_id": 1,
+      "task_name": "pick_up_the_cream_cheese_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_salad_dressing_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_salad_dressing_and_place_it_in_the_basket.pruned_init",
+      "task_id": 2,
+      "task_name": "pick_up_the_salad_dressing_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_bbq_sauce_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_bbq_sauce_and_place_it_in_the_basket.pruned_init",
+      "task_id": 3,
+      "task_name": "pick_up_the_bbq_sauce_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_ketchup_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_ketchup_and_place_it_in_the_basket.pruned_init",
+      "task_id": 4,
+      "task_name": "pick_up_the_ketchup_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_tomato_sauce_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_tomato_sauce_and_place_it_in_the_basket.pruned_init",
+      "task_id": 5,
+      "task_name": "pick_up_the_tomato_sauce_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_butter_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_butter_and_place_it_in_the_basket.pruned_init",
+      "task_id": 6,
+      "task_name": "pick_up_the_butter_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_milk_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_milk_and_place_it_in_the_basket.pruned_init",
+      "task_id": 7,
+      "task_name": "pick_up_the_milk_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_chocolate_pudding_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_chocolate_pudding_and_place_it_in_the_basket.pruned_init",
+      "task_id": 8,
+      "task_name": "pick_up_the_chocolate_pudding_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_object/pick_up_the_orange_juice_and_place_it_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_object/pick_up_the_orange_juice_and_place_it_in_the_basket.pruned_init",
+      "task_id": 9,
+      "task_name": "pick_up_the_orange_juice_and_place_it_in_the_basket",
+      "task_suite": "libero_object",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/open_the_middle_drawer_of_the_cabinet.bddl",
+      "init_state_path": "init_files/libero_goal/open_the_middle_drawer_of_the_cabinet.pruned_init",
+      "task_id": 0,
+      "task_name": "open_the_middle_drawer_of_the_cabinet",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/put_the_bowl_on_the_stove.bddl",
+      "init_state_path": "init_files/libero_goal/put_the_bowl_on_the_stove.pruned_init",
+      "task_id": 1,
+      "task_name": "put_the_bowl_on_the_stove",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/put_the_wine_bottle_on_top_of_the_cabinet.bddl",
+      "init_state_path": "init_files/libero_goal/put_the_wine_bottle_on_top_of_the_cabinet.pruned_init",
+      "task_id": 2,
+      "task_name": "put_the_wine_bottle_on_top_of_the_cabinet",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/open_the_top_drawer_and_put_the_bowl_inside.bddl",
+      "init_state_path": "init_files/libero_goal/open_the_top_drawer_and_put_the_bowl_inside.pruned_init",
+      "task_id": 3,
+      "task_name": "open_the_top_drawer_and_put_the_bowl_inside",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/put_the_bowl_on_top_of_the_cabinet.bddl",
+      "init_state_path": "init_files/libero_goal/put_the_bowl_on_top_of_the_cabinet.pruned_init",
+      "task_id": 4,
+      "task_name": "put_the_bowl_on_top_of_the_cabinet",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/push_the_plate_to_the_front_of_the_stove.bddl",
+      "init_state_path": "init_files/libero_goal/push_the_plate_to_the_front_of_the_stove.pruned_init",
+      "task_id": 5,
+      "task_name": "push_the_plate_to_the_front_of_the_stove",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/put_the_cream_cheese_in_the_bowl.bddl",
+      "init_state_path": "init_files/libero_goal/put_the_cream_cheese_in_the_bowl.pruned_init",
+      "task_id": 6,
+      "task_name": "put_the_cream_cheese_in_the_bowl",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/turn_on_the_stove.bddl",
+      "init_state_path": "init_files/libero_goal/turn_on_the_stove.pruned_init",
+      "task_id": 7,
+      "task_name": "turn_on_the_stove",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/put_the_bowl_on_the_plate.bddl",
+      "init_state_path": "init_files/libero_goal/put_the_bowl_on_the_plate.pruned_init",
+      "task_id": 8,
+      "task_name": "put_the_bowl_on_the_plate",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_goal/put_the_wine_bottle_on_the_rack.bddl",
+      "init_state_path": "init_files/libero_goal/put_the_wine_bottle_on_the_rack.pruned_init",
+      "task_id": 9,
+      "task_name": "put_the_wine_bottle_on_the_rack",
+      "task_suite": "libero_goal",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_10/LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket.pruned_init",
+      "task_id": 0,
+      "task_name": "LIVING_ROOM_SCENE2_put_both_the_alphabet_soup_and_the_tomato_sauce_in_the_basket",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_10/LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket.pruned_init",
+      "task_id": 1,
+      "task_name": "LIVING_ROOM_SCENE2_put_both_the_cream_cheese_box_and_the_butter_in_the_basket",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it.bddl",
+      "init_state_path": "init_files/libero_10/KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it.pruned_init",
+      "task_id": 2,
+      "task_name": "KITCHEN_SCENE3_turn_on_the_stove_and_put_the_moka_pot_on_it",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it.bddl",
+      "init_state_path": "init_files/libero_10/KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it.pruned_init",
+      "task_id": 3,
+      "task_name": "KITCHEN_SCENE4_put_the_black_bowl_in_the_bottom_drawer_of_the_cabinet_and_close_it",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate.bddl",
+      "init_state_path": "init_files/libero_10/LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate.pruned_init",
+      "task_id": 4,
+      "task_name": "LIVING_ROOM_SCENE5_put_the_white_mug_on_the_left_plate_and_put_the_yellow_and_white_mug_on_the_right_plate",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy.bddl",
+      "init_state_path": "init_files/libero_10/STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy.pruned_init",
+      "task_id": 5,
+      "task_name": "STUDY_SCENE1_pick_up_the_book_and_place_it_in_the_back_compartment_of_the_caddy",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate.bddl",
+      "init_state_path": "init_files/libero_10/LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate.pruned_init",
+      "task_id": 6,
+      "task_name": "LIVING_ROOM_SCENE6_put_the_white_mug_on_the_plate_and_put_the_chocolate_pudding_to_the_right_of_the_plate",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket.bddl",
+      "init_state_path": "init_files/libero_10/LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket.pruned_init",
+      "task_id": 7,
+      "task_name": "LIVING_ROOM_SCENE1_put_both_the_alphabet_soup_and_the_cream_cheese_box_in_the_basket",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/KITCHEN_SCENE8_put_both_moka_pots_on_the_stove.bddl",
+      "init_state_path": "init_files/libero_10/KITCHEN_SCENE8_put_both_moka_pots_on_the_stove.pruned_init",
+      "task_id": 8,
+      "task_name": "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    },
+    {
+      "bddl_path": "bddl_files/libero_10/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.bddl",
+      "init_state_path": "init_files/libero_10/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.pruned_init",
+      "task_id": 9,
+      "task_name": "KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it",
+      "task_suite": "libero_10",
+      "trial_count": 50
+    }
+  ]
+}

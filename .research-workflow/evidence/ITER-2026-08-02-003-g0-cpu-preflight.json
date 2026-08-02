@@ -1,0 +1,38 @@
+{
+  "artifact_root": "/mnt/workspace/eval/MF-WAM/dev/ITER-2026-08-02-003/cpu-preflight-20260802T1910p0800",
+  "checked_at": "2026-08-02T19:15:00+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "data_inventory": {
+    "canonical_sha256": "cf45ab6248877bdd5720e6b6d74a0e1d530e8666d08a118f051b882afc1c56cf",
+    "dataset_id": "libero-40",
+    "data_tree_sha256": "839db05f1ab9a26966d95c39bf2d292d586c7de1d0d2cd02fae27a04a1a8a21d",
+    "file_count": 80,
+    "task_count": 40,
+    "total_size_bytes": 1806808
+  },
+  "data_root": "/mnt/workspace/LIBERO/libero/libero",
+  "dataset_revision": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
+  "formal_training_allowed": false,
+  "kind": "mf_wam_g0_cpu_preflight_evidence",
+  "scope": "CPU-only inventory and deterministic seed-schedule construction; no simulator episode, model inference, GPU task, or scientific G0 audit was run.",
+  "seed_schedule": {
+    "canonical_sha256": "72d9227a07983c0b21304a53c9880f78e17fcfd273ab3e385d40300d16f690e9",
+    "episode_count": 2000,
+    "python_hash_seed": 42,
+    "seed": 42,
+    "task_process_count": 40
+  },
+  "shared_mount_identity": {
+    "/cpfs/user/chengjuntao": "1048633:79458992131",
+    "/mnt/workspace": "1048633:79458992131",
+    "same_device_and_inode": true
+  },
+  "source_snapshot": {
+    "build_contract_script_sha256": "7b59849879919fdbec8497843b200866dc668e3acb6be91ede6ea53ea9734cbf",
+    "g0_contract_source_sha256": "90931f8ece6c765154e57b305b3b5a5f96d97a2d6e5764cd174b39cd31683be0",
+    "git_commit": "d3264121965161916198b3b6be963c42d37a901b",
+    "working_tree_has_uncommitted_iteration_changes": true
+  },
+  "status": "CPU_PREFLIGHT_PASS_ONLY",
+  "task_map_file_sha256": "bb358902176fa8651a70c895b386fbffe3405111712275d01df053c4e0c6dd8c"
+}

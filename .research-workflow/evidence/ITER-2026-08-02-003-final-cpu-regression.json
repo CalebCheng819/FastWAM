@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_final_cpu_regression",
+  "checked_at": "2026-08-03T00:05:57+08:00",
+  "base_commit": "d3264121965161916198b3b6be963c42d37a901b",
+  "environment": {
+    "python": "3.10",
+    "hydra": "1.3.2",
+    "omegaconf": "2.3.0",
+    "numpy": "2.2.6",
+    "torch": "2.7.0+cu128"
+  },
+  "full_suite": {
+    "command": "PYTHONPATH=. /home/chengjuntao/.codex-tmp/cosmos25-prefetch/cosmos-predict2.5-v1.5.2/.venv/bin/python -m unittest discover -s tests -t . -v",
+    "tests_run": 156,
+    "passed": 156,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "elapsed_seconds": 84.82
+  },
+  "specialized_g0_auditor": {
+    "tests_run": 30,
+    "passed": 30,
+    "failed": 0
+  },
+  "source_race_and_writer_hardening": {
+    "manager_and_instrumentation_tests_run": 35,
+    "passed": 35,
+    "parent_symlink_external_writes": 0,
+    "runner_swap_restore_rejected": true,
+    "instrumentation_swap_restore_rejected": true,
+    "git_head_swap_restore_rejected": true,
+    "source_root_swap_restore_rejected": true,
+    "popen_baseexception_closes_untransferred_log": true,
+    "instrumentation_loaded_from_exact_commit_sealed_memfd": true,
+    "ordinary_in_tree_git_directory_required": true,
+    "gitignored_artifacts_rejected": true,
+    "git_replace_refs_rejected": true,
+    "git_system_global_config_disabled": true,
+    "repository_local_filters_and_attributes_rejected": true,
+    "exact_raw_full_tree_and_mode_verified": true,
+    "loaded_module_origins_bound_to_tracked_head_blobs": true,
+    "formal_entrypoint_bytecode_writes_disabled": true,
+    "same_host_scope_only": true,
+    "cross_node_cpfs_detection_claimed": false
+  },
+  "static_checks": {
+    "compileall": "PASS",
+    "strict_json_parse": "PASS",
+    "git_diff_check": "PASS",
+    "credential_pattern_scan": "PASS_NO_SECRET_VALUES_FOUND"
+  },
+  "implementation_sha256": {
+    "scripts/run_mf_wam_g0_manager.py": "487cd64ec174cdf5acf026caae22921854aa81f49192278dc30de0548d3bb203",
+    "scripts/run_mf_wam_g0_traced.py": "d83ea77732afec5140f9c871ae90db59f49b45c6b1daafa5d720f6ec6c07cf94",
+    "scripts/mf_wam_g0_instrumentation.py": "ba704d2430fd9a6375bf6589b618b4cbc7b4f74beec61bd84a9e67d96d6fe2ac",
+    "scripts/audit_mf_wam_g0_bundle.py": "bee226395741c3e0523b277f9ac7bd8cfaf28536a9938c8284a8f026099147b2",
+    "src/fastwam/validation/g0_contract.py": "321d0a55fe2148d62eb48d5ce0e1bbce27c2d5ca17339d550465bde0a1bd54fa"
+  },
+  "locked_config_sha256": {
+    "configs/validation/mf_wam_g0_approved_assets.json": "f4cbb8ce0f518782f7083ce9e0c90dfd0c8f1000a624ea3e46251488b62bc690",
+    "configs/validation/mf_wam_g0_task_map.json": "71b79aa08e9f73a1107ccc54fb7070da67b56c147b0f77f73a72201582e4b96b"
+  },
+  "gpu_jobs_started": 0,
+  "cloud_mutations_called": [],
+  "formal_training_allowed": false
+}

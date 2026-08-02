@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_dlc_job_image_readback",
+  "checked_at": "2026-08-02T20:32:44+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "job_id": "dlc1hqocuisxxdkb",
+  "api": "PAI-DLC GetJob",
+  "observed_image": "pj4090acr-registry-vpc.cn-beijing.cr.aliyuncs.com/pj4090/chengjuntao:cjt-multirobot-benchmark",
+  "immutable_digest_present": false,
+  "ai_master_docker_image": "",
+  "credentials_source": "CredentialsURI profile consumed in memory",
+  "credentials_printed": false,
+  "temporary_sdk_removed": true,
+  "cloud_mutations_called": [],
+  "decision": "GetJob confirms only the mutable tag and does not remove the immutable image-digest launch blocker.",
+  "formal_training_allowed": false
+}

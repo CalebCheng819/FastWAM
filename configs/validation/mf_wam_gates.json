@@ -1,14 +1,31 @@
 {
   "schema_version": 1,
-  "policy_id": "MF-WAM-G0-G3-2026-08-02-v2",
-  "iteration_id": "ITER-2026-08-02-002",
+  "policy_id": "MF-WAM-G0-G3-2026-08-02-v3",
+  "iteration_id": "ITER-2026-08-02-003",
   "statuses": [
     "PASS",
     "FAIL",
     "UNCERTAIN"
   ],
   "decision_semantics": {
-    "formal_training_rule": "G0 && G1 && G2 && G3 == PASS && specialized_audited_bundle_verified",
+    "runtime_authorization": {
+      "state": "HARD_DISABLED",
+      "implemented": false,
+      "formal_training_allowed": false,
+      "reason": "This policy defines future evidence stages only; the current runtime authorizer remains unimplemented and hard-false."
+    },
+    "stage_order": [
+      "S1_PROBE_SINGLE_SEED_PILOT",
+      "S2_PAIRED_CONFIRMATORY_TRAINING",
+      "S3_PAPER_LEVEL_CONFIRMATORY_CONCLUSION"
+    ],
+    "g0_evidence_classifications": {
+      "OUTCOME_PARITY_ONLY": "The raw G0 literals and confidence intervals satisfy the outcome-parity contract; no specialized receipt has been structurally verified and the scientific gate remains UNCERTAIN.",
+      "STRUCTURAL_PASS_ONLY": "A content-bound specialized G0 receipt envelope and its declared anchor lineage are structurally valid, but no external anchor has been consumed and no artifact has been independently recomputed; the scientific gate remains UNCERTAIN.",
+      "SPECIALIZED_G0_PASS": "The local specialized G0 auditor has independently recomputed the bound artifacts and a separate trusted consumer has resolved every required external anchor under the locked contract; the current generic evaluator cannot emit or consume this classification.",
+      "interchangeable": false
+    },
+    "paper_level_conclusion_rule": "G0 && G1 && G2 && G3 == PASS && all_specialized_audited_bundles_verified",
     "gate_precedence": [
       "FAIL",
       "UNCERTAIN",
@@ -17,6 +34,175 @@
     "missing_or_non_finite": "UNCERTAIN",
     "confidence_interval_crosses_boundary": "UNCERTAIN",
     "confidence_interval_entirely_in_failure_region": "FAIL"
+  },
+  "authorization_stages": {
+    "S1_PROBE_SINGLE_SEED_PILOT": {
+      "title": "Bounded probe and single-seed pilot",
+      "protocol_permission": "bounded_probe_and_single_seed_pilot_only",
+      "grants_runtime_authority": false,
+      "entry_rule": "G0 scientific_gate_status == SPECIALIZED_G0_PASS && specialized_g0_audit_verified && candidate_contract == LOCKED",
+      "required_entry_evidence": [
+        "specialized_g0_audit_receipt",
+        "locked_candidate_data_seed_config_checkpoint_image_runtime_contract",
+        "separate_immutable_official_source_and_instrumentation_identities",
+        "fixed_input_fixed_seed_instrumentation_action_equivalence_receipt",
+        "preregistered_experiment_page_and_immutable_prelaunch_manifest_per_gpu_activity",
+        "zero_initialized_adapter_action_equivalence_before_model_pilot",
+        "prior_causal_mask_receipt_before_model_pilot",
+        "base_to_mf_missing_key_allowlist_and_strict_mf_checkpoint_load_receipts",
+        "finite_forward_backward_smoke_receipt_before_model_pilot"
+      ],
+      "allowed_work": [
+        "fresh_nominal_and_disturbed_trace_collection",
+        "g1_detector_and_negative_control_fitting",
+        "recovery_oracle_headroom_on_train_validation_saved_states",
+        "single_training_seed_pilot"
+      ],
+      "pilot_scope": {
+        "training_seed_count": 1,
+        "maximum_training_steps": 5000,
+        "hard_task_count": 5,
+        "matched_base_seed_count_minimum": 20,
+        "matched_base_seed_count_maximum": 25,
+        "pilot_contract_frozen_before_outcomes": true,
+        "pilot_go_is_formal_gate_pass": false
+      },
+      "required_exit_evidence": [
+        "specialized_g1_audit_receipt",
+        "specialized_g2_single_seed_pilot_receipt",
+        "terminal_recovery_oracle_headroom_receipt",
+        "specialized_g3_single_seed_pilot_receipt",
+        "complete_pilot_identity_metric_controller_trace_and_checksum_inventories"
+      ],
+      "exit_rule": "G1 == PASS && G2_single_seed_pilot == GO && recovery_oracle_headroom == GO && G3_single_seed_pilot == GO && pilot_bundle_complete",
+      "gpu_budget": {
+        "maximum_gpus_per_program": 8,
+        "maximum_concurrent_mf_wam_gpus": 16,
+        "maximum_concurrent_eight_gpu_programs": 2,
+        "live_capacity_and_quota_read_immediately_before_launch": true,
+        "unrelated_jobs_must_not_be_stopped": true
+      },
+      "stop_conditions": [
+        "live_capacity_or_quota_unverified",
+        "proposed_allocation_exceeds_per_program_or_total_limit",
+        "g0_not_pass_or_candidate_contract_not_locked",
+        "identity_manifest_or_terminal_artifact_missing_or_mismatched",
+        "instrumentation_changes_base_actions",
+        "causal_mask_or_checkpoint_load_contract_fails",
+        "g1_fail_or_uncertain_on_locked_test",
+        "recovery_oracle_has_no_preregistered_headroom",
+        "router_collapse_or_non_finite_value",
+        "recovery_pilot_null_or_harmful_under_locked_pilot_rule"
+      ]
+    },
+    "S2_PAIRED_CONFIRMATORY_TRAINING": {
+      "title": "Paired confirmatory training",
+      "protocol_permission": "paired_three_seed_confirmatory_training_protocol_only",
+      "grants_runtime_authority": false,
+      "entry_rule": "S1 exit rule satisfied && specialized S1 bundle verified",
+      "required_entry_evidence": [
+        "complete_specialized_verified_s1_exit_bundle",
+        "specialized_g0_audit_receipt",
+        "specialized_g1_audit_receipt",
+        "specialized_g2_single_seed_pilot_receipt",
+        "specialized_g3_single_seed_pilot_receipt",
+        "clean_pushed_immutable_implementation_commit",
+        "content_bound_data_config_image_command_optimizer_step_global_batch_and_seed_manifests",
+        "matched_arm_a_full_dual_router_and_arm_b_state_only_control_contract",
+        "three_independent_training_seeds_frozen_before_launch",
+        "locked_test_identities_unread_and_s3_protocol_preregistered"
+      ],
+      "training_scope": {
+        "arm_a": "full_dual_router_mf_wam",
+        "arm_b": "state_only_matched_control",
+        "training_seed_count": 3,
+        "paired_wave_order": [
+          "A0+B0",
+          "A1+B1",
+          "A2+B2"
+        ],
+        "maximum_confirmatory_steps_per_arm": 20000,
+        "checkpoint_selection_source": "validation_only",
+        "matched_dimensions": [
+          "expert_count",
+          "parameter_count",
+          "active_flops",
+          "data",
+          "optimizer",
+          "steps",
+          "checkpoint_schedule",
+          "global_batch",
+          "seed"
+        ]
+      },
+      "required_exit_evidence": [
+        "six_matched_terminal_training_manifests",
+        "exact_last_good_checkpoint_hashes",
+        "matched_step_and_global_batch_receipts",
+        "loss_and_finite_value_summaries",
+        "terminal_environment_receipts",
+        "locked_s3_evaluation_preregistration_before_test_access"
+      ],
+      "exit_rule": "all six paired training runs terminal and matched && locked S3 evaluation protocol frozen before test access",
+      "gpu_budget": {
+        "maximum_gpus_per_program": 8,
+        "maximum_concurrent_mf_wam_gpus": 16,
+        "maximum_concurrent_eight_gpu_programs": 2,
+        "one_seed_pair_at_a_time": true,
+        "third_program_forbidden_during_eight_plus_eight_wave": true,
+        "live_capacity_and_quota_read_immediately_before_launch": true,
+        "unrelated_jobs_must_not_be_stopped": true
+      },
+      "stop_conditions": [
+        "s1_exit_bundle_incomplete_or_not_specialized_verified",
+        "clean_pushed_commit_or_paired_manifest_missing",
+        "live_capacity_or_quota_unverified",
+        "either_arm_non_finite_loss_or_gradients",
+        "persistent_oom_or_nccl_failure",
+        "data_config_source_or_artifact_hash_drift",
+        "unreadable_checkpoint",
+        "arms_no_longer_scientifically_matched",
+        "locked_test_used_for_checkpoint_threshold_or_recovery_selection"
+      ],
+      "paired_failure_rule": "Stop the mate at the last common durable step; resume only from identical immutable manifests and checkpoints, otherwise invalidate and rerun the pair."
+    },
+    "S3_PAPER_LEVEL_CONFIRMATORY_CONCLUSION": {
+      "title": "Paper-level confirmatory conclusion",
+      "protocol_permission": "locked_confirmatory_evaluation_and_conclusion_only",
+      "grants_runtime_authority": false,
+      "entry_rule": "S2 terminal bundle complete && locked evaluation protocol frozen before test access",
+      "required_evidence": [
+        "complete_s2_terminal_bundle",
+        "specialized_g0_audit_receipt",
+        "specialized_g1_audit_receipt",
+        "specialized_g2_audit_receipt",
+        "specialized_g3_audit_receipt",
+        "separate_training_seed_and_evaluation_seed_identities",
+        "all_metric_rows_bootstrap_draws_summaries_controller_traces_and_checksum_inventories_complete"
+      ],
+      "conclusion_rule": "G0 && G1 && G2 && G3 == PASS && all_specialized_audited_bundles_verified",
+      "gpu_budget": {
+        "maximum_gpus_per_program": 8,
+        "maximum_concurrent_mf_wam_gpus": 16,
+        "maximum_concurrent_eight_gpu_programs": 2,
+        "evaluation_runs_in_at_most_two_program_waves": true,
+        "live_capacity_and_quota_read_immediately_before_launch": true,
+        "unrelated_jobs_must_not_be_stopped": true
+      },
+      "stop_conditions": [
+        "any_gate_fail_or_uncertain",
+        "specialized_audited_bundle_missing_or_not_recomputed",
+        "model_data_seed_saved_state_horizon_controller_or_disturbance_identity_mismatch",
+        "terminal_artifact_missing",
+        "summary_disagrees_with_episode_inventory",
+        "locked_test_exposure_or_post_hoc_threshold_tuning",
+        "ad_hoc_confirmatory_early_stopping_without_preregistered_alpha_spending"
+      ],
+      "failure_semantics": {
+        "technical_missingness": "INVALID_OR_UNCERTAIN_EXACT_RERUN_ONLY",
+        "threshold_failure": "TERMINAL_NEGATIVE_RESULT_NO_POST_HOC_RETUNING"
+      }
+    }
   },
   "evidence_contract": {
     "interval_fields": [
@@ -169,6 +355,44 @@
             "operator": "<",
             "threshold": -0.03
           }
+        },
+        {
+          "id": "g0_specialized_audit_receipt",
+          "type": "specialized_audited_receipt",
+          "field": "specialized_g0_audit_receipt",
+          "receipt_kind": "mf_wam_g0_specialized_audit_receipt",
+          "receipt_schema_version": 1,
+          "required_formal_training_allowed": false,
+          "ci_contract_id": "MF-WAM-G0-CI-v1",
+          "required_scope": {
+            "episode_count": 2000,
+            "suite_count": 4,
+            "tasks_per_suite": 10,
+            "trials_per_task": 50,
+            "confidence_level": 0.95,
+            "bootstrap_replicates": 10000,
+            "bootstrap_seed": 42,
+            "outcome_parity_classification": "OUTCOME_PARITY_ONLY"
+          },
+          "required_artifact_digests": [
+            "source_manifest_sha256",
+            "data_manifest_sha256",
+            "seed_manifest_sha256",
+            "resolved_config_sha256",
+            "checkpoint_sha256",
+            "dataset_stats_sha256",
+            "runtime_environment_sha256",
+            "identity_inventory_sha256",
+            "metric_rows_sha256",
+            "trace_tree_sha256",
+            "terminal_summary_bundle_sha256"
+          ],
+          "required_external_anchor_types": [
+            "notion_experiment_page",
+            "immutable_artifact_root",
+            "source_commit",
+            "container_image_digest"
+          ]
         }
       ]
     },

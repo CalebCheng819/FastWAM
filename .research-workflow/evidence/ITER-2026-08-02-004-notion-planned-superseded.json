@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "operation": "append_blocks",
+  "page_id": "3b021e77-89cc-81b9-8238-e3cdbf44dda2",
+  "request_id": "58520fab-e163-4822-862f-a3f58cf112b4",
+  "heading": "ITER-2026-08-02-004 planned — staged authorization policy correction",
+  "block_ids": [
+    "3b021e77-89cc-817f-b5df-d3c0d8819d7f",
+    "3b021e77-89cc-815d-ae9e-d4334676e34e",
+    "3b021e77-89cc-8190-845e-fff686a77073",
+    "3b021e77-89cc-8133-a5b6-f3543aba6abc",
+    "3b021e77-89cc-8162-a3f9-f605d7b82e30"
+  ],
+  "readback_verified_by_agent": true,
+  "repository_mutation": false,
+  "status": "SUPERSEDED_BY_ITER-2026-08-02-003"
+}

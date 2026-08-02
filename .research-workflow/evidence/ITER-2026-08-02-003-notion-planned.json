@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "operation": "append_blocks",
+  "page_id": "3b021e77-89cc-81b9-8238-e3cdbf44dda2",
+  "request_id": "24f015da-2690-4087-8a5d-182c302d8711",
+  "written_at": "2026-08-02T18:00:00+08:00",
+  "heading": "ITER-2026-08-02-003 planned — G0 reproducible runtime contract",
+  "block_ids": [
+    "3b021e77-89cc-815d-9cde-cb9763cf8a74",
+    "3b021e77-89cc-8144-9182-c4a0eb72a312",
+    "3b021e77-89cc-8196-964d-d2b8c27a19b4",
+    "3b021e77-89cc-812d-a49f-fe4ca5f60497",
+    "3b021e77-89cc-81f6-87b5-f9186a4861d3"
+  ],
+  "readback_verified": true,
+  "formal_training_allowed": false
+}

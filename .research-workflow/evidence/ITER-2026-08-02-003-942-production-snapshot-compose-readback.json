@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_942_production_snapshot_compose_readback",
+  "checked_at": "2026-08-02T22:21:41+08:00",
+  "control_instance": "root@123.57.187.96:942",
+  "hostname": "dsw-473663-68974db5d7-wz9c6",
+  "ssh_host_identity": {
+    "strict_host_key_checking": true,
+    "host_key_alias": "[123.57.187.96]:970",
+    "observed_ed25519_fingerprint": "SHA256:2MX8ip7Hh83W0bwHghgoA0+Y1A4OXDUsfeqxRnSe5H0",
+    "trust_basis": "exact match to the pre-existing trusted 970 endpoint ED25519 key",
+    "known_hosts_modified": false
+  },
+  "shared_mount": {
+    "path": "/mnt/workspace",
+    "source": "bindroot-8c49f-TEIEPXnq:cpfs-030wldnqm8evtpyhw1e-vpc-eyyd1d.cn-beijing.cpfs.aliyuncs.com:/[/user/chengjuntao]",
+    "filesystem": "fuse.aliyun-alinas-efc"
+  },
+  "official_source": {
+    "root": "/mnt/workspace/FastWAM",
+    "commit": "45d8e1458921d83f8ad6cf9ce993d371208dabd0",
+    "tree": "018b9824e7b10f014d002593c15538e43a9d857e",
+    "clean_before_and_after": true,
+    "hidden_index_entry_count": 0,
+    "critical_file_count": 11,
+    "critical_file_inventory_algorithm": "python-json-sort-keys-utf8-v1",
+    "critical_file_inventory_sha256": "321e98e31eb62ae954f12d9210be88d1f0cabc2c22b4506ba40085b85d327015",
+    "critical_bytes_equal_head_blobs": true
+  },
+  "config_snapshot": {
+    "source": "git archive 45d8e1458921d83f8ad6cf9ce993d371208dabd0 configs/",
+    "member_policy": "relative configs regular-file-or-directory only; no symlink, hardlink, or special member",
+    "file_count": 14,
+    "tree_algorithm": "sha256sum-posix-path-v1",
+    "tree_sha256": "67e40a825b913a8191f97c6e421dfb735661170ae549262994f7826c9f494e4b",
+    "ambient_environment_interpolation_count": 0,
+    "temporary_directory_removed": true
+  },
+  "compose_diagnostic": {
+    "status": "DIAGNOSTIC_SNAPSHOT_COMPOSE_PASS",
+    "python_executable": "/usr/local/bin/python3",
+    "compose_count": 40,
+    "dynamic_process_coverage_count": 40,
+    "static_projection_count": 1,
+    "static_projection_sha256": "d941231537b6de8aa90c2ff82b9b15f26c75d3c1d359d62fe2c36bdac29788d9",
+    "process_evidence_sha256": "b7e8a52290fe47b7b3be0f9fd77d7fb1d8c20df965e69a5bfc0ae6c421339ded",
+    "fixed_output_path": "/mnt/workspace/mf-wam-g0-readonly-snapshot-audit",
+    "output_path_created": false
+  },
+  "runtime_version_gate": {
+    "status": "FAIL_CLOSED",
+    "locked": {
+      "hydra": "1.3.2",
+      "omegaconf": "2.3.0"
+    },
+    "observed": {
+      "hydra": "1.3.4",
+      "omegaconf": "2.3.0"
+    },
+    "reason": "942 is a control DSW instance, not the locked formal DLC worker runtime"
+  },
+  "cloud_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "formal_training_allowed": false
+}
