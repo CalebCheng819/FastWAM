@@ -27,7 +27,13 @@ class FastWAMMultiRobot(FastWAM):
     video/action flow-matching objective.
     """
 
-    def __init__(self, *args, training_mode: str = "action_only_cache", **kwargs):
+    def __init__(
+        self,
+        *args,
+        training_mode: str = "action_only_cache",
+        video_conditioning: Optional[dict[str, Any]] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if training_mode not in {"action_only_cache", "joint"}:
             raise ValueError(
@@ -40,6 +46,53 @@ class FastWAMMultiRobot(FastWAM):
             )
         if self.training_mode == "joint" and self.loss_lambda_video <= 0.0:
             raise ValueError("training_mode='joint' requires loss_lambda_video > 0")
+
+        video_conditioning = dict(video_conditioning or {})
+        supported_conditioning_keys = {"mode", "start_layer", "detach_hub_kv"}
+        unknown_conditioning_keys = sorted(
+            set(video_conditioning) - supported_conditioning_keys
+        )
+        if unknown_conditioning_keys:
+            raise ValueError(
+                "Unsupported multi-robot video-conditioning keys: "
+                f"{unknown_conditioning_keys}"
+            )
+        self.video_conditioning_mode = str(
+            video_conditioning.get("mode", "none")
+        ).strip().lower()
+        self.video_conditioning_start_layer = int(
+            video_conditioning.get("start_layer", 1)
+        )
+        self.video_conditioning_detach_hub_kv = bool(
+            video_conditioning.get("detach_hub_kv", True)
+        )
+        if self.video_conditioning_mode not in {"none", "hub_kv_lagged"}:
+            raise ValueError(
+                "video_conditioning.mode must be 'none' or 'hub_kv_lagged', "
+                f"got {self.video_conditioning_mode!r}"
+            )
+        if self.video_conditioning_mode == "hub_kv_lagged":
+            if self.training_mode != "joint":
+                raise ValueError(
+                    "hub_kv_lagged video conditioning requires training_mode='joint'"
+                )
+            if bool(getattr(self.video_expert, "action_conditioned", False)):
+                raise ValueError(
+                    "hub_kv_lagged is the native multi-agent Action->Video path; "
+                    "legacy video_dit_config.action_conditioned must remain false"
+                )
+            if not bool(self.action_expert.hub_enabled):
+                raise ValueError(
+                    "hub_kv_lagged video conditioning requires action HubToken enabled"
+                )
+            if not 1 <= self.video_conditioning_start_layer < len(
+                self.video_expert.blocks
+            ):
+                raise ValueError(
+                    "video_conditioning.start_layer must satisfy 1 <= start_layer "
+                    f"< num_layers={len(self.video_expert.blocks)}, got "
+                    f"{self.video_conditioning_start_layer}"
+                )
         self._trainable_scope = "dit"
         self._loaded_base_checkpoint: Optional[str] = None
 
@@ -59,6 +112,7 @@ class FastWAMMultiRobot(FastWAM):
         skip_dit_load_from_pretrain: bool = False,
         mot_checkpoint_mixed_attn: bool = True,
         training_mode: str = "action_only_cache",
+        video_conditioning: dict[str, Any] | None = None,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -115,6 +169,7 @@ class FastWAMMultiRobot(FastWAM):
             device=device,
             torch_dtype=torch_dtype,
             training_mode=training_mode,
+            video_conditioning=video_conditioning,
             video_train_shift=video_train_shift,
             video_infer_shift=video_infer_shift,
             video_num_train_timesteps=video_num_train_timesteps,
@@ -522,6 +577,11 @@ class FastWAMMultiRobot(FastWAM):
                 "mask": action_pre["context_mask"],
             },
             video_attention_mask=video_attention_mask,
+            video_conditioning_mode=self.video_conditioning_mode,
+            video_conditioning_start_layer=self.video_conditioning_start_layer,
+            video_conditioning_detach_hub_kv=(
+                self.video_conditioning_detach_hub_kv
+            ),
             **attention_layout,
         )
         pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)[:, :, 1:]
@@ -763,14 +823,71 @@ class FastWAMMultiRobot(FastWAM):
             "hub_enabled": self.action_expert.hub_enabled,
             "hub_token_policy": "ceil(hub_token_ratio*num_agents)",
             "hub_token_ratio": self.action_expert.hub_token_ratio,
+            "training_mode": self.training_mode,
+            "trainable_scope": self._trainable_scope,
+            "video_action_conditioning_mode": self.video_conditioning_mode,
+            "video_action_conditioning_start_layer": (
+                self.video_conditioning_start_layer
+            ),
+            "video_action_conditioning_detach_hub_kv": (
+                self.video_conditioning_detach_hub_kv
+            ),
+            "video_action_conditioning_observed_frame": False,
+            "video_action_conditioning_source": (
+                "lagged_fused_global_hub_kv"
+                if self.video_conditioning_mode == "hub_kv_lagged"
+                else "none"
+            ),
+            "video_action_conditioning_hub_inputs": (
+                [
+                    "noisy_action",
+                    "proprioceptive_state",
+                    "agent_identity",
+                    "observed_video",
+                    "text_context",
+                ]
+                if self.video_conditioning_mode == "hub_kv_lagged"
+                else []
+            ),
+            "video_action_conditioning_temporal_scope": (
+                "global_full_action_horizon_v1"
+                if self.video_conditioning_mode == "hub_kv_lagged"
+                else "none"
+            ),
         }
 
     def _validate_multi_robot_checkpoint_metadata(self, payload: dict[str, Any], path) -> None:
-        if payload.get("format") != "fastwam_multi_robot_v2":
+        checkpoint_format = payload.get("format")
+        if checkpoint_format not in {
+            "fastwam_multi_robot_v2",
+            "fastwam_multi_robot_v3",
+        }:
             return
         received = payload.get("multi_robot_architecture")
         if not isinstance(received, dict):
-            raise ValueError(f"v2 checkpoint is missing multi_robot_architecture: {path}")
+            raise ValueError(
+                f"{checkpoint_format} checkpoint is missing "
+                f"multi_robot_architecture: {path}"
+            )
+        received = dict(received)
+        if checkpoint_format == "fastwam_multi_robot_v2":
+            # V2 predates Action->Video conditioning and is semantically ACV0.
+            # Filling only these immutable legacy defaults keeps old ACV0
+            # checkpoints loadable while still rejecting V2 as an ACV1 resume.
+            received.setdefault("training_mode", self.training_mode)
+            received.setdefault(
+                "trainable_scope",
+                payload.get("trainable_scope", self._trainable_scope),
+            )
+            received.setdefault("video_action_conditioning_mode", "none")
+            received.setdefault("video_action_conditioning_start_layer", 1)
+            received.setdefault(
+                "video_action_conditioning_detach_hub_kv", True
+            )
+            received.setdefault("video_action_conditioning_observed_frame", False)
+            received.setdefault("video_action_conditioning_source", "none")
+            received.setdefault("video_action_conditioning_hub_inputs", [])
+            received.setdefault("video_action_conditioning_temporal_scope", "none")
         expected = self._multi_robot_architecture_metadata()
         for key, expected_value in expected.items():
             if key not in received:
@@ -789,7 +906,7 @@ class FastWAMMultiRobot(FastWAM):
     def save_checkpoint(self, path, optimizer=None, step=None):
         del optimizer
         payload: dict[str, Any] = {
-            "format": "fastwam_multi_robot_v2",
+            "format": "fastwam_multi_robot_v3",
             "step": step,
             "torch_dtype": str(self.torch_dtype),
             "trainable_scope": self._trainable_scope,

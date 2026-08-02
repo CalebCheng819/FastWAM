@@ -299,8 +299,30 @@ CUDA_VISIBLE_DEVICES=2,3 accelerate launch \
 ```
 
 其余消融为 `vg1_hub0`、`vg0_hub1`、`vg0_hub0` 三个同名 task 配置。训练权重使用
-`fastwam_multi_robot_v1` 稀疏格式，只保存当前 trainable scope，并记录其官方
-FastWAM base checkpoint。
+稀疏 checkpoint，只保存当前 trainable scope，并记录其官方 FastWAM base
+checkpoint；历史 `fastwam_multi_robot_v2`（ACV0）仍可加载，新 checkpoint 使用
+`fastwam_multi_robot_v3` 并额外记录 Action->Video treatment，防止 ACV0/ACV1
+误恢复。
+
+在 VG1+Hub 主模型上开启原生多机器人 action-conditioned world model：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 accelerate launch \
+  --use_deepspeed --zero_stage 2 --num_processes 8 \
+  --mixed_precision bf16 --gradient_accumulation_steps 4 \
+  scripts/train.py task=robofactory_multi_robot_vg1_hub1_acv1_224_1e-4
+```
+
+该 ACV1 配置保持旧的 `video_dit_config.action_conditioned=false`，因为旧接口只接收
+`[B,H,A]`，直接展平 `[B,N,H,A]` 会引入固定 agent 顺序。新路径在第 1 层之后，
+让未来视频 query 读取上一层的动态 Hub K/V。该 Hub 融合 noisy
+action/state/geometry、观测视频和文本上下文，因此是 action-conditioned、但不是
+action-only treatment。观测帧不读取 Hub，action 分支仍只读取观测帧。默认 detach
+Hub K/V，因此视频损失
+不会通过该支路反向更新 action expert。Hub 数量仍为 `K(N)=ceil(2N)`，不使用固定容量
+agent set 或 padding；正式配置覆盖 N=2/3/4。当前 Hub 汇总完整 action horizon，
+不等同于逐帧或 `group_diagonal` 的 action-video 对齐；当前 ACV1 只作用于 joint training，
+action-only 推理路径不会在测试期额外生成未来视频。
 
 ## 使用自己训练的权重推理
 

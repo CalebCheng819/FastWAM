@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from accelerate.data_loader import BatchSamplerShard
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 
 from fastwam.trainer import Wan22Trainer
@@ -370,6 +371,134 @@ def test_training_loss_runs_through_prepared_model_forward():
 
     assert trainer.model.called
     assert result == (loss, {"loss_action": 1.0})
+
+
+class _ResumeArchitectureModel:
+    def __init__(self, conditioning_mode):
+        self.conditioning_mode = conditioning_mode
+
+    def _multi_robot_architecture_metadata(self):
+        return {
+            "training_mode": "joint",
+            "trainable_scope": "dit",
+            "video_action_conditioning_mode": self.conditioning_mode,
+        }
+
+
+class _ResumeAccelerator:
+    def __init__(self, model):
+        self.model = model
+        self.load_calls = []
+
+    def unwrap_model(self, model):
+        assert model is self.model
+        return model
+
+    def load_state(self, *, input_dir):
+        self.load_calls.append(input_dir)
+
+    def wait_for_everyone(self):
+        return None
+
+
+def _resume_metadata_trainer(conditioning_mode, *, resume, output_dir):
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.model = _ResumeArchitectureModel(conditioning_mode)
+    trainer.accelerator = _ResumeAccelerator(trainer.model)
+    trainer.cfg = OmegaConf.create(
+        {
+            "resume": str(resume),
+            "output_dir": str(output_dir),
+            "learning_rate": 1.0e-4,
+            "seed": 42,
+            "model": {
+                "video_conditioning": {"mode": conditioning_mode},
+            },
+        }
+    )
+    trainer.global_step = 25
+    trainer.epoch = 2
+    trainer.batch_in_epoch = 8
+    trainer._uses_agent_count_batch_sampler = False
+    return trainer
+
+
+@pytest.mark.parametrize(
+    ("saved_mode", "current_mode"),
+    [("none", "hub_kv_lagged"), ("hub_kv_lagged", "none")],
+)
+def test_full_state_resume_rejects_acv0_acv1_cross_arm_before_load(
+    tmp_path, saved_mode, current_mode
+):
+    state_dir = tmp_path / "state" / "step_000025"
+    state_dir.mkdir(parents=True)
+    saved = _resume_metadata_trainer(
+        saved_mode,
+        resume="official.pt",
+        output_dir=tmp_path / "saved-run",
+    )
+    saved._save_trainer_state(str(state_dir))
+
+    current = _resume_metadata_trainer(
+        current_mode,
+        resume=state_dir,
+        output_dir=tmp_path / "recovered-run",
+    )
+    with pytest.raises(RuntimeError, match="architecture/treatment"):
+        current.load_training_state(str(state_dir))
+    assert current.accelerator.load_calls == []
+
+
+def test_full_state_resume_rejects_resolved_config_drift_before_load(tmp_path):
+    state_dir = tmp_path / "state" / "step_000025"
+    state_dir.mkdir(parents=True)
+    saved = _resume_metadata_trainer(
+        "hub_kv_lagged",
+        resume="official.pt",
+        output_dir=tmp_path / "saved-run",
+    )
+    saved._save_trainer_state(str(state_dir))
+
+    current = _resume_metadata_trainer(
+        "hub_kv_lagged",
+        resume=state_dir,
+        output_dir=tmp_path / "recovered-run",
+    )
+    current.cfg.learning_rate = 2.0e-4
+    with pytest.raises(RuntimeError, match="different resolved config"):
+        current.load_training_state(str(state_dir))
+    assert current.accelerator.load_calls == []
+
+
+def test_resume_config_hash_allows_only_resume_and_output_relocation(tmp_path):
+    initial = _resume_metadata_trainer(
+        "hub_kv_lagged",
+        resume="official.pt",
+        output_dir=tmp_path / "initial",
+    )
+    relocated = _resume_metadata_trainer(
+        "hub_kv_lagged",
+        resume=tmp_path / "state" / "step_000025",
+        output_dir=tmp_path / "relocated",
+    )
+    assert (
+        initial._resolved_resume_config_sha256(initial.cfg)
+        == relocated._resolved_resume_config_sha256(relocated.cfg)
+    )
+
+
+def test_multi_robot_resume_rejects_missing_sidecar_before_accelerate_load(tmp_path):
+    state_dir = tmp_path / "state" / "step_000025"
+    state_dir.mkdir(parents=True)
+    current = _resume_metadata_trainer(
+        "hub_kv_lagged",
+        resume=state_dir,
+        output_dir=tmp_path / "run",
+    )
+
+    with pytest.raises(RuntimeError, match="trainer_state.json is missing"):
+        current.load_training_state(str(state_dir))
+    assert current.accelerator.load_calls == []
 
 
 @pytest.mark.parametrize("invalid", [0, -1, True, "bad"])

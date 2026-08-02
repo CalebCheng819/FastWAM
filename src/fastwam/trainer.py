@@ -1,5 +1,6 @@
-import logging
+import hashlib
 import json
+import logging
 import inspect
 import os
 import re
@@ -10,7 +11,7 @@ import time
 import numpy as np
 import torch
 from accelerate import Accelerator, DataLoaderConfiguration
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from PIL import Image
 from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
@@ -736,6 +737,7 @@ class Wan22Trainer:
             "global_step": int(self.global_step),
             "epoch": int(self.epoch),
             "batch_in_epoch": int(self.batch_in_epoch),
+            "resume_compatibility": self._resume_compatibility_metadata(),
         }
         if self._uses_agent_count_batch_sampler:
             payload["data_schedule"] = {
@@ -746,8 +748,119 @@ class Wan22Trainer:
                 "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
                 "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
             }
-        with open(state_file, "w", encoding="utf-8") as f:
+        temporary_state_file = f"{state_file}.tmp"
+        with open(temporary_state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_state_file, state_file)
+
+    @staticmethod
+    def _resolved_resume_config_sha256(cfg) -> str:
+        """Hash the resolved experiment config, excluding relocation fields.
+
+        ``resume`` necessarily changes from the initial weight checkpoint to
+        the saved ZeRO state directory, and ``output_dir`` may be relocated for
+        recovery.  Every other resolved field remains part of the fail-closed
+        resume identity.
+        """
+
+        if OmegaConf.is_config(cfg):
+            payload = OmegaConf.to_container(cfg, resolve=True)
+        elif isinstance(cfg, dict):
+            payload = dict(cfg)
+        else:
+            raise TypeError(
+                "Trainer resume compatibility requires a DictConfig or dict, "
+                f"got {type(cfg).__name__}."
+            )
+        if not isinstance(payload, dict):
+            raise TypeError("Resolved trainer config must be a mapping.")
+        payload = dict(payload)
+        payload.pop("resume", None)
+        payload.pop("output_dir", None)
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def _resume_compatibility_metadata(self) -> dict:
+        model = self.accelerator.unwrap_model(self.model)
+        architecture_getter = getattr(
+            model, "_multi_robot_architecture_metadata", None
+        )
+        architecture = (
+            architecture_getter() if callable(architecture_getter) else None
+        )
+        return {
+            "schema_version": 1,
+            "resolved_config_hash_scheme": (
+                "omegaconf_resolved_without_resume_or_output_dir_v1"
+            ),
+            "resolved_config_sha256": self._resolved_resume_config_sha256(
+                self.cfg
+            ),
+            "multi_robot_architecture": architecture,
+        }
+
+    def _validate_training_state_resume_compatibility(
+        self, payload: dict, state_file: Path
+    ) -> None:
+        current = self._resume_compatibility_metadata()
+        saved = payload.get("resume_compatibility")
+        multi_robot_resume = current["multi_robot_architecture"] is not None
+        if not isinstance(saved, dict):
+            if multi_robot_resume:
+                raise RuntimeError(
+                    "Refusing multi-robot full-state resume without "
+                    f"resume_compatibility metadata: {state_file}"
+                )
+            logger.warning(
+                "Trainer state predates resume-compatibility metadata; "
+                "model/config identity cannot be verified: %s",
+                state_file,
+            )
+            return
+
+        if saved.get("schema_version") != current["schema_version"]:
+            raise RuntimeError(
+                "Unsupported trainer resume-compatibility schema: "
+                f"expected {current['schema_version']!r}, got "
+                f"{saved.get('schema_version')!r} in {state_file}"
+            )
+        saved_architecture = saved.get("multi_robot_architecture")
+        current_architecture = current["multi_robot_architecture"]
+        if saved_architecture != current_architecture:
+            all_keys = sorted(
+                set(saved_architecture or {}) | set(current_architecture or {})
+            )
+            mismatches = {
+                key: (
+                    (saved_architecture or {}).get(key),
+                    (current_architecture or {}).get(key),
+                )
+                for key in all_keys
+                if (saved_architecture or {}).get(key)
+                != (current_architecture or {}).get(key)
+            }
+            raise RuntimeError(
+                "Cannot resume training state with a different multi-robot "
+                f"architecture/treatment: {mismatches}"
+            )
+        if (
+            saved.get("resolved_config_hash_scheme")
+            != current["resolved_config_hash_scheme"]
+            or saved.get("resolved_config_sha256")
+            != current["resolved_config_sha256"]
+        ):
+            raise RuntimeError(
+                "Cannot resume training state with a different resolved config: "
+                f"saved_sha256={saved.get('resolved_config_sha256')!r}, "
+                f"current_sha256={current['resolved_config_sha256']!r}"
+            )
 
     def save_checkpoint(self):
         step_tag = f"step_{self.global_step:06d}"
@@ -774,11 +887,16 @@ class Wan22Trainer:
         return self.save_final_checkpoint_enabled and not checkpoint_saved_this_step
 
     def load_training_state(self, state_dir: str):
-        self.accelerator.load_state(input_dir=state_dir)
         state_file = Path(state_dir) / "trainer_state.json"
         if state_file.exists():
             with open(state_file, "r", encoding="utf-8") as f:
                 payload = json.load(f)
+            self._validate_training_state_resume_compatibility(
+                payload, state_file
+            )
+            # Validation must precede Accelerate/DeepSpeed mutation: ACV0 and
+            # ACV1 have shape-compatible state_dicts but different semantics.
+            self.accelerator.load_state(input_dir=state_dir)
             self.global_step = int(payload["global_step"])
 
             if "epoch" in payload and "batch_in_epoch" in payload:
@@ -838,6 +956,14 @@ class Wan22Trainer:
                 )
             self.accelerator.wait_for_everyone()
             return
+
+        current_compatibility = self._resume_compatibility_metadata()
+        if current_compatibility["multi_robot_architecture"] is not None:
+            raise RuntimeError(
+                "Refusing multi-robot full-state resume because trainer_state.json "
+                f"is missing: {state_dir}"
+            )
+        self.accelerator.load_state(input_dir=state_dir)
 
         match = re.search(r"step[_-](\d+)$", str(state_dir).rstrip("/"))
         if match:

@@ -1,5 +1,6 @@
 import pytest
 import torch
+from types import SimpleNamespace
 
 from fastwam.models.wan22.fastwam_multi_robot import FastWAMMultiRobot
 from fastwam.models.wan22.mot import MoT
@@ -377,6 +378,47 @@ def _unit_freqs(seq_len):
     return torch.ones((seq_len, 1, 4), dtype=torch.complex128)
 
 
+def _first_frame_causal_mask(video_len, first_frame_tokens):
+    mask = torch.ones(video_len, video_len, dtype=torch.bool)
+    mask[:first_frame_tokens, first_frame_tokens:] = False
+    return mask
+
+
+def _run_tiny_joint(
+    mot,
+    *,
+    video_tokens,
+    action_tokens,
+    num_agents,
+    horizon,
+    num_hubs,
+    first_frame_tokens,
+    conditioning_mode="none",
+    detach_hub_kv=True,
+):
+    batch_size, video_len, hidden_dim = video_tokens.shape
+    return mot.forward_multi_agent_joint(
+        video_tokens=video_tokens,
+        action_tokens=action_tokens,
+        video_freqs=_unit_freqs(video_len),
+        action_freqs=_unit_freqs(action_tokens.shape[1]),
+        video_t_mod=torch.zeros(batch_size, 6, hidden_dim),
+        action_t_mod=torch.zeros(batch_size, 6, hidden_dim),
+        video_context_payload=None,
+        action_context_payload=None,
+        video_attention_mask=_first_frame_causal_mask(
+            video_len, first_frame_tokens
+        ),
+        num_agents=num_agents,
+        horizon=horizon,
+        num_hub_tokens=num_hubs,
+        first_frame_tokens=first_frame_tokens,
+        video_conditioning_mode=conditioning_mode,
+        video_conditioning_start_layer=1,
+        video_conditioning_detach_hub_kv=detach_hub_kv,
+    )
+
+
 def test_joint_public_path_has_only_video_mask_and_factorized_action_calls():
     torch.manual_seed(349)
     mot = _tiny_mot_pair().train()
@@ -433,6 +475,376 @@ def test_joint_public_path_has_only_video_mask_and_factorized_action_calls():
     (output["video"].square().mean() + output["action"].square().mean()).backward()
     assert torch.isfinite(video_tokens.grad).all()
     assert torch.isfinite(action_tokens.grad).all()
+
+
+def test_hub_conditioned_video_attention_is_lagged_sparse_and_observed_safe():
+    torch.manual_seed(353)
+    mot = _tiny_mot_pair().eval()
+    batch_size = 1
+    video_len = 3
+    first_frame_tokens = 1
+    num_agents = 2
+    horizon = 3
+    num_hubs = 4
+    action_len = num_agents * horizon + num_hubs
+    video_tokens = torch.randn(batch_size, video_len, 32)
+    action_tokens = torch.randn(batch_size, action_len, 32)
+    calls = []
+    action_layer_kv = []
+    original_attention = mot._mixed_attention
+    original_build_attention_io = mot._build_expert_attention_io
+
+    def recording_build_attention_io(**kwargs):
+        result = original_build_attention_io(**kwargs)
+        if kwargs["expert"] is mot.mixtures["action"]:
+            action_layer_kv.append((result[1].detach().clone(), result[2].detach().clone()))
+        return result
+
+    def recording_attention(*, q_cat, k_cat, v_cat, attention_mask=None):
+        calls.append(
+            {
+                "q": tuple(q_cat.shape),
+                "k": tuple(k_cat.shape),
+                "k_tensor": k_cat.detach().clone(),
+                "v_tensor": v_cat.detach().clone(),
+                "mask": None if attention_mask is None else attention_mask.clone(),
+            }
+        )
+        return original_attention(
+            q_cat=q_cat,
+            k_cat=k_cat,
+            v_cat=v_cat,
+            attention_mask=attention_mask,
+        )
+
+    mot._build_expert_attention_io = recording_build_attention_io
+    mot._mixed_attention = recording_attention
+    output = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=action_tokens,
+        num_agents=num_agents,
+        horizon=horizon,
+        num_hubs=num_hubs,
+        first_frame_tokens=first_frame_tokens,
+        conditioning_mode="hub_kv_lagged",
+    )
+    assert output["video"].shape == video_tokens.shape
+    assert output["action"].shape == action_tokens.shape
+    assert len(calls) == 3 * mot.num_layers
+    assert len(action_layer_kv) == mot.num_layers
+
+    layer0_video = calls[0]
+    layer1_video = calls[3]
+    assert layer0_video["k"] == (batch_size, video_len, 16)
+    assert layer0_video["mask"].shape == (video_len, video_len)
+    assert layer1_video["k"] == (
+        batch_size,
+        video_len + num_hubs,
+        16,
+    )
+    assert layer1_video["mask"].shape == (
+        video_len,
+        video_len + num_hubs,
+    )
+    assert torch.equal(
+        layer1_video["mask"][:, :video_len],
+        _first_frame_causal_mask(video_len, first_frame_tokens),
+    )
+    assert not layer1_video["mask"][:first_frame_tokens, -num_hubs:].any()
+    assert layer1_video["mask"][first_frame_tokens:, -num_hubs:].all()
+    assert torch.equal(
+        layer1_video["k_tensor"][:, video_len:],
+        action_layer_kv[1][0][:, -num_hubs:],
+    )
+    assert torch.equal(
+        layer1_video["v_tensor"][:, video_len:],
+        action_layer_kv[1][1][:, -num_hubs:],
+    )
+
+
+def test_hub_conditioning_changes_only_future_video_not_action_or_observation():
+    torch.manual_seed(359)
+    mot = _tiny_mot_pair().eval()
+    batch_size = 1
+    video_len = 3
+    first_frame_tokens = 1
+    num_agents = 2
+    horizon = 3
+    num_hubs = 4
+    action_len = num_agents * horizon + num_hubs
+    video_tokens = torch.randn(batch_size, video_len, 32)
+    action_tokens = torch.randn(batch_size, action_len, 32)
+
+    baseline = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=action_tokens,
+        num_agents=num_agents,
+        horizon=horizon,
+        num_hubs=num_hubs,
+        first_frame_tokens=first_frame_tokens,
+    )
+    conditioned = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=action_tokens,
+        num_agents=num_agents,
+        horizon=horizon,
+        num_hubs=num_hubs,
+        first_frame_tokens=first_frame_tokens,
+        conditioning_mode="hub_kv_lagged",
+    )
+
+    assert torch.equal(
+        baseline["video"][:, :first_frame_tokens],
+        conditioned["video"][:, :first_frame_tokens],
+    )
+    assert torch.equal(baseline["action"], conditioned["action"])
+    assert not torch.allclose(
+        baseline["video"][:, first_frame_tokens:],
+        conditioned["video"][:, first_frame_tokens:],
+    )
+
+
+def test_detached_hub_condition_has_value_dependency_without_video_gradient_leak():
+    torch.manual_seed(361)
+    layout = {
+        "num_agents": 2,
+        "horizon": 3,
+        "num_hubs": 4,
+        "first_frame_tokens": 1,
+    }
+
+    def video_gradient(detach_hub_kv):
+        mot = _tiny_mot_pair().train()
+        video_tokens = torch.randn(1, 3, 32, requires_grad=True)
+        action_tokens = torch.randn(1, 10, 32, requires_grad=True)
+        output = _run_tiny_joint(
+            mot,
+            video_tokens=video_tokens,
+            action_tokens=action_tokens,
+            conditioning_mode="hub_kv_lagged",
+            detach_hub_kv=detach_hub_kv,
+            **layout,
+        )
+        return torch.autograd.grad(
+            output["video"][:, 1:].square().mean(),
+            action_tokens,
+            allow_unused=True,
+        )[0]
+
+    detached_grad = video_gradient(True)
+    coupled_grad = video_gradient(False)
+    assert detached_grad is None or torch.count_nonzero(detached_grad) == 0
+    assert coupled_grad is not None
+    assert torch.isfinite(coupled_grad).all()
+    assert torch.count_nonzero(coupled_grad) > 0
+    assert torch.count_nonzero(coupled_grad[:, : 2 * 3]) > 0
+
+
+def test_detached_hub_value_still_depends_on_agent_tokens():
+    torch.manual_seed(362)
+    mot = _tiny_mot_pair().eval()
+    layout = {
+        "num_agents": 2,
+        "horizon": 3,
+        "num_hubs": 4,
+        "first_frame_tokens": 1,
+    }
+    video_tokens = torch.randn(1, 3, 32)
+    action_tokens = torch.randn(1, 10, 32)
+    perturbed_action_tokens = action_tokens.clone()
+    perturbed_action_tokens[:, : 2 * 3] += torch.randn(1, 2 * 3, 32)
+
+    reference = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=action_tokens,
+        conditioning_mode="hub_kv_lagged",
+        detach_hub_kv=True,
+        **layout,
+    )
+    perturbed = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=perturbed_action_tokens,
+        conditioning_mode="hub_kv_lagged",
+        detach_hub_kv=True,
+        **layout,
+    )
+
+    assert torch.equal(
+        reference["video"][:, :1], perturbed["video"][:, :1]
+    )
+    assert not torch.allclose(
+        reference["video"][:, 1:], perturbed["video"][:, 1:]
+    )
+
+
+def test_hub_conditioned_video_is_invariant_to_agent_permutation():
+    torch.manual_seed(363)
+    mot = _tiny_mot_pair().eval()
+    num_agents = 3
+    horizon = 3
+    num_hubs = 6
+    first_frame_tokens = 1
+    video_tokens = torch.randn(1, 3, 32)
+    action_tokens = torch.randn(1, num_agents * horizon + num_hubs, 32)
+    permutation = torch.tensor([2, 0, 1])
+    inverse = torch.argsort(permutation)
+    permuted_agents = action_tokens[:, : num_agents * horizon].reshape(
+        1, num_agents, horizon, 32
+    )[:, permutation]
+    permuted_action_tokens = torch.cat(
+        [
+            permuted_agents.reshape(1, num_agents * horizon, 32),
+            action_tokens[:, num_agents * horizon :],
+        ],
+        dim=1,
+    )
+
+    reference = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=action_tokens,
+        num_agents=num_agents,
+        horizon=horizon,
+        num_hubs=num_hubs,
+        first_frame_tokens=first_frame_tokens,
+        conditioning_mode="hub_kv_lagged",
+    )
+    permuted = _run_tiny_joint(
+        mot,
+        video_tokens=video_tokens,
+        action_tokens=permuted_action_tokens,
+        num_agents=num_agents,
+        horizon=horizon,
+        num_hubs=num_hubs,
+        first_frame_tokens=first_frame_tokens,
+        conditioning_mode="hub_kv_lagged",
+    )
+
+    assert torch.allclose(reference["video"], permuted["video"], atol=2e-5, rtol=2e-5)
+    reference_agents = reference["action"][:, : num_agents * horizon].reshape(
+        1, num_agents, horizon, 32
+    )
+    permuted_agents = permuted["action"][:, : num_agents * horizon].reshape(
+        1, num_agents, horizon, 32
+    )
+    assert torch.allclose(
+        reference_agents, permuted_agents[:, inverse], atol=2e-5, rtol=2e-5
+    )
+    assert torch.allclose(
+        reference["action"][:, num_agents * horizon :],
+        permuted["action"][:, num_agents * horizon :],
+        atol=2e-5,
+        rtol=2e-5,
+    )
+
+
+def test_hub_conditioning_fails_closed_without_lag_or_hubs():
+    mot = _tiny_mot_pair().eval()
+    common = {
+        "video_tokens": torch.randn(1, 3, 32),
+        "action_tokens": torch.randn(1, 6, 32),
+        "video_freqs": _unit_freqs(3),
+        "action_freqs": _unit_freqs(6),
+        "video_t_mod": torch.zeros(1, 6, 32),
+        "action_t_mod": torch.zeros(1, 6, 32),
+        "video_context_payload": None,
+        "action_context_payload": None,
+        "video_attention_mask": _first_frame_causal_mask(3, 1),
+        "num_agents": 2,
+        "horizon": 3,
+        "num_hub_tokens": 0,
+        "first_frame_tokens": 1,
+        "video_conditioning_mode": "hub_kv_lagged",
+    }
+    with pytest.raises(ValueError, match="requires HubToken"):
+        mot.forward_multi_agent_joint(**common)
+
+    common["num_hub_tokens"] = 4
+    common["action_tokens"] = torch.randn(1, 10, 32)
+    common["action_freqs"] = _unit_freqs(10)
+    common["video_conditioning_start_layer"] = 0
+    with pytest.raises(ValueError, match="1 <= start_layer"):
+        mot.forward_multi_agent_joint(**common)
+
+    common["video_conditioning_start_layer"] = 1
+    common["video_attention_mask"] = torch.ones(3, 3, dtype=torch.bool)
+    with pytest.raises(ValueError, match="causally isolated"):
+        mot.forward_multi_agent_joint(**common)
+
+
+def _checkpoint_metadata_probe(conditioning_mode):
+    probe = object.__new__(FastWAMMultiRobot)
+    torch.nn.Module.__init__(probe)
+    object.__setattr__(
+        probe,
+        "action_expert",
+        SimpleNamespace(
+            agent_encoding_mode="geometry",
+            agent_geometry_dim=7,
+            hub_enabled=True,
+            hub_token_ratio=2.0,
+        ),
+    )
+    object.__setattr__(probe, "video_conditioning_mode", conditioning_mode)
+    object.__setattr__(probe, "video_conditioning_start_layer", 1)
+    object.__setattr__(probe, "video_conditioning_detach_hub_kv", True)
+    object.__setattr__(probe, "training_mode", "joint")
+    object.__setattr__(probe, "_trainable_scope", "dit")
+    object.__setattr__(probe, "torch_dtype", torch.float32)
+    object.__setattr__(probe, "_loaded_base_checkpoint", "official-base.pt")
+    probe.mot = torch.nn.Linear(3, 2)
+    return probe
+
+
+def test_v2_checkpoint_is_explicitly_acv0_and_v3_preserves_treatment():
+    acv0 = _checkpoint_metadata_probe("none")
+    acv1 = _checkpoint_metadata_probe("hub_kv_lagged")
+    v2_metadata = {
+        key: value
+        for key, value in acv0._multi_robot_architecture_metadata().items()
+        if not key.startswith("video_action_conditioning_")
+    }
+    v2_payload = {
+        "format": "fastwam_multi_robot_v2",
+        "multi_robot_architecture": v2_metadata,
+    }
+    acv0._validate_multi_robot_checkpoint_metadata(v2_payload, "legacy-v2.pt")
+    with pytest.raises(ValueError, match="video_action_conditioning_mode"):
+        acv1._validate_multi_robot_checkpoint_metadata(v2_payload, "legacy-v2.pt")
+
+    v3_payload = {
+        "format": "fastwam_multi_robot_v3",
+        "multi_robot_architecture": acv1._multi_robot_architecture_metadata(),
+    }
+    acv1._validate_multi_robot_checkpoint_metadata(v3_payload, "acv1-v3.pt")
+
+
+def test_v3_checkpoint_real_roundtrip_and_cross_arm_rejection(tmp_path):
+    torch.manual_seed(365)
+    source = _checkpoint_metadata_probe("hub_kv_lagged")
+    checkpoint_path = tmp_path / "acv1-v3.pt"
+    source.save_checkpoint(checkpoint_path, step=17)
+
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    assert payload["format"] == "fastwam_multi_robot_v3"
+    assert payload["step"] == 17
+    assert payload["multi_robot_architecture"] == (
+        source._multi_robot_architecture_metadata()
+    )
+
+    target = _checkpoint_metadata_probe("hub_kv_lagged")
+    target.load_checkpoint(checkpoint_path)
+    for key, value in source.mot.state_dict().items():
+        assert torch.equal(value, target.mot.state_dict()[key])
+
+    acv0 = _checkpoint_metadata_probe("none")
+    with pytest.raises(ValueError, match="video_action_conditioning_mode"):
+        acv0.load_checkpoint(checkpoint_path)
 
 
 def test_cached_video_public_path_uses_factorized_action_calls():

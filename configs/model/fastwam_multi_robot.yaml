@@ -6,6 +6,15 @@ load_text_encoder: false
 redirect_common_files: true
 mot_checkpoint_mixed_attn: true
 training_mode: action_only_cache
+# Native multi-agent Action -> World conditioning.  ACV0 leaves this at
+# ``none``.  ACV1 overrides it with ``hub_kv_lagged`` so future-video queries
+# read dynamic fused global hubs from the preceding transformer layer.  Those
+# hubs aggregate noisy action/state/identity, observed video and text;
+# observed-frame queries and the action branch remain isolated.
+video_conditioning:
+  mode: none
+  start_layer: 1
+  detach_hub_kv: true
 # The official FastWAM checkpoint supplied by the task config restores every
 # shape-compatible video/action backbone tensor.  New 8D I/O, state, and hub
 # tensors remain randomly initialized by design.

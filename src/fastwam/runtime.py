@@ -171,6 +171,7 @@ def create_multi_robot_fastwam(
     action_scheduler=None,
     loss=None,
     training_mode: str = "action_only_cache",
+    video_conditioning=None,
     mot_checkpoint_mixed_attn: bool = True,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
@@ -194,6 +195,9 @@ def create_multi_robot_fastwam(
     video_scheduler = _as_dict(video_scheduler, name="video_scheduler")
     action_scheduler = _as_dict(action_scheduler, name="action_scheduler")
     loss = _as_dict(loss, name="loss")
+    video_conditioning = _as_dict(
+        video_conditioning, name="video_conditioning"
+    )
     required_scheduler_keys = {"train_shift", "infer_shift", "num_train_timesteps"}
     missing_keys = required_scheduler_keys - set(action_scheduler)
     if missing_keys:
@@ -213,6 +217,7 @@ def create_multi_robot_fastwam(
         skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
         mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
         training_mode=str(training_mode),
+        video_conditioning=video_conditioning,
         video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
         video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
         video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),

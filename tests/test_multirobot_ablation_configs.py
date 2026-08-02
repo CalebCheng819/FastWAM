@@ -42,6 +42,8 @@ LEGACY_ALIASES = {
     "robofactory_multi_robot_nohub_224_1e-4": "robofactory_multi_robot_vg0_hub0_224_1e-4",
 }
 
+ACV1_TASK = "robofactory_multi_robot_vg1_hub1_acv1_224_1e-4"
+
 
 def _compose_arm(task_name):
     config_dir = Path(__file__).resolve().parents[1] / "configs"
@@ -126,6 +128,44 @@ def test_multirobot_2x2_uses_one_model_structure_and_data_source():
                 key: cfg[key]
                 for key in reference_schedule
             } == reference_schedule
+
+
+def test_acv1_is_a_strict_native_dynamic_n_override_of_vg1_hub1():
+    baseline = _compose_arm("robofactory_multi_robot_vg1_hub1_224_1e-4")
+    treatment = _compose_arm(ACV1_TASK)
+
+    assert baseline["model"]["video_dit_config"]["action_conditioned"] is False
+    assert treatment["model"]["video_dit_config"]["action_conditioned"] is False
+    assert baseline["model"]["video_conditioning"] == {
+        "mode": "none",
+        "start_layer": 1,
+        "detach_hub_kv": True,
+    }
+    assert treatment["model"]["video_conditioning"] == {
+        "mode": "hub_kv_lagged",
+        "start_layer": 1,
+        "detach_hub_kv": True,
+    }
+    assert treatment["model"]["training_mode"] == "joint"
+    assert treatment["model"]["action_dit_config"]["hub_enabled"] is True
+    assert treatment["model"]["loss"] == {
+        "lambda_video": 1.0,
+        "lambda_action": 1.0,
+    }
+
+    normalized_treatment_model = deepcopy(treatment["model"])
+    normalized_treatment_model["video_conditioning"]["mode"] = "none"
+    assert normalized_treatment_model == baseline["model"]
+
+    # Normalize the only two predeclared arm differences and compare the full
+    # resolved tree, so optimizer/data/save/eval drift cannot hide in a key
+    # allowlist that went stale.
+    normalized_treatment = deepcopy(treatment)
+    normalized_treatment["model"]["video_conditioning"]["mode"] = "none"
+    normalized_treatment["wandb"]["name"] = baseline["wandb"]["name"]
+    # Hydra resolves ${now:...} independently for each composition call.
+    normalized_treatment["output_dir"] = baseline["output_dir"]
+    assert normalized_treatment == baseline
 
 
 @pytest.mark.parametrize(("alias", "canonical"), LEGACY_ALIASES.items())

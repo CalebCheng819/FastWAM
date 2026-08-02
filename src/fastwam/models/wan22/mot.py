@@ -679,8 +679,22 @@ class MoT(nn.Module):
         horizon: int,
         num_hub_tokens: int,
         first_frame_tokens: int,
+        video_conditioning_mode: str = "none",
+        video_conditioning_start_layer: int = 1,
+        video_conditioning_detach_hub_kv: bool = True,
     ) -> Dict[str, torch.Tensor]:
-        """Joint VideoGen/action forward without global video-action attention."""
+        """Joint VideoGen/action forward with optional sparse Hub conditioning.
+
+        ``video_conditioning_mode='hub_kv_lagged'`` gives future-video queries
+        access to the dynamic global hubs that entered the current transformer
+        layer.  Since a hub entering layer ``l>=1`` contains the fused gather
+        result from layer ``l-1`` (noisy action/state/identity, observed video,
+        and text), this creates the directed path ``global hub -> future video``
+        without a same-layer cycle or a dense global video/agent QK product.
+        The observed-frame queries never attend to hubs, so the action path
+        (which reads only observed video) cannot receive future-video or clean-
+        action leakage.
+        """
 
         if video_attention_mask.ndim != 2:
             raise ValueError(
@@ -696,6 +710,38 @@ class MoT(nn.Module):
                 f"mask={tuple(video_attention_mask.shape)}, "
                 f"tokens={tuple(video_tokens.shape)}"
             )
+
+        video_conditioning_mode = str(video_conditioning_mode).strip().lower()
+        if video_conditioning_mode not in {"none", "hub_kv_lagged"}:
+            raise ValueError(
+                "`video_conditioning_mode` must be 'none' or 'hub_kv_lagged', "
+                f"got {video_conditioning_mode!r}"
+            )
+        if video_conditioning_mode == "hub_kv_lagged":
+            if num_hub_tokens < 1:
+                raise ValueError("hub_kv_lagged video conditioning requires HubToken enabled")
+            if not 1 <= int(video_conditioning_start_layer) < self.num_layers:
+                raise ValueError(
+                    "hub_kv_lagged conditioning requires 1 <= start_layer < num_layers, "
+                    f"got start_layer={video_conditioning_start_layer}, num_layers={self.num_layers}"
+                )
+            if not 1 <= first_frame_tokens < video_tokens.shape[1]:
+                raise ValueError(
+                    "hub_kv_lagged conditioning requires observed and future video tokens; "
+                    f"got first_frame_tokens={first_frame_tokens}, video_len={video_tokens.shape[1]}"
+                )
+            if video_attention_mask.dtype != torch.bool:
+                raise TypeError(
+                    "hub_kv_lagged requires a boolean allow-mask, got "
+                    f"{video_attention_mask.dtype}"
+                )
+            if video_attention_mask[
+                :first_frame_tokens, first_frame_tokens:
+            ].any():
+                raise ValueError(
+                    "hub_kv_lagged requires observed-video queries to be "
+                    "causally isolated from future-video keys"
+                )
 
         video_expert = self.mixtures["video"]
         action_expert = self.mixtures["action"]
@@ -739,11 +785,40 @@ class MoT(nn.Module):
                 t_mod=action_t_mod,
             )
 
+            video_k = k_video
+            video_v = v_video
+            layer_video_mask = video_attention_mask
+            if (
+                video_conditioning_mode == "hub_kv_lagged"
+                and layer_idx >= int(video_conditioning_start_layer)
+            ):
+                num_action_tokens = num_agents * horizon
+                hub_k = k_action[:, num_action_tokens:]
+                hub_v = v_action[:, num_action_tokens:]
+                if video_conditioning_detach_hub_kv:
+                    hub_k = hub_k.detach()
+                    hub_v = hub_v.detach()
+
+                # Future-video queries may read the action-plan hubs.  The
+                # observed-frame rows stay false, preserving the exact
+                # observed-video representation used by the action branch.
+                hub_mask = torch.zeros(
+                    (video_tokens.shape[1], num_hub_tokens),
+                    dtype=torch.bool,
+                    device=video_attention_mask.device,
+                )
+                hub_mask[first_frame_tokens:, :] = True
+                layer_video_mask = torch.cat(
+                    [video_attention_mask, hub_mask], dim=1
+                )
+                video_k = torch.cat([k_video, hub_k], dim=1)
+                video_v = torch.cat([v_video, hub_v], dim=1)
+
             video_attention = self._mixed_attention(
                 q_cat=q_video,
-                k_cat=k_video,
-                v_cat=v_video,
-                attention_mask=video_attention_mask,
+                k_cat=video_k,
+                v_cat=video_v,
+                attention_mask=layer_video_mask,
             )
             action_attention = self._factorized_multi_agent_attention(
                 q_action=q_action,

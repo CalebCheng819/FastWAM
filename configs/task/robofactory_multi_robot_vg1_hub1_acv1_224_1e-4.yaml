@@ -1,0 +1,18 @@
+# @package _global_
+
+# Strict treatment over VG1-HUB1: enable only the native Dynamic-N
+# fused Action/Hub -> future-video path.  The official legacy raw-action switch stays
+# false because it accepts [B,H,A] and cannot represent an unordered [B,N,H,A]
+# agent set without slot-dependent flattening.
+defaults:
+  - robofactory_multi_robot_vg1_hub1_224_1e-4
+  - _self_
+
+model:
+  video_conditioning:
+    mode: hub_kv_lagged
+    start_layer: 1
+    detach_hub_kv: true
+
+wandb:
+  name: fastwam-robofactory-vg1-hub1-acv1-s42
