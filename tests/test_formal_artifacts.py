@@ -6,6 +6,9 @@ import pytest
 import torch
 
 from fastwam.formal_artifacts import (
+    N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+    N4_GATE_MAX_PEAK_RESERVED_BYTES,
+    _summarize_n4_peak_memory,
     canonical_json_bytes,
     canonical_json_sha256,
     checkpoint_seal_descriptor,
@@ -79,6 +82,135 @@ def test_deepspeed_gradient_evidence_uses_engine_norm_after_grads_are_cleared():
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _n4_memory_step_proofs(
+    *,
+    smaller_capacity: int = 47_673_901_056,
+    larger_capacity: int = 50_875_924_480,
+):
+    proofs = {}
+    for step in (1, 2):
+        step_payloads = []
+        for rank in range(32):
+            capacity = smaller_capacity if rank < 24 else larger_capacity
+            step_payloads.append(
+                {
+                    "rank": rank,
+                    "memory": {
+                        "device_name": "NVIDIA GeForce RTX 4090",
+                        "effective_max_allocated_bytes": min(
+                            N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+                            capacity * 90 // 100,
+                        ),
+                        "effective_max_reserved_bytes": min(
+                            N4_GATE_MAX_PEAK_RESERVED_BYTES,
+                            capacity * 95 // 100,
+                        ),
+                        "peak_allocated_bytes": 18 * 2**30 + rank,
+                        "peak_reserved_bytes": 20 * 2**30 + rank,
+                        "required_max_allocated_bytes": N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+                        "required_max_reserved_bytes": N4_GATE_MAX_PEAK_RESERVED_BYTES,
+                        "total_device_bytes": capacity,
+                    },
+                }
+            )
+        proofs[step] = step_payloads
+    return proofs
+
+
+def test_n4_memory_summary_accepts_stable_mixed_capacities_conservatively():
+    proofs = _n4_memory_step_proofs()
+
+    summary = _summarize_n4_peak_memory(proofs)
+
+    minimum_capacity = 47_673_901_056
+    assert summary == {
+        "device_name": "NVIDIA GeForce RTX 4090",
+        "effective_max_allocated_bytes": min(
+            N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+            minimum_capacity * 90 // 100,
+        ),
+        "effective_max_reserved_bytes": min(
+            N4_GATE_MAX_PEAK_RESERVED_BYTES,
+            minimum_capacity * 95 // 100,
+        ),
+        "total_device_bytes": minimum_capacity,
+        "max_allocated_bytes": 18 * 2**30 + 31,
+        "max_reserved_bytes": 20 * 2**30 + 31,
+        "required_max_allocated_bytes": N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+        "required_max_reserved_bytes": N4_GATE_MAX_PEAK_RESERVED_BYTES,
+    }
+
+
+def test_n4_memory_summary_rejects_different_device_names():
+    proofs = _n4_memory_step_proofs()
+    for step in (1, 2):
+        proofs[step][31]["memory"]["device_name"] = "Different GPU"
+
+    with pytest.raises(RuntimeError, match="same non-empty CUDA device name"):
+        _summarize_n4_peak_memory(proofs)
+
+
+def test_n4_memory_summary_rejects_per_rank_capacity_drift():
+    proofs = _n4_memory_step_proofs()
+    changed_capacity = 47_000_000_000
+    memory = proofs[2][0]["memory"]
+    memory["total_device_bytes"] = changed_capacity
+    memory["effective_max_allocated_bytes"] = min(
+        N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+        changed_capacity * 90 // 100,
+    )
+    memory["effective_max_reserved_bytes"] = min(
+        N4_GATE_MAX_PEAK_RESERVED_BYTES,
+        changed_capacity * 95 // 100,
+    )
+
+    with pytest.raises(RuntimeError, match="changed between optimizer steps"):
+        _summarize_n4_peak_memory(proofs)
+
+
+def test_n4_memory_summary_rejects_rank_over_its_own_capacity_limit():
+    proofs = _n4_memory_step_proofs()
+    memory = proofs[1][0]["memory"]
+    memory["peak_allocated_bytes"] = memory["effective_max_allocated_bytes"] + 1
+
+    with pytest.raises(RuntimeError, match="exceeds memory gate"):
+        _summarize_n4_peak_memory(proofs)
+
+
+@pytest.mark.parametrize("peak_field", ["peak_allocated_bytes", "peak_reserved_bytes"])
+def test_n4_memory_summary_rejects_peak_over_minimum_capacity_limit(peak_field):
+    smaller_capacity = 40 * 2**30
+    proofs = _n4_memory_step_proofs(
+        smaller_capacity=smaller_capacity,
+        larger_capacity=50 * 2**30,
+    )
+    minimum_limit = (
+        smaller_capacity * (90 if peak_field == "peak_allocated_bytes" else 95) // 100
+    )
+    proofs[1][31]["memory"][peak_field] = minimum_limit + 1
+
+    with pytest.raises(RuntimeError, match="conservative run-level memory gate"):
+        _summarize_n4_peak_memory(proofs)
+
+
+def test_n4_memory_summary_rejects_empty_device_name():
+    proofs = _n4_memory_step_proofs()
+    for step in (1, 2):
+        proofs[step][0]["memory"]["device_name"] = ""
+
+    with pytest.raises(RuntimeError, match="relative peak-memory threshold mismatch"):
+        _summarize_n4_peak_memory(proofs)
+
+
+def test_n4_memory_summary_rejects_non_string_device_name():
+    proofs = _n4_memory_step_proofs()
+    for step in (1, 2):
+        proofs[step][0]["memory"]["device_name"] = None
+
+    with pytest.raises(RuntimeError, match="relative peak-memory threshold mismatch"):
+        _summarize_n4_peak_memory(proofs)
 
 
 def _publish_json(path, payload) -> str:

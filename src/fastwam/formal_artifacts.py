@@ -894,6 +894,128 @@ def _load_rank_proofs(proof_dir: Path, pattern: str, *, expected: int) -> list[d
     return payloads
 
 
+def _summarize_n4_peak_memory(
+    step_proofs: Mapping[int, list[dict[str, Any]]],
+) -> dict[str, int | str]:
+    """Validate per-rank memory evidence and return a conservative summary.
+
+    Alibaba PAI can schedule RTX 4090 workers with different visible memory
+    capacities.  Capacity is therefore a per-rank safety input, not part of
+    the cross-rank device identity.  Each rank must report a stable
+    ``(device_name, total_device_bytes)`` across both optimizer steps, and
+    every proof is checked against the limits derived from that rank's own
+    capacity.  The sealed run-level summary uses the smallest observed
+    capacity so downstream consumers never infer a larger safety margin than
+    the least-capable worker actually provided.
+    """
+
+    peak_allocated = 0
+    peak_reserved = 0
+    rank_identities: dict[int, tuple[str, int]] = {}
+    device_names: set[str] = set()
+    total_device_capacities: set[int] = set()
+    expected_memory_fields = {
+        "device_name",
+        "effective_max_allocated_bytes",
+        "effective_max_reserved_bytes",
+        "peak_allocated_bytes",
+        "peak_reserved_bytes",
+        "required_max_allocated_bytes",
+        "required_max_reserved_bytes",
+        "total_device_bytes",
+    }
+    for step, proofs in step_proofs.items():
+        for proof in proofs:
+            rank = int(proof.get("rank", -1))
+            memory = proof.get("memory", {})
+            if set(memory) != expected_memory_fields:
+                raise RuntimeError(f"peak-memory proof fields mismatch: rank={rank}")
+            if (
+                memory.get("required_max_allocated_bytes")
+                != N4_GATE_MAX_PEAK_ALLOCATED_BYTES
+                or memory.get("required_max_reserved_bytes")
+                != N4_GATE_MAX_PEAK_RESERVED_BYTES
+            ):
+                raise RuntimeError(f"peak-memory threshold mismatch: rank={rank}")
+            raw_device_name = memory.get("device_name")
+            device_name = raw_device_name.strip() if isinstance(raw_device_name, str) else ""
+            total_device_bytes = int(memory.get("total_device_bytes", -1))
+            expected_allocated_limit = min(
+                N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+                total_device_bytes * 90 // 100,
+            )
+            expected_reserved_limit = min(
+                N4_GATE_MAX_PEAK_RESERVED_BYTES,
+                total_device_bytes * 95 // 100,
+            )
+            if (
+                not device_name
+                or total_device_bytes <= 0
+                or memory.get("effective_max_allocated_bytes")
+                != expected_allocated_limit
+                or memory.get("effective_max_reserved_bytes")
+                != expected_reserved_limit
+            ):
+                raise RuntimeError(f"relative peak-memory threshold mismatch: rank={rank}")
+            allocated = int(memory.get("peak_allocated_bytes", -1))
+            reserved = int(memory.get("peak_reserved_bytes", -1))
+            if allocated < 0 or reserved < 0:
+                raise RuntimeError(f"missing peak-memory evidence in N=4 proof: rank={rank}")
+            if allocated > expected_allocated_limit or reserved > expected_reserved_limit:
+                raise RuntimeError(
+                    f"N=4 proof exceeds memory gate: rank={rank} "
+                    f"allocated={allocated} reserved={reserved}"
+                )
+            identity = (device_name, total_device_bytes)
+            previous_identity = rank_identities.setdefault(rank, identity)
+            if previous_identity != identity:
+                raise RuntimeError(
+                    "N=4 gate CUDA device identity changed between optimizer steps: "
+                    f"rank={rank} previous={previous_identity} current={identity} step={step}"
+                )
+            device_names.add(device_name)
+            total_device_capacities.add(total_device_bytes)
+            peak_allocated = max(peak_allocated, allocated)
+            peak_reserved = max(peak_reserved, reserved)
+    if set(rank_identities) != set(range(N4_GATE_WORLD_SIZE)):
+        raise RuntimeError(
+            "N=4 gate memory evidence does not cover exactly all ranks: "
+            f"observed={sorted(rank_identities)}"
+        )
+    if len(device_names) != 1:
+        raise RuntimeError(
+            f"N=4 gate requires the same non-empty CUDA device name on all 32 ranks: {device_names}"
+        )
+    minimum_total_device_bytes = min(total_device_capacities)
+    conservative_allocated_limit = min(
+        N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+        minimum_total_device_bytes * 90 // 100,
+    )
+    conservative_reserved_limit = min(
+        N4_GATE_MAX_PEAK_RESERVED_BYTES,
+        minimum_total_device_bytes * 95 // 100,
+    )
+    if (
+        peak_allocated > conservative_allocated_limit
+        or peak_reserved > conservative_reserved_limit
+    ):
+        raise RuntimeError(
+            "N=4 proofs exceed the conservative run-level memory gate: "
+            f"allocated={peak_allocated}/{conservative_allocated_limit} "
+            f"reserved={peak_reserved}/{conservative_reserved_limit}"
+        )
+    return {
+        "device_name": next(iter(device_names)),
+        "effective_max_allocated_bytes": conservative_allocated_limit,
+        "effective_max_reserved_bytes": conservative_reserved_limit,
+        "total_device_bytes": minimum_total_device_bytes,
+        "max_allocated_bytes": peak_allocated,
+        "max_reserved_bytes": peak_reserved,
+        "required_max_allocated_bytes": N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
+        "required_max_reserved_bytes": N4_GATE_MAX_PEAK_RESERVED_BYTES,
+    }
+
+
 def finalize_n4_fullmodel_gate(
     output_root: str | Path,
     *,
@@ -960,9 +1082,6 @@ def finalize_n4_fullmodel_gate(
     load_proofs = _load_rank_proofs(
         proof_dir, "load-state-rank-*.json", expected=N4_GATE_WORLD_SIZE
     )
-    peak_allocated = 0
-    peak_reserved = 0
-    device_identities: set[tuple[str, int]] = set()
     expected_step_fields = {
         "agent_count",
         "batch_accounting",
@@ -999,7 +1118,6 @@ def finalize_n4_fullmodel_gate(
                 raise RuntimeError(f"N=4 step proof semantic mismatch: rank={proof.get('rank')} step={step}")
             losses = proof.get("losses", {})
             gradients = proof.get("gradients", {})
-            memory = proof.get("memory", {})
             if set(losses) != {"action", "total", "video"} or not all(
                 np.isfinite(float(value)) for value in losses.values()
             ):
@@ -1028,57 +1146,7 @@ def finalize_n4_fullmodel_gate(
                 or gradient_norm <= 0.0
             ):
                 raise RuntimeError(f"non-finite/missing gradients in N=4 proof: rank={proof.get('rank')}")
-            if set(memory) != {
-                "device_name",
-                "effective_max_allocated_bytes",
-                "effective_max_reserved_bytes",
-                "peak_allocated_bytes",
-                "peak_reserved_bytes",
-                "required_max_allocated_bytes",
-                "required_max_reserved_bytes",
-                "total_device_bytes",
-            }:
-                raise RuntimeError(f"peak-memory proof fields mismatch: rank={proof.get('rank')}")
-            if (
-                memory.get("required_max_allocated_bytes")
-                != N4_GATE_MAX_PEAK_ALLOCATED_BYTES
-                or memory.get("required_max_reserved_bytes")
-                != N4_GATE_MAX_PEAK_RESERVED_BYTES
-            ):
-                raise RuntimeError(f"peak-memory threshold mismatch: rank={proof.get('rank')}")
-            total_device_bytes = int(memory.get("total_device_bytes", -1))
-            expected_allocated_limit = min(
-                N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
-                total_device_bytes * 90 // 100,
-            )
-            expected_reserved_limit = min(
-                N4_GATE_MAX_PEAK_RESERVED_BYTES,
-                total_device_bytes * 95 // 100,
-            )
-            if (
-                total_device_bytes <= 0
-                or memory.get("effective_max_allocated_bytes")
-                != expected_allocated_limit
-                or memory.get("effective_max_reserved_bytes")
-                != expected_reserved_limit
-            ):
-                raise RuntimeError(f"relative peak-memory threshold mismatch: rank={proof.get('rank')}")
-            allocated = int(memory.get("peak_allocated_bytes", -1))
-            reserved = int(memory.get("peak_reserved_bytes", -1))
-            if allocated < 0 or reserved < 0:
-                raise RuntimeError(f"missing peak-memory evidence in N=4 proof: rank={proof.get('rank')}")
-            if allocated > expected_allocated_limit or reserved > expected_reserved_limit:
-                raise RuntimeError(
-                    f"N=4 proof exceeds memory gate: rank={proof.get('rank')} "
-                    f"allocated={allocated} reserved={reserved}"
-                )
-            peak_allocated = max(peak_allocated, allocated)
-            peak_reserved = max(peak_reserved, reserved)
-            device_identities.add((str(memory.get("device_name", "")), total_device_bytes))
-    if len(device_identities) != 1:
-        raise RuntimeError(
-            f"N=4 gate requires the same CUDA device name/capacity on all 32 ranks: {device_identities}"
-        )
+    peak_memory = _summarize_n4_peak_memory(step_proofs)
     roundtrip_checks = {
         "global_step": True,
         "model": True,
@@ -1264,7 +1332,6 @@ def finalize_n4_fullmodel_gate(
             "N=4 gate reservation does not bind the proof/finalizer identity: "
             f"{reservation_mismatches}"
         )
-    device_name, total_device_bytes = next(iter(device_identities))
     manifest = {
         "batch_accounting": expected_batch,
         "checkpoint": checkpoint,
@@ -1272,22 +1339,7 @@ def finalize_n4_fullmodel_gate(
         "image_digest": image_digest,
         "image_reference": str(image_reference),
         "input_bindings": normalized_bindings,
-        "peak_memory": {
-            "device_name": device_name,
-            "effective_max_allocated_bytes": min(
-                N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
-                total_device_bytes * 90 // 100,
-            ),
-            "effective_max_reserved_bytes": min(
-                N4_GATE_MAX_PEAK_RESERVED_BYTES,
-                total_device_bytes * 95 // 100,
-            ),
-            "total_device_bytes": total_device_bytes,
-            "max_allocated_bytes": peak_allocated,
-            "max_reserved_bytes": peak_reserved,
-            "required_max_allocated_bytes": N4_GATE_MAX_PEAK_ALLOCATED_BYTES,
-            "required_max_reserved_bytes": N4_GATE_MAX_PEAK_RESERVED_BYTES,
-        },
+        "peak_memory": peak_memory,
         "proof_counts": {
             "load_state": len(load_proofs),
             "save_state": len(save_proofs),
