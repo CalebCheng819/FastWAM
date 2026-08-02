@@ -1210,7 +1210,9 @@ def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
         payload = {
             "batch_accounting": batch_accounting,
             "code_commit": commit,
-            "filesystem_device": os.stat(smoke_root).st_dev,
+            # Producer-local st_dev is intentionally different from this
+            # validator process, as it can be across DLC mount namespaces.
+            "filesystem_device": os.stat(smoke_root).st_dev + 1,
             "image_digest": image_digest,
             "image_reference": image_reference,
             "output_root": str(smoke_root.resolve()),
@@ -1233,7 +1235,7 @@ def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
             "zero_stage": 2,
             "world_size": 32,
         }
-        marker = smoke_root / "zero-smoke.json"
+        marker = smoke_root / "zero2-roundtrip-smoke.json"
         marker.write_text(
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
@@ -1267,6 +1269,109 @@ def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
         validated = json.loads(passed.stdout)
         assert validated["status"] == "PASS"
         assert validated["batch_accounting"] == batch_accounting
+
+        copied_marker = smoke_root / "copied-smoke.json"
+        copied_marker.write_bytes(marker.read_bytes())
+        command[command.index("--marker") + 1] = str(copied_marker)
+        command[command.index("--expected-sha256") + 1] = _sha256(copied_marker)
+        wrong_marker_path = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert wrong_marker_path.returncode != 0
+        assert "marker path mismatch" in wrong_marker_path.stderr
+        command[command.index("--marker") + 1] = str(marker)
+
+        renamed_state = smoke_root / "renamed-state"
+        shutil.copytree(state_root, renamed_state)
+        payload["state_tree_root"] = str(renamed_state.resolve())
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
+        wrong_state_path = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert wrong_state_path.returncode != 0
+        assert "state root path mismatch" in wrong_state_path.stderr
+        payload["state_tree_root"] = str(state_root.resolve())
+
+        renamed_manifest = smoke_root / "other-state-tree.json"
+        shutil.copyfile(state_manifest, renamed_manifest)
+        payload["state_tree_manifest"] = str(renamed_manifest.resolve())
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
+        wrong_manifest_path = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert wrong_manifest_path.returncode != 0
+        assert "state manifest path mismatch" in wrong_manifest_path.stderr
+        payload["state_tree_manifest"] = str(state_manifest.resolve())
+
+        alias_root = root / "smoke-output-alias"
+        alias_root.symlink_to(smoke_root, target_is_directory=True)
+        payload["output_root"] = str(alias_root)
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
+        aliased_root = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert aliased_root.returncode != 0
+        assert "must not traverse symlinks or aliases" in aliased_root.stderr
+        payload["output_root"] = str(smoke_root.resolve())
+
+        producer_device = payload["filesystem_device"]
+        payload["filesystem_device"] = True
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
+        invalid_producer_device = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert invalid_producer_device.returncode != 0
+        assert "producer filesystem_device must be a non-negative integer" in (
+            invalid_producer_device.stderr
+        )
+        payload["filesystem_device"] = producer_device
+
+        payload["state_tree_manifest_sha256"] = "0" * 64
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
+        wrong_manifest_hash = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert wrong_manifest_hash.returncode != 0
+        assert "state-tree manifest SHA-256 mismatch" in wrong_manifest_hash.stderr
+        payload["state_tree_manifest_sha256"] = _sha256(state_manifest)
+
+        shared_memory = Path("/dev/shm")
+        if (
+            shared_memory.is_dir()
+            and os.stat(shared_memory).st_dev != os.stat(smoke_root).st_dev
+        ):
+            marker.write_text(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            command[command.index("--expected-sha256") + 1] = _sha256(marker)
+            command[command.index("--output-parent") + 1] = str(shared_memory)
+            wrong_local_filesystem = subprocess.run(
+                command, text=True, capture_output=True, check=False, env=env
+            )
+            assert wrong_local_filesystem.returncode != 0
+            assert "current mount namespace" in wrong_local_filesystem.stderr
+            command[command.index("--output-parent") + 1] = str(output_parent)
 
         bad_proof = proof_root / "load-rank-00031.json"
         bad_payload = json.loads(bad_proof.read_text(encoding="utf-8"))
