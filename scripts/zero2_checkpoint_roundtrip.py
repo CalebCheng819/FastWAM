@@ -24,6 +24,7 @@ from state_tree_manifest import canonical_bytes, publish_state_tree_manifest
 
 
 PINNED_PACKAGES = ("torch", "accelerate", "deepspeed")
+SMOKE_LOCAL_MICRO_BATCH_SIZE = 4
 
 
 class SmokeProgress:
@@ -128,8 +129,37 @@ def _state_fingerprints(accelerator, model, optimizer, scheduler, progress) -> d
     }
 
 
+def _configure_smoke_deepspeed_batch_accounting(accelerator) -> None:
+    """Resolve DeepSpeed metadata when the smoke has no DataLoader.
+
+    Accelerate cannot infer a micro-batch size from the model, optimizer and
+    scheduler alone.  The smoke constructs four samples per rank explicitly in
+    ``_train_step``, so bind that fixed local batch before ``prepare`` while
+    leaving the shared training DeepSpeed config on ``auto``.
+    """
+
+    plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    if plugin is None:
+        raise RuntimeError("formal ZeRO-2 smoke requires the DeepSpeed plugin")
+    deepspeed_config = plugin.deepspeed_config
+    configured = deepspeed_config.get("train_micro_batch_size_per_gpu", "auto")
+    if configured == "auto":
+        configured = SMOKE_LOCAL_MICRO_BATCH_SIZE
+        deepspeed_config["train_micro_batch_size_per_gpu"] = configured
+    if (
+        isinstance(configured, bool)
+        or not isinstance(configured, int)
+        or configured != SMOKE_LOCAL_MICRO_BATCH_SIZE
+    ):
+        raise ValueError(
+            "ZeRO-2 smoke requires train_micro_batch_size_per_gpu="
+            f"{SMOKE_LOCAL_MICRO_BATCH_SIZE}, got {configured!r}."
+        )
+
+
 def _build_runtime(seed: int):
     accelerator = Accelerator(gradient_accumulation_steps=1, mixed_precision="no")
+    _configure_smoke_deepspeed_batch_accounting(accelerator)
     # device_specific=True needs AcceleratorState to exist. The target
     # Accelerate 1.12.0 raises if this is called before Accelerator().
     set_seed(seed, device_specific=True)

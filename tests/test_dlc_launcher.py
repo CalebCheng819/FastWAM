@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -1270,6 +1271,39 @@ def test_zero_smoke_runner_clears_pai_topology_and_initializes_accelerator_first
     assert build_runtime.index("Accelerator(") < build_runtime.index(
         "set_seed(seed, device_specific=True)"
     )
+    assert build_runtime.index("Accelerator(") < build_runtime.index(
+        "_configure_smoke_deepspeed_batch_accounting(accelerator)"
+    ) < build_runtime.index("accelerator.prepare(")
+
+
+def test_zero_smoke_resolves_fixed_micro_batch_without_a_dataloader() -> None:
+    source = ZERO_ROUNDTRIP_SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_configure_smoke_deepspeed_batch_accounting"
+    )
+    namespace = {"SMOKE_LOCAL_MICRO_BATCH_SIZE": 4}
+    helper_module = ast.Module(body=[helper], type_ignores=[])
+    exec(
+        compile(helper_module, str(ZERO_ROUNDTRIP_SCRIPT), "exec"),
+        namespace,
+    )
+    configure = namespace["_configure_smoke_deepspeed_batch_accounting"]
+
+    class Plugin:
+        deepspeed_config = {"train_micro_batch_size_per_gpu": "auto"}
+
+    class State:
+        deepspeed_plugin = Plugin()
+
+    class AcceleratorStub:
+        state = State()
+
+    configure(AcceleratorStub())
+    assert Plugin.deepspeed_config["train_micro_batch_size_per_gpu"] == 4
 
 
 def test_pod_image_digest_probe_outputs_only_normalized_identity() -> None:
@@ -3088,6 +3122,7 @@ if __name__ == "__main__":
         test_run_reservation_is_exclusive_and_identity_exact,
         test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound,
         test_zero_smoke_runner_clears_pai_topology_and_initializes_accelerator_first,
+        test_zero_smoke_resolves_fixed_micro_batch_without_a_dataloader,
         test_pod_image_digest_probe_outputs_only_normalized_identity,
         test_runtime_rank_zero_atomic_config_file_barrier,
         test_prepare_local_training_bundle_rewrites_stats_provenance_without_mutating_source,
