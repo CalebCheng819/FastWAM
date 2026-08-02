@@ -1659,6 +1659,45 @@ class Wan22Trainer:
             f"{label}: {path}"
         )
 
+    def _assert_checkpoint_targets_absent(self, *, step_tag: str) -> None:
+        """Collectively refuse stale or colliding outputs before checkpoint I/O.
+
+        A non-main rank must never accept an old COMPLETE marker while rank zero
+        is discovering that the same step already exists.  Every rank probes the
+        shared targets, then a small all-reduce makes any observed conflict fatal
+        on the whole world before rank zero starts the expensive weight copy.
+        """
+
+        targets = [
+            Path(self.weights_dir) / f"{step_tag}.pt",
+            Path(self.weights_dir) / f"{step_tag}.pt.manifest.json",
+            Path(self.weights_dir) / f"{step_tag}.pt.COMPLETE",
+        ]
+        if self.save_training_state_enabled:
+            state_path = Path(self.state_dir) / step_tag
+            targets.append(state_path)
+            if self.seal_training_state:
+                targets.append(
+                    state_path.with_name(f"{state_path.name}.state-tree.json")
+                )
+        local_conflicts = [
+            path for path in targets if path.exists() or path.is_symlink()
+        ]
+        local_count = torch.tensor(
+            [len(local_conflicts)],
+            device=self.accelerator.device,
+            dtype=torch.int64,
+        )
+        global_count = self.accelerator.reduce(local_count, reduction="sum")
+        if int(global_count.item()) != 0:
+            local_detail = (
+                ", ".join(str(path) for path in local_conflicts) or "none-local"
+            )
+            raise FileExistsError(
+                "Refusing checkpoint publication because at least one rank observed "
+                f"pre-existing targets for {step_tag}; local_conflicts={local_detail}"
+            )
+
     def _save_trainer_state(self, state_path: str):
         state_file = os.path.join(state_path, "trainer_state.json")
         payload = {
@@ -1728,6 +1767,7 @@ class Wan22Trainer:
             Path(self.weights_dir) / f"{step_tag}.pt.COMPLETE"
         )
 
+        self._assert_checkpoint_targets_absent(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
         ckpt_path = None
         if self.accelerator.is_main_process:

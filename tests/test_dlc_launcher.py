@@ -18,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = REPO_ROOT / "scripts" / "train_zero2.sh"
 CACHE_SCRIPT = REPO_ROOT / "scripts" / "dlc_local_cache.sh"
 MULTI_CACHE_SCRIPT = REPO_ROOT / "scripts" / "dlc_multi_source_cache.sh"
+OFFLINE_ENV_SCRIPT = REPO_ROOT / "scripts" / "bootstrap_offline_training_env.sh"
 PREFLIGHT_SCRIPT = REPO_ROOT / "scripts" / "dlc_preflight.sh"
 PYTHON_ENV_SCRIPT = REPO_ROOT / "scripts" / "validate_python_environment.py"
 MANIFEST_SCRIPT = REPO_ROOT / "scripts" / "build_whole_file_manifest.py"
@@ -741,6 +742,7 @@ def test_formal_gau0_has_no_gaussian_oss_asset_dependency() -> None:
         "FASTWAM_OSS_BUNDLE_MANIFEST",
         "FASTWAM_OSS_BUNDLE_MANIFEST_SHA256",
         "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT",
+        "FASTWAM_GAUSSIAN_CACHE_DIR",
         "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256",
         "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256",
         "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256",
@@ -770,6 +772,18 @@ def test_formal_gau0_has_no_gaussian_oss_asset_dependency() -> None:
     assert "GAU0 formal arms forbid irrelevant Gaussian OSS input" in (
         leaked.stderr or ""
     )
+
+    stale_runtime_mapping = _run_launcher(
+        nproc=None,
+        env_updates={
+            **gau0_env,
+            "FASTWAM_GAUSSIAN_CACHE_DIR": "/tmp/stale-gaussian-cache",
+        },
+        dry_run=True,
+        extra_args=gau0_args,
+    )
+    assert stale_runtime_mapping.returncode != 0
+    assert "FASTWAM_GAUSSIAN_CACHE_DIR" in (stale_runtime_mapping.stderr or "")
 
     gau1_missing = _run_launcher(
         nproc=None,
@@ -1589,6 +1603,1091 @@ def test_multi_source_cache_combines_cpfs_and_oss_mappings() -> None:
         assert "oss_sha256=none" in cpfs_only.stderr
 
 
+def test_offline_environment_bootstrap_is_content_addressed_and_zstd_free() -> None:
+    source = OFFLINE_ENV_SCRIPT.read_text(encoding="utf-8")
+    assert "fastwam_prepare_local_cache" in source
+    assert "FASTWAM_LOCAL_CACHE_REQUIRE_VERIFY_HIT=1" in source
+    assert "--no-index" in source
+    assert "--require-hashes" in source
+    assert "FASTWAM_OFFLINE_ENV_RUNTIME_LOCK_SHA256" in source
+    assert "FASTWAM_OFFLINE_ENV_CACHE_HELPER_SHA256" in source
+    assert "dlc_local_cache.sh SHA-256 mismatch" in source
+    assert "_fastwam_offline_env_normalize_relative_path" in source
+    assert ".FASTWAM_ENV_READY" in source
+    assert "git clone --no-hardlinks" in source
+    assert "status --porcelain --untracked-files=all" in source
+    assert "validate_python_environment.py" in source
+    assert "FASTWAM_TRAINING_ENV_BUNDLE_MANIFEST_SHA256" in source
+    assert "FASTWAM_NODE_LOCAL_RANK=0" in source
+    assert "mv -T" in source
+    assert "python3.10" in source
+    assert "python_implementation=" in source
+    assert "python_platform=" in source
+    assert "env -u PYTHONHOME -u PYTHONPATH" in source
+    assert "PYTHONDONTWRITEBYTECODE=1" in source
+    assert "PYTHONPATH=\"${checkout}/src\"" in source
+    assert "fastwam.__file__" in source
+    assert "accelerate.commands.launch --help" in source
+    assert "${FASTWAM_REPO_ROOT}/scripts/train_zero2.sh" in source
+    assert ".LOCK" in source
+    assert ".FAILED" in source
+    assert "trap _fastwam_" in source
+    assert "zstd" not in source.lower()
+
+
+def _run_offline_env_function(
+    function_call: str,
+    *arguments: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "$1"; {function_call}',
+            "offline-env-function-test",
+            str(OFFLINE_ENV_SCRIPT),
+            *arguments,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_offline_env_tmp_roots_reject_traversal_and_symlink_chain() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory, tempfile.TemporaryDirectory(
+        dir="/tmp"
+    ) as outside_directory:
+        root = Path(directory)
+        safe = root / "safe" / "child"
+        accepted = _run_offline_env_function(
+            '_fastwam_offline_env_prepare_tmp_root TEST_ROOT "$2"', str(safe)
+        )
+        assert accepted.returncode == 0, accepted.stderr
+        assert accepted.stdout.strip() == str(safe)
+        assert safe.is_dir()
+
+        traversal = _run_offline_env_function(
+            '_fastwam_offline_env_prepare_tmp_root TEST_ROOT "$2"',
+            str(root / "safe" / ".." / "escape"),
+        )
+        assert traversal.returncode != 0
+        assert "canonical lexical path" in traversal.stderr
+
+        outside = Path(outside_directory)
+        symlink_parent = root / "external-link"
+        symlink_parent.symlink_to(outside, target_is_directory=True)
+        escaped_child = outside / "must-not-be-created"
+        symlink = _run_offline_env_function(
+            '_fastwam_offline_env_prepare_tmp_root TEST_ROOT "$2"',
+            str(symlink_parent / escaped_child.name),
+        )
+        assert symlink.returncode != 0
+        assert "escapes /tmp" in symlink.stderr or "symlink root or parent" in symlink.stderr
+        assert not escaped_child.exists()
+
+
+def test_offline_env_forces_node_local_builder_rank_zero() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bootstrap = root / "bootstrap_offline_training_env.sh"
+        helper = root / "dlc_local_cache.sh"
+        payload = root / "payload"
+        rank_log = root / "rank.log"
+        payload.mkdir()
+        shutil.copy2(OFFLINE_ENV_SCRIPT, bootstrap)
+        helper.write_text(
+            """fastwam_prepare_local_cache() {
+  printf '%s|%s|%s|%s\\n' \
+    "$FASTWAM_NODE_LOCAL_RANK" "${LOCAL_RANK-unset}" \
+    "${FASTWAM_LOCAL_CHECKPOINT_RELATIVE_PATH-unset}" \
+    "${FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT-unset}" >"$FASTWAM_TEST_RANK_LOG"
+  export FASTWAM_LOCAL_CACHE_DIR="$FASTWAM_TEST_PAYLOAD"
+}
+""",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.update(
+            {
+                "FASTWAM_NODE_LOCAL_RANK": "7",
+                "LOCAL_RANK": "9",
+                "FASTWAM_TEST_RANK_LOG": str(rank_log),
+                "FASTWAM_TEST_PAYLOAD": str(payload),
+                "FASTWAM_LOCAL_CHECKPOINT_RELATIVE_PATH": "training/checkpoint.pt",
+                "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT": "training/gaussian",
+            }
+        )
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; _fastwam_offline_env_stage_payload '
+                '"$(dirname -- "$1")" /unused/source /unused/manifest '
+                f'{"a" * 64} /tmp/unused-cache 1',
+                "rank-zero-test",
+                str(bootstrap),
+            ],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(payload)
+        assert rank_log.read_text(encoding="utf-8").strip() == "0|unset|unset|unset"
+
+
+def test_offline_env_binds_exact_cpython310_identity() -> None:
+    def run_probe(
+        root: Path, identity_line: str, *, explicit_path: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        fake_python = root / "python3.10"
+        fake_python.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' {identity_line} \"$(realpath -e -- \"$0\")\"\n",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = f"{root}:{env.get('PATH', '')}"
+        if explicit_path:
+            env["FASTWAM_OFFLINE_ENV_BASE_PYTHON"] = str(fake_python)
+        else:
+            env.pop("FASTWAM_OFFLINE_ENV_BASE_PYTHON", None)
+        return _run_offline_env_function(
+            '_fastwam_offline_env_bind_python_identity || exit $?; '
+            'printf "%s|%s|%s|%s\\n" '
+            '"$FASTWAM_OFFLINE_ENV_PYTHON_VERSION" '
+            '"$FASTWAM_OFFLINE_ENV_PYTHON_ABI" '
+            '"$FASTWAM_OFFLINE_ENV_PYTHON_CACHE_TAG" '
+            '"$FASTWAM_OFFLINE_ENV_PYTHON_IDENTITY_SHA256"',
+            env=env,
+        )
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as first_directory, tempfile.TemporaryDirectory(
+        dir="/tmp"
+    ) as second_directory:
+        first = run_probe(
+            Path(first_directory),
+            "'3.10.14' 'cpython' 'cpython-310-x86_64-linux-gnu' 'cpython-310' 'linux-x86_64'",
+            explicit_path=True,
+        )
+        assert first.returncode == 0, first.stderr
+        version, abi, cache_tag, first_identity = first.stdout.strip().split("|")
+        assert version == "3.10.14"
+        assert abi == "cpython-310-x86_64-linux-gnu"
+        assert cache_tag == "cpython-310"
+        assert len(first_identity) == 64
+
+        second = run_probe(
+            Path(second_directory),
+            "'3.10.15' 'cpython' 'cpython-310-x86_64-linux-gnu' 'cpython-310' 'linux-x86_64'",
+        )
+        assert second.returncode == 0, second.stderr
+        second_identity = second.stdout.strip().split("|")[-1]
+        assert second_identity != first_identity
+
+        rejected = run_probe(
+            Path(second_directory),
+            "'3.11.9' 'cpython' 'cpython-311-x86_64-linux-gnu' 'cpython-311' 'linux-x86_64'",
+        )
+        assert rejected.returncode != 0
+        assert "incompatible version" in rejected.stderr
+
+        rejected_implementation = run_probe(
+            Path(second_directory),
+            "'3.10.14' 'pypy' 'pypy310-x86_64-linux-gnu' 'pypy310' 'linux-x86_64'",
+        )
+        assert rejected_implementation.returncode != 0
+        assert "implementation must be CPython" in rejected_implementation.stderr
+
+
+def test_offline_env_import_origin_is_exact_checkout() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        checkout = root / "checkout"
+        package = checkout / "src" / "fastwam"
+        poison = root / "poison" / "fastwam"
+        package.mkdir(parents=True)
+        poison.mkdir(parents=True)
+        (package / "__init__.py").write_text("ORIGIN = 'checkout'\n", encoding="utf-8")
+        (poison / "__init__.py").write_text(
+            "raise RuntimeError('poison PYTHONPATH was imported')\n", encoding="utf-8"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(poison.parent)
+        result = _run_offline_env_function(
+            '_fastwam_offline_env_validate_import_resolution "$2" "$3"',
+            sys.executable,
+            str(checkout),
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+def _create_offline_checkout_fixture(root: Path) -> tuple[Path, str]:
+    repository = root / "producer"
+    (repository / "scripts").mkdir(parents=True)
+    (repository / "src" / "fastwam").mkdir(parents=True)
+    (repository / ".gitignore").write_text("*.pyc\n__pycache__/\n", encoding="utf-8")
+    (repository / "pyproject.toml").write_text("[project]\nname='fastwam'\n", encoding="utf-8")
+    (repository / "scripts" / "validate_python_environment.py").write_text(
+        "raise SystemExit(0)\n", encoding="utf-8"
+    )
+    (repository / "scripts" / "train_zero2.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (repository / "src" / "fastwam" / "__init__.py").write_text("\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=FastWAM Test",
+            "-c",
+            "user.email=fastwam-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+    )
+    commit = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    bundle = root / "source.bundle"
+    subprocess.run(
+        ["git", "-C", str(repository), "bundle", "create", str(bundle), "HEAD"],
+        check=True,
+    )
+    return bundle, commit
+
+
+def _offline_checkout_process(
+    *,
+    bundle: Path,
+    checkout_root: Path,
+    identity: str,
+    marker: str,
+    commit: str,
+    env: dict[str, str],
+    start_new_session: bool = False,
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            "bash",
+            "-c",
+            'source "$1"; _fastwam_offline_env_prepare_checkout '
+            '"$2" "$3" "$4" "$5" "$6" 15 60',
+            "checkout-concurrency-test",
+            str(OFFLINE_ENV_SCRIPT),
+            str(bundle),
+            str(checkout_root),
+            identity,
+            marker,
+            commit,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=start_new_session,
+    )
+
+
+def test_offline_env_concurrent_checkout_builds_once_and_waits() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bundle, commit = _create_offline_checkout_fixture(root)
+        checkout_root = root / "checkouts"
+        checkout_root.mkdir()
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir()
+        clone_log = root / "clone.log"
+        git_wrapper = fake_bin / "git"
+        git_wrapper.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1-}" == clone ]]; then
+  printf 'clone pid=%s\\n' "$BASHPID" >>"$FASTWAM_TEST_CLONE_LOG"
+  sleep 1
+fi
+exec "$FASTWAM_TEST_REAL_GIT" "$@"
+""",
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                "FASTWAM_TEST_REAL_GIT": shutil.which("git") or "git",
+                "FASTWAM_TEST_CLONE_LOG": str(clone_log),
+            }
+        )
+        identity = "b" * 64
+        marker = f"schema=test-checkout\ncommit={commit}"
+        owner = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        time.sleep(0.15)
+        waiter = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        owner_stdout, owner_stderr = owner.communicate(timeout=15)
+        waiter_stdout, waiter_stderr = waiter.communicate(timeout=15)
+        assert owner.returncode == 0, owner_stderr
+        assert waiter.returncode == 0, waiter_stderr
+        assert owner_stdout.strip() == waiter_stdout.strip()
+        assert len(clone_log.read_text(encoding="utf-8").splitlines()) == 1
+        assert "action=wait" in waiter_stderr
+        assert not list(checkout_root.glob(".*.LOCK"))
+        assert not list(checkout_root.glob(".*.FAILED"))
+        assert not list(checkout_root.glob(".*.STAGING.*"))
+        destination = Path(owner_stdout.strip())
+        assert destination.is_dir()
+        assert not any("STAGING" in child.name for child in destination.iterdir())
+
+
+def test_offline_env_checkout_failure_wakes_waiter_and_cleans() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bundle, commit = _create_offline_checkout_fixture(root)
+        checkout_root = root / "checkouts"
+        checkout_root.mkdir()
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir()
+        clone_log = root / "clone.log"
+        git_wrapper = fake_bin / "git"
+        git_wrapper.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1-}" == clone ]]; then
+  printf 'clone pid=%s\\n' "$BASHPID" >>"$FASTWAM_TEST_CLONE_LOG"
+  sleep 1
+  exit 42
+fi
+exec "$FASTWAM_TEST_REAL_GIT" "$@"
+""",
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                "FASTWAM_TEST_REAL_GIT": shutil.which("git") or "git",
+                "FASTWAM_TEST_CLONE_LOG": str(clone_log),
+            }
+        )
+        identity = "c" * 64
+        marker = f"schema=test-checkout\ncommit={commit}"
+        owner = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        time.sleep(0.15)
+        waiter = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        _, owner_stderr = owner.communicate(timeout=15)
+        _, waiter_stderr = waiter.communicate(timeout=15)
+        assert owner.returncode != 0
+        assert waiter.returncode != 0
+        assert len(clone_log.read_text(encoding="utf-8").splitlines()) == 1
+        assert "builder failed" in waiter_stderr, waiter_stderr
+        assert "action=build" in owner_stderr
+        assert not list(checkout_root.glob(".*.LOCK"))
+        assert len(list(checkout_root.glob(".*.FAILED"))) == 1
+        assert not list(checkout_root.glob(".*.STAGING.*"))
+        assert not list(checkout_root.glob("source-*"))
+        assert not list(checkout_root.glob(".*.READY"))
+
+
+def test_offline_env_fresh_ownerless_lock_is_not_stale() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        lock_dir = Path(directory) / ".identity.LOCK"
+        lock_dir.mkdir()
+        result = _run_offline_env_function(
+            '_fastwam_offline_env_lock_is_stale "$2" 7200; '
+            'status=$?; [[ "$status" == 1 ]]',
+            str(lock_dir),
+        )
+        assert result.returncode == 0, result.stderr
+        assert lock_dir.is_dir()
+
+
+def test_offline_env_checkout_hit_waits_for_active_lock() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bundle, commit = _create_offline_checkout_fixture(root)
+        checkout_root = root / "checkouts"
+        checkout_root.mkdir()
+        identity = "d" * 64
+        marker = f"schema=test-checkout\ncommit={commit}"
+        first = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=os.environ.copy(),
+        )
+        first_stdout, first_stderr = first.communicate(timeout=15)
+        assert first.returncode == 0, first_stderr
+
+        lock_dir = checkout_root / f".source-{identity}.LOCK"
+        lock_dir.mkdir()
+        (lock_dir / "owner").write_text(
+            "token=active-test\npid=1\nhost=another-host\n"
+            f"time={int(time.time())}\nstaging=\n",
+            encoding="utf-8",
+        )
+        late = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=os.environ.copy(),
+        )
+        time.sleep(0.25)
+        assert late.poll() is None, "late caller incorrectly consumed READY while LOCK existed"
+        shutil.rmtree(lock_dir)
+        late_stdout, late_stderr = late.communicate(timeout=15)
+        assert late.returncode == 0, late_stderr
+        assert late_stdout.strip() == first_stdout.strip()
+        assert "action=wait" in late_stderr
+
+
+def test_offline_env_prepare_venv_stdout_is_only_destination() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        venv_root = root / "venvs"
+        venv_root.mkdir()
+        identity = "e" * 64
+        expected_destination = venv_root / f"cpython3.10-{identity}"
+        command = r'''
+source "$1"
+_fastwam_offline_env_validate_venv() { [[ -d "$1" ]]; }
+_fastwam_offline_env_validate_training_runtime() { echo "runtime validation output"; }
+_fastwam_offline_env_build_venv() {
+  local destination="$4"
+  local lock_dir="$6"
+  local lock_token="${17}"
+  echo "pip and validator output"
+  mkdir -p -- "$destination/bin"
+  _fastwam_offline_env_release_lock "$lock_dir" "$lock_token"
+}
+_fastwam_offline_env_prepare_venv \
+  /unused/lock /unused/wheelhouse /unused/checkout "$2" "$3" marker \
+  15 60 3.10.14 cpython cpython-310-x86_64-linux-gnu cpython-310 \
+  linux-x86_64 "$4" /unused/python
+'''
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                command,
+                "venv-stdout-test",
+                str(OFFLINE_ENV_SCRIPT),
+                str(venv_root),
+                identity,
+                "f" * 64,
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(expected_destination)
+        assert "pip and validator output" in result.stderr
+        assert "runtime validation output" in result.stderr
+
+
+def test_offline_env_venv_ready_is_published_after_runtime_gate() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        runtime_lock = root / "runtime.lock"
+        wheelhouse = root / "wheelhouse"
+        checkout = root / "checkout"
+        venv_root = root / "venvs"
+        fake_python = root / "python3.10"
+        entered = root / "validator-entered"
+        release = root / "validator-release"
+        runtime_lock.write_text("", encoding="utf-8")
+        wheelhouse.mkdir()
+        checkout.mkdir()
+        venv_root.mkdir()
+        fake_python.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" -m venv "* ]]; then
+  destination="${@: -1}"
+  mkdir -p -- "$destination/bin"
+  cp -- "$0" "$destination/bin/python"
+  chmod 0755 "$destination/bin/python"
+  exit 0
+fi
+if [[ " $* " == *" -c "* ]]; then
+  printf '3.10.14\\tcpython\\tcpython-310-x86_64-linux-gnu\\tcpython-310\\tlinux-x86_64\\n'
+  exit 0
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+        executable_sha = _sha256(fake_python)
+        identity = "8" * 64
+        marker = "schema=test-venv\npython_version=3.10.14"
+        expected_destination = venv_root / f"cpython3.10-{identity}"
+        command = r'''
+source "$1"
+_fastwam_offline_env_validate_training_runtime() {
+  printf 'entered\n' >"$FASTWAM_TEST_VALIDATOR_ENTERED"
+  while [[ ! -e "$FASTWAM_TEST_VALIDATOR_RELEASE" ]]; do sleep 0.05; done
+  echo "runtime validation output"
+}
+_fastwam_offline_env_prepare_venv \
+  "$2" "$3" "$4" "$5" "$6" "$7" 15 60 \
+  3.10.14 cpython cpython-310-x86_64-linux-gnu cpython-310 \
+  linux-x86_64 "$8" "$9"
+'''
+        env = os.environ.copy()
+        env.update(
+            {
+                "FASTWAM_TEST_VALIDATOR_ENTERED": str(entered),
+                "FASTWAM_TEST_VALIDATOR_RELEASE": str(release),
+            }
+        )
+        process = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                command,
+                "venv-ready-test",
+                str(OFFLINE_ENV_SCRIPT),
+                str(runtime_lock),
+                str(wheelhouse),
+                str(checkout),
+                str(venv_root),
+                identity,
+                marker,
+                executable_sha,
+                str(fake_python),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not entered.is_file():
+            time.sleep(0.02)
+        assert entered.is_file(), "staged runtime validator was not reached"
+        assert not expected_destination.exists()
+        assert not list(venv_root.glob("*/.FASTWAM_ENV_READY"))
+        release.touch()
+        stdout, stderr = process.communicate(timeout=15)
+        assert process.returncode == 0, stderr
+        assert stdout.strip() == str(expected_destination)
+        assert (expected_destination / ".FASTWAM_ENV_READY").read_text(
+            encoding="utf-8"
+        ).strip() == marker
+        assert "runtime validation output" in stderr
+        assert not list(venv_root.glob(".*.LOCK"))
+        assert not list(venv_root.glob(".*.FAILED"))
+        assert not list(venv_root.glob(".*.STAGING.*"))
+
+
+def test_offline_env_concurrent_venv_builds_once_and_waits() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        runtime_lock = root / "runtime.lock"
+        wheelhouse = root / "wheelhouse"
+        checkout = root / "checkout"
+        venv_root = root / "venvs"
+        fake_python = root / "python3.10"
+        build_log = root / "venv-build.log"
+        runtime_lock.write_text("", encoding="utf-8")
+        wheelhouse.mkdir()
+        checkout.mkdir()
+        venv_root.mkdir()
+        fake_python.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" -m venv "* ]]; then
+  printf 'venv pid=%s\\n' "$BASHPID" >>"$FASTWAM_TEST_VENV_BUILD_LOG"
+  sleep 1
+  destination="${@: -1}"
+  mkdir -p -- "$destination/bin"
+  cp -- "$0" "$destination/bin/python"
+  chmod 0755 "$destination/bin/python"
+  exit 0
+fi
+if [[ " $* " == *" -c "* ]]; then
+  printf '3.10.14\\tcpython\\tcpython-310-x86_64-linux-gnu\\tcpython-310\\tlinux-x86_64\\n'
+  exit 0
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+        executable_sha = _sha256(fake_python)
+        identity = "7" * 64
+        marker = "schema=test-concurrent-venv\npython_version=3.10.14"
+        command = r'''
+source "$1"
+_fastwam_offline_env_validate_training_runtime() { echo "runtime validation output"; }
+_fastwam_offline_env_prepare_venv \
+  "$2" "$3" "$4" "$5" "$6" "$7" 15 60 \
+  3.10.14 cpython cpython-310-x86_64-linux-gnu cpython-310 \
+  linux-x86_64 "$8" "$9"
+'''
+        arguments = [
+            "bash",
+            "-c",
+            command,
+            "venv-concurrency-test",
+            str(OFFLINE_ENV_SCRIPT),
+            str(runtime_lock),
+            str(wheelhouse),
+            str(checkout),
+            str(venv_root),
+            identity,
+            marker,
+            executable_sha,
+            str(fake_python),
+        ]
+        env = os.environ.copy()
+        env["FASTWAM_TEST_VENV_BUILD_LOG"] = str(build_log)
+        owner = subprocess.Popen(
+            arguments,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.15)
+        waiter = subprocess.Popen(
+            arguments,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        owner_stdout, owner_stderr = owner.communicate(timeout=15)
+        waiter_stdout, waiter_stderr = waiter.communicate(timeout=15)
+        assert owner.returncode == 0, owner_stderr
+        assert waiter.returncode == 0, waiter_stderr
+        assert owner_stdout.strip() == waiter_stdout.strip()
+        assert len(build_log.read_text(encoding="utf-8").splitlines()) == 1
+        assert "action=wait" in waiter_stderr
+        assert not list(venv_root.glob(".*.LOCK"))
+        assert not list(venv_root.glob(".*.FAILED"))
+        assert not list(venv_root.glob(".*.STAGING.*"))
+
+
+def test_offline_env_venv_failure_wakes_waiter_and_cleans() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        runtime_lock = root / "runtime.lock"
+        wheelhouse = root / "wheelhouse"
+        checkout = root / "checkout"
+        venv_root = root / "venvs"
+        fake_python = root / "python3.10"
+        build_log = root / "venv-build.log"
+        runtime_lock.write_text("", encoding="utf-8")
+        wheelhouse.mkdir()
+        checkout.mkdir()
+        venv_root.mkdir()
+        fake_python.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" -m venv "* ]]; then
+  printf 'venv pid=%s\\n' "$BASHPID" >>"$FASTWAM_TEST_VENV_BUILD_LOG"
+  destination="${@: -1}"
+  mkdir -p -- "$destination/bin"
+  sleep 1
+  exit 42
+fi
+exit 0
+""",
+            encoding="utf-8",
+        )
+        fake_python.chmod(0o755)
+        identity = "6" * 64
+        command = r'''
+source "$1"
+_fastwam_offline_env_validate_training_runtime() { return 0; }
+_fastwam_offline_env_prepare_venv \
+  "$2" "$3" "$4" "$5" "$6" marker 15 60 \
+  3.10.14 cpython cpython-310-x86_64-linux-gnu cpython-310 \
+  linux-x86_64 "$7" "$8"
+'''
+        arguments = [
+            "bash",
+            "-c",
+            command,
+            "venv-failure-test",
+            str(OFFLINE_ENV_SCRIPT),
+            str(runtime_lock),
+            str(wheelhouse),
+            str(checkout),
+            str(venv_root),
+            identity,
+            _sha256(fake_python),
+            str(fake_python),
+        ]
+        env = os.environ.copy()
+        env["FASTWAM_TEST_VENV_BUILD_LOG"] = str(build_log)
+        owner = subprocess.Popen(
+            arguments,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.15)
+        waiter = subprocess.Popen(
+            arguments,
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _, owner_stderr = owner.communicate(timeout=15)
+        _, waiter_stderr = waiter.communicate(timeout=15)
+        assert owner.returncode != 0
+        assert waiter.returncode != 0
+        assert "action=build" in owner_stderr
+        assert "builder failed" in waiter_stderr, (
+            waiter_stderr
+            + "\nOWNER:\n"
+            + owner_stderr
+            + "\nFILES:\n"
+            + "\n".join(path.name for path in venv_root.iterdir())
+        )
+        assert len(build_log.read_text(encoding="utf-8").splitlines()) == 1
+        assert not list(venv_root.glob(".*.LOCK"))
+        assert len(list(venv_root.glob(".*.FAILED"))) == 1
+        assert not list(venv_root.glob(".*.STAGING.*"))
+        assert not list(venv_root.glob("cpython3.10-*"))
+
+
+def test_offline_env_rejects_ignored_checkout_artifacts() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bundle, commit = _create_offline_checkout_fixture(root)
+        checkout = root / "checkout"
+        subprocess.run(["git", "clone", "-q", str(bundle), str(checkout)], check=True)
+        ignored = checkout / "src" / "fastwam" / "shadow.pyc"
+        ignored.write_bytes(b"not bytecode")
+        result = _run_offline_env_function(
+            '_fastwam_offline_env_validate_checkout_tree "$2" "$3"',
+            str(checkout),
+            commit,
+        )
+        assert result.returncode != 0
+
+
+def test_offline_env_waiter_recovers_hard_killed_builder_and_staging() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bundle, commit = _create_offline_checkout_fixture(root)
+        checkout_root = root / "checkouts"
+        checkout_root.mkdir()
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir()
+        clone_log = root / "clone.log"
+        git_wrapper = fake_bin / "git"
+        git_wrapper.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1-}" == clone ]]; then
+  printf 'clone pid=%s\\n' "$BASHPID" >>"$FASTWAM_TEST_CLONE_LOG"
+  sleep 1
+fi
+exec "$FASTWAM_TEST_REAL_GIT" "$@"
+""",
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                "FASTWAM_TEST_REAL_GIT": shutil.which("git") or "git",
+                "FASTWAM_TEST_CLONE_LOG": str(clone_log),
+            }
+        )
+        identity = "9" * 64
+        marker = f"schema=test-checkout\ncommit={commit}"
+        owner = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+            start_new_session=True,
+        )
+        lock_dir = checkout_root / f".source-{identity}.LOCK"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            owner_file = lock_dir / "owner"
+            if owner_file.is_file() and "staging=" in owner_file.read_text(encoding="utf-8"):
+                staging_line = next(
+                    line
+                    for line in owner_file.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("staging=")
+                )
+                if staging_line != "staging=":
+                    break
+            time.sleep(0.02)
+        else:
+            os.killpg(owner.pid, signal.SIGKILL)
+            raise AssertionError("owner never published its staging identity")
+
+        waiter = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        second_waiter = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        time.sleep(0.2)
+        os.killpg(owner.pid, signal.SIGKILL)
+        owner.communicate(timeout=5)
+        waiter_stdout, waiter_stderr = waiter.communicate(timeout=15)
+        second_stdout, second_stderr = second_waiter.communicate(timeout=15)
+        assert owner.returncode == -signal.SIGKILL
+        assert waiter.returncode == 0, waiter_stderr
+        assert second_waiter.returncode == 0, second_stderr
+        assert Path(waiter_stdout.strip()).is_dir()
+        assert second_stdout.strip() == waiter_stdout.strip()
+        combined_stderr = waiter_stderr + second_stderr
+        assert "action=retry_stale" in combined_stderr
+        assert "action=reap_stale" in combined_stderr
+        assert "action=wait" in combined_stderr
+        assert len(clone_log.read_text(encoding="utf-8").splitlines()) == 2
+        assert not list(checkout_root.glob(".*.LOCK"))
+        assert not list(checkout_root.glob(".*.FAILED"))
+        assert not list(checkout_root.glob(".*.STAGING.*"))
+
+
+def test_offline_env_post_publish_owner_kill_does_not_replace_checkout() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        bundle, commit = _create_offline_checkout_fixture(root)
+        checkout_root = root / "checkouts"
+        checkout_root.mkdir()
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir()
+        clone_log = root / "clone.log"
+        release_entered = root / "release-entered"
+        git_wrapper = fake_bin / "git"
+        git_wrapper.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1-}" == clone ]]; then
+  printf 'clone pid=%s\\n' "$BASHPID" >>"$FASTWAM_TEST_CLONE_LOG"
+fi
+exec "$FASTWAM_TEST_REAL_GIT" "$@"
+""",
+            encoding="utf-8",
+        )
+        git_wrapper.chmod(0o755)
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                "FASTWAM_TEST_REAL_GIT": shutil.which("git") or "git",
+                "FASTWAM_TEST_CLONE_LOG": str(clone_log),
+                "FASTWAM_TEST_RELEASE_ENTERED": str(release_entered),
+            }
+        )
+        identity = "5" * 64
+        marker = f"schema=test-checkout\ncommit={commit}"
+        owner_command = r'''
+source "$1"
+_fastwam_offline_env_release_lock() {
+  printf 'entered\n' >"$FASTWAM_TEST_RELEASE_ENTERED"
+  while true; do sleep 0.05; done
+}
+_fastwam_offline_env_prepare_checkout "$2" "$3" "$4" "$5" "$6" 15 60
+'''
+        owner = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                owner_command,
+                "post-publish-owner-test",
+                str(OFFLINE_ENV_SCRIPT),
+                str(bundle),
+                str(checkout_root),
+                identity,
+                marker,
+                commit,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and not release_entered.is_file():
+            time.sleep(0.02)
+        assert release_entered.is_file(), "owner did not reach post-publication release"
+        destination = checkout_root / f"source-{identity}"
+        ready = checkout_root / f".source-{identity}.READY"
+        lock_dir = checkout_root / f".source-{identity}.LOCK"
+        assert destination.is_dir() and ready.is_file() and lock_dir.is_dir()
+        published_inode = destination.stat().st_ino
+
+        first_waiter = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        second_waiter = _offline_checkout_process(
+            bundle=bundle,
+            checkout_root=checkout_root,
+            identity=identity,
+            marker=marker,
+            commit=commit,
+            env=env,
+        )
+        time.sleep(0.2)
+        os.killpg(owner.pid, signal.SIGKILL)
+        owner.communicate(timeout=5)
+        first_stdout, first_stderr = first_waiter.communicate(timeout=15)
+        second_stdout, second_stderr = second_waiter.communicate(timeout=15)
+        assert owner.returncode == -signal.SIGKILL
+        assert first_waiter.returncode == 0, first_stderr
+        assert second_waiter.returncode == 0, second_stderr
+        assert first_stdout.strip() == second_stdout.strip() == str(destination)
+        assert destination.stat().st_ino == published_inode
+        assert len(clone_log.read_text(encoding="utf-8").splitlines()) == 1
+        combined_stderr = first_stderr + second_stderr
+        assert "action=recovered_hit" in combined_stderr
+        assert not lock_dir.exists()
+        assert not list(checkout_root.glob(".*.FAILED"))
+        assert not list(checkout_root.glob(".*.STAGING.*"))
+
+
+def test_offline_env_venv_rechecks_ready_after_acquiring_lock() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        root = Path(directory)
+        venv_root = root / "venvs"
+        venv_root.mkdir()
+        identity = "4" * 64
+        destination = venv_root / f"cpython3.10-{identity}"
+        (destination / "bin").mkdir(parents=True)
+        first_probe = root / "first-probe"
+        build_called = root / "build-called"
+        command = r'''
+source "$1"
+_fastwam_offline_env_validate_venv() {
+  if [[ ! -e "$FASTWAM_TEST_FIRST_PROBE" ]]; then
+    : >"$FASTWAM_TEST_FIRST_PROBE"
+    return 1
+  fi
+  [[ -d "$1" ]]
+}
+_fastwam_offline_env_validate_training_runtime() { return 0; }
+_fastwam_offline_env_build_venv() {
+  : >"$FASTWAM_TEST_BUILD_CALLED"
+  return 99
+}
+_fastwam_offline_env_prepare_venv \
+  /unused/lock /unused/wheelhouse /unused/checkout "$2" "$3" marker \
+  15 60 3.10.14 cpython cpython-310-x86_64-linux-gnu cpython-310 \
+  linux-x86_64 "$4" /unused/python
+'''
+        env = os.environ.copy()
+        env.update(
+            {
+                "FASTWAM_TEST_FIRST_PROBE": str(first_probe),
+                "FASTWAM_TEST_BUILD_CALLED": str(build_called),
+            }
+        )
+        inode = destination.stat().st_ino
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                command,
+                "venv-acquired-hit-test",
+                str(OFFLINE_ENV_SCRIPT),
+                str(venv_root),
+                identity,
+                "a" * 64,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(destination)
+        assert "action=recovered_hit" in result.stderr
+        assert destination.stat().st_ino == inode
+        assert not build_called.exists()
+        assert not list(venv_root.glob(".*.LOCK"))
+
+
 def test_local_cache_default_hit_verification_fails_closed_on_corruption() -> None:
     with tempfile.TemporaryDirectory() as directory:
         tmp_path = Path(directory)
@@ -1994,6 +3093,23 @@ if __name__ == "__main__":
         test_prepare_local_training_bundle_rewrites_stats_provenance_without_mutating_source,
         test_local_cache_copies_whole_files_maps_gaussian_and_reuses_ready,
         test_multi_source_cache_combines_cpfs_and_oss_mappings,
+        test_offline_environment_bootstrap_is_content_addressed_and_zstd_free,
+        test_offline_env_tmp_roots_reject_traversal_and_symlink_chain,
+        test_offline_env_forces_node_local_builder_rank_zero,
+        test_offline_env_binds_exact_cpython310_identity,
+        test_offline_env_import_origin_is_exact_checkout,
+        test_offline_env_concurrent_checkout_builds_once_and_waits,
+        test_offline_env_checkout_failure_wakes_waiter_and_cleans,
+        test_offline_env_fresh_ownerless_lock_is_not_stale,
+        test_offline_env_checkout_hit_waits_for_active_lock,
+        test_offline_env_prepare_venv_stdout_is_only_destination,
+        test_offline_env_venv_ready_is_published_after_runtime_gate,
+        test_offline_env_concurrent_venv_builds_once_and_waits,
+        test_offline_env_venv_failure_wakes_waiter_and_cleans,
+        test_offline_env_rejects_ignored_checkout_artifacts,
+        test_offline_env_waiter_recovers_hard_killed_builder_and_staging,
+        test_offline_env_post_publish_owner_kill_does_not_replace_checkout,
+        test_offline_env_venv_rechecks_ready_after_acquiring_lock,
         test_local_cache_default_hit_verification_fails_closed_on_corruption,
         test_local_cache_rejects_parent_traversal_and_manifest_symlink,
         test_local_cache_rejects_mapping_escape_and_manifest_identity_mismatch,

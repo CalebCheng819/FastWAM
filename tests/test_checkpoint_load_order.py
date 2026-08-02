@@ -230,6 +230,12 @@ def test_non_main_checkpoint_waits_outside_collectives(tmp_path):
 
     class _NonMainAccelerator:
         is_main_process = False
+        device = "cpu"
+
+        def reduce(self, tensor, *, reduction):
+            assert reduction == "sum"
+            events.append("checkpoint_target_reduce")
+            return tensor
 
         def wait_for_everyone(self):
             events.append("barrier")
@@ -257,6 +263,7 @@ def test_non_main_checkpoint_waits_outside_collectives(tmp_path):
         "state_manifest": None,
     }
     assert events == [
+        "checkpoint_target_reduce",
         "barrier",
         "poll:step_000031.pt.COMPLETE",
         "barrier",
@@ -265,6 +272,40 @@ def test_non_main_checkpoint_waits_outside_collectives(tmp_path):
         "poll:step_000031.state-tree.json",
         "barrier",
     ]
+
+
+def test_checkpoint_target_preflight_rejects_stale_complete_collectively(tmp_path):
+    class _CollectiveAccelerator:
+        device = "cpu"
+
+        def __init__(self, global_conflicts):
+            self.global_conflicts = global_conflicts
+
+        def reduce(self, tensor, *, reduction):
+            assert reduction == "sum"
+            return tensor.new_tensor([self.global_conflicts])
+
+    weights_dir = tmp_path / "weights"
+    weights_dir.mkdir()
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.weights_dir = str(weights_dir)
+    trainer.state_dir = str(tmp_path / "state")
+    trainer.save_training_state_enabled = True
+    trainer.seal_training_state = True
+
+    stale = weights_dir / "step_000031.pt.COMPLETE"
+    stale.write_text("{}\n", encoding="utf-8")
+    trainer.accelerator = _CollectiveAccelerator(global_conflicts=1)
+    with pytest.raises(FileExistsError, match="pre-existing targets") as observed:
+        trainer._assert_checkpoint_targets_absent(step_tag="step_000031")
+    assert str(stale) in str(observed.value)
+
+    stale.unlink()
+    # A rank that does not yet see the shared stale file must still fail when
+    # another rank reports it through the collective.
+    trainer.accelerator = _CollectiveAccelerator(global_conflicts=1)
+    with pytest.raises(FileExistsError, match="local_conflicts=none-local"):
+        trainer._assert_checkpoint_targets_absent(step_tag="step_000031")
 
 
 def test_full_state_resume_restores_saved_base_provenance(tmp_path):

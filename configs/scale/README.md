@@ -160,6 +160,42 @@ bash scripts/train_zero2.sh 8 \
   +scale=robofactory_multi_robot_32gpu
 ```
 
+The DLC command first sources the immutable bundle's
+`source-snapshot/scripts/bootstrap_offline_training_env.sh` and calls
+`fastwam_prepare_offline_training_env`. The helper whole-file verifies and
+copies the OSS payload to a content-addressed `/tmp` cache, installs a fresh
+venv with `--no-index --require-hashes`, restores the exact clean commit from
+the bundled Git repository, runs the package/pip/import-origin gates, and
+exports `FASTWAM_PYTHON`, `FASTWAM_REPO_ROOT`, and an exact
+`PYTHONPATH=$FASTWAM_REPO_ROOT/src`. The formal base interpreter is fixed to
+CPython 3.10; its exact implementation, patch version, ABI, platform, canonical
+executable, and executable SHA-256 are part of the content identity and READY
+marker. Checkout and venv
+builders use separate per-identity locks, failure markers, validation-before-
+READY, and atomic publication, so concurrent pod calls either build once or
+wait for the same verified result. It uses no zstd path.
+
+Bootstrap exports affect only the shell that sources it. The outer DLC command
+must therefore launch the restored script explicitly in that same shell:
+
+```bash
+source <verified-source-snapshot>/scripts/bootstrap_offline_training_env.sh
+fastwam_prepare_offline_training_env
+exec bash "$FASTWAM_REPO_ROOT/scripts/train_zero2.sh" 8 \
+  task=robofactory_multi_robot_vg1_hub1_gau1_224_1e-4 \
+  +scale=robofactory_multi_robot_32gpu
+```
+
+The relocated venv is consumed only through `$FASTWAM_PYTHON -m ...`; formal
+launch does not invoke relocation-sensitive `bin/accelerate` or
+`bin/deepspeed` shebangs. Bootstrap reruns the module entrypoint, package,
+`pip check`, and exact `fastwam.__file__` gates after publication and on cache
+hits.
+
+The audited DLC command verifies the bootstrap before sourcing it, and the
+bootstrap independently verifies the sibling cache helper before sourcing that
+file; both expected SHA-256 values are embedded in the immutable job request.
+
 `docker/prepare-erdma-userspace.sh` is sourced and called in the same non-login
 launcher shell after local bundle preparation and before the global collective.
 Its `LD_LIBRARY_PATH`, `IBV_CONFIG_DIR`, `IBV_DRIVERS=erdma`,
