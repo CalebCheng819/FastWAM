@@ -25,6 +25,13 @@ from state_tree_manifest import canonical_bytes, publish_state_tree_manifest
 
 PINNED_PACKAGES = ("torch", "accelerate", "deepspeed")
 SMOKE_LOCAL_MICRO_BATCH_SIZE = 4
+SMOKE_GRADIENT_ACCUMULATION_STEPS = 1
+FORMAL_SMOKE_WORLD_SIZE = 32
+FORMAL_SMOKE_GLOBAL_TRAIN_BATCH_SIZE = (
+    SMOKE_LOCAL_MICRO_BATCH_SIZE
+    * SMOKE_GRADIENT_ACCUMULATION_STEPS
+    * FORMAL_SMOKE_WORLD_SIZE
+)
 
 
 class SmokeProgress:
@@ -129,6 +136,22 @@ def _state_fingerprints(accelerator, model, optimizer, scheduler, progress) -> d
     }
 
 
+def _require_smoke_gradient_accumulation(accelerator) -> None:
+    """Reject environment-driven changes to the smoke accumulation contract."""
+
+    configured = accelerator.gradient_accumulation_steps
+    if (
+        isinstance(configured, bool)
+        or not isinstance(configured, int)
+        or configured != SMOKE_GRADIENT_ACCUMULATION_STEPS
+    ):
+        raise ValueError(
+            "ZeRO-2 smoke requires resolved gradient_accumulation_steps="
+            f"{SMOKE_GRADIENT_ACCUMULATION_STEPS}, got {configured!r}. "
+            "Unset ACCELERATE_GRADIENT_ACCUMULATION_STEPS."
+        )
+
+
 def _configure_smoke_deepspeed_batch_accounting(accelerator) -> None:
     """Resolve DeepSpeed metadata when the smoke has no DataLoader.
 
@@ -138,6 +161,7 @@ def _configure_smoke_deepspeed_batch_accounting(accelerator) -> None:
     leaving the shared training DeepSpeed config on ``auto``.
     """
 
+    _require_smoke_gradient_accumulation(accelerator)
     plugin = getattr(accelerator.state, "deepspeed_plugin", None)
     if plugin is None:
         raise RuntimeError("formal ZeRO-2 smoke requires the DeepSpeed plugin")
@@ -157,6 +181,70 @@ def _configure_smoke_deepspeed_batch_accounting(accelerator) -> None:
         )
 
 
+def _resolved_smoke_batch_accounting(accelerator) -> dict[str, int]:
+    """Read back the values DeepSpeed will actually use after ``prepare``."""
+
+    _require_smoke_gradient_accumulation(accelerator)
+    plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    if plugin is None:
+        raise RuntimeError("formal ZeRO-2 smoke requires the DeepSpeed plugin")
+    deepspeed_config = plugin.deepspeed_config
+    values = {
+        "local_micro_batch_size": deepspeed_config.get(
+            "train_micro_batch_size_per_gpu"
+        ),
+        "gradient_accumulation_steps": deepspeed_config.get(
+            "gradient_accumulation_steps"
+        ),
+        "global_train_batch_size": deepspeed_config.get("train_batch_size"),
+        "world_size": accelerator.num_processes,
+    }
+    for key, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(
+                f"ZeRO-2 smoke requires a resolved positive integer {key}, "
+                f"got {value!r}."
+            )
+    expected_global = (
+        values["local_micro_batch_size"]
+        * values["gradient_accumulation_steps"]
+        * values["world_size"]
+    )
+    if values["local_micro_batch_size"] != SMOKE_LOCAL_MICRO_BATCH_SIZE:
+        raise ValueError(
+            "ZeRO-2 smoke resolved an unexpected local micro batch: "
+            f"{values['local_micro_batch_size']!r}."
+        )
+    if values["gradient_accumulation_steps"] != SMOKE_GRADIENT_ACCUMULATION_STEPS:
+        raise ValueError(
+            "ZeRO-2 smoke resolved an unexpected gradient accumulation value: "
+            f"{values['gradient_accumulation_steps']!r}."
+        )
+    if values["global_train_batch_size"] != expected_global:
+        raise ValueError(
+            "ZeRO-2 smoke DeepSpeed train_batch_size is inconsistent: "
+            f"resolved={values['global_train_batch_size']!r} "
+            f"expected={expected_global}."
+        )
+    return values
+
+
+def _require_formal_smoke_batch_accounting(
+    batch_accounting: dict[str, int],
+) -> None:
+    expected = {
+        "global_train_batch_size": FORMAL_SMOKE_GLOBAL_TRAIN_BATCH_SIZE,
+        "gradient_accumulation_steps": SMOKE_GRADIENT_ACCUMULATION_STEPS,
+        "local_micro_batch_size": SMOKE_LOCAL_MICRO_BATCH_SIZE,
+        "world_size": FORMAL_SMOKE_WORLD_SIZE,
+    }
+    if batch_accounting != expected:
+        raise ValueError(
+            "formal ZeRO-2 smoke batch accounting mismatch: "
+            f"expected={expected} observed={batch_accounting}"
+        )
+
+
 def _build_runtime(seed: int):
     accelerator = Accelerator(gradient_accumulation_steps=1, mixed_precision="no")
     _configure_smoke_deepspeed_batch_accounting(accelerator)
@@ -171,13 +259,22 @@ def _build_runtime(seed: int):
     progress = SmokeProgress()
     accelerator.register_for_checkpointing(progress)
     model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
-    return accelerator, model, optimizer, scheduler, progress
+    batch_accounting = _resolved_smoke_batch_accounting(accelerator)
+    return accelerator, model, optimizer, scheduler, progress, batch_accounting
 
 
 def _train_step(accelerator, model, optimizer, scheduler, *, offset: float) -> None:
     optimizer.zero_grad(set_to_none=True)
-    base = torch.arange(64, device=accelerator.device, dtype=torch.float32).reshape(4, 16)
-    target = torch.arange(32, device=accelerator.device, dtype=torch.float32).reshape(4, 8)
+    base = torch.arange(
+        SMOKE_LOCAL_MICRO_BATCH_SIZE * 16,
+        device=accelerator.device,
+        dtype=torch.float32,
+    ).reshape(SMOKE_LOCAL_MICRO_BATCH_SIZE, 16)
+    target = torch.arange(
+        SMOKE_LOCAL_MICRO_BATCH_SIZE * 8,
+        device=accelerator.device,
+        dtype=torch.float32,
+    ).reshape(SMOKE_LOCAL_MICRO_BATCH_SIZE, 8)
     prediction = model(base / 63.0 + offset)
     loss = torch.nn.functional.mse_loss(prediction, target / 31.0)
     accelerator.backward(loss)
@@ -209,7 +306,10 @@ def _process_start_ticks() -> int:
 
 
 def run_save(state_dir: Path, seed: int) -> None:
-    accelerator, model, optimizer, scheduler, progress = _build_runtime(seed)
+    accelerator, model, optimizer, scheduler, progress, batch_accounting = (
+        _build_runtime(seed)
+    )
+    _require_formal_smoke_batch_accounting(batch_accounting)
     _train_step(accelerator, model, optimizer, scheduler, offset=0.0)
     progress.global_step = 1
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -223,6 +323,7 @@ def run_save(state_dir: Path, seed: int) -> None:
     proof_dir.mkdir(exist_ok=True)
     rank = accelerator.process_index
     save_proof = {
+        "batch_accounting": batch_accounting,
         "fingerprints": saved,
         "next_rng_sample": next_rng,
         "phase": "save",
@@ -230,7 +331,7 @@ def run_save(state_dir: Path, seed: int) -> None:
         "process_pid": os.getpid(),
         "process_start_ticks": _process_start_ticks(),
         "rank": rank,
-        "schema_version": 1,
+        "schema_version": 2,
         "world_size": accelerator.num_processes,
     }
     _atomic_json(proof_dir / f"save-rank-{rank:05d}.json", save_proof)
@@ -249,13 +350,14 @@ def run_save(state_dir: Path, seed: int) -> None:
     _atomic_json(
         proof_dir / f"mutated-rank-{rank:05d}.json",
         {
+            "batch_accounting": batch_accounting,
             "fingerprints": mutated,
             "phase": "mutated_before_process_exit",
             "process_nonce": save_proof["process_nonce"],
             "process_pid": os.getpid(),
             "process_start_ticks": _process_start_ticks(),
             "rank": rank,
-            "schema_version": 1,
+            "schema_version": 2,
             "world_size": accelerator.num_processes,
         },
     )
@@ -263,7 +365,10 @@ def run_save(state_dir: Path, seed: int) -> None:
 
 
 def run_load(state_dir: Path, seed: int) -> None:
-    accelerator, model, optimizer, scheduler, progress = _build_runtime(seed + 100000)
+    accelerator, model, optimizer, scheduler, progress, batch_accounting = (
+        _build_runtime(seed + 100000)
+    )
+    _require_formal_smoke_batch_accounting(batch_accounting)
     rank = accelerator.process_index
     pre_load = _state_fingerprints(accelerator, model, optimizer, scheduler, progress)
     accelerator.load_state(str(state_dir))
@@ -287,6 +392,7 @@ def run_load(state_dir: Path, seed: int) -> None:
     _atomic_json(
         state_dir / "smoke-proof" / f"load-rank-{rank:05d}.json",
         {
+            "batch_accounting": batch_accounting,
             "checks": checks,
             "fingerprints": restored,
             "phase": "load_fresh_process",
@@ -294,7 +400,7 @@ def run_load(state_dir: Path, seed: int) -> None:
             "process_pid": os.getpid(),
             "process_start_ticks": _process_start_ticks(),
             "rank": rank,
-            "schema_version": 1,
+            "schema_version": 2,
             "world_size": accelerator.num_processes,
         },
     )
@@ -342,6 +448,12 @@ def finalize(output_root: Path, state_dir: Path, marker: Path, manifest: Path) -
         "scheduler": True,
         "separate_process": True,
     }
+    expected_batch_accounting = {
+        "global_train_batch_size": FORMAL_SMOKE_GLOBAL_TRAIN_BATCH_SIZE,
+        "gradient_accumulation_steps": SMOKE_GRADIENT_ACCUMULATION_STEPS,
+        "local_micro_batch_size": SMOKE_LOCAL_MICRO_BATCH_SIZE,
+        "world_size": FORMAL_SMOKE_WORLD_SIZE,
+    }
     for rank, (save_path, mutate_path, load_path) in enumerate(
         zip(save_proofs, mutated_proofs, load_proofs, strict=True)
     ):
@@ -350,6 +462,20 @@ def finalize(output_root: Path, state_dir: Path, marker: Path, manifest: Path) -
         loaded = json.loads(load_path.read_text(encoding="utf-8"))
         if saved["rank"] != rank or mutated["rank"] != rank or loaded["rank"] != rank:
             raise RuntimeError(f"rank proof ordering mismatch at rank {rank}")
+        for phase, proof in (
+            ("save", saved),
+            ("mutated", mutated),
+            ("load", loaded),
+        ):
+            if proof.get("world_size") != FORMAL_SMOKE_WORLD_SIZE:
+                raise RuntimeError(
+                    f"{phase} proof world size mismatch at rank {rank}"
+                )
+            if proof.get("batch_accounting") != expected_batch_accounting:
+                raise RuntimeError(
+                    f"{phase} proof batch accounting mismatch at rank {rank}: "
+                    f"{proof.get('batch_accounting')!r}"
+                )
         for key in ("global_step", "model", "optimizer", "rng", "scheduler"):
             all_checks[key] &= bool(loaded["checks"].get(key))
         all_checks["rng_next_sample"] &= bool(loaded["checks"].get("rng_next_sample"))
@@ -373,6 +499,7 @@ def finalize(output_root: Path, state_dir: Path, marker: Path, manifest: Path) -
     )
     pyproject = repository / "pyproject.toml"
     payload = {
+        "batch_accounting": expected_batch_accounting,
         "code_commit": code_commit,
         "filesystem_device": int(os.stat(output_root).st_dev),
         "image_digest": image_digest,

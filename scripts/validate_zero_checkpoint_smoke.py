@@ -28,6 +28,12 @@ ROUNDTRIP_KEYS = {
     "separate_process",
 }
 PINNED_PACKAGES = ("torch", "accelerate", "deepspeed")
+EXPECTED_BATCH_ACCOUNTING = {
+    "global_train_batch_size": 128,
+    "gradient_accumulation_steps": 1,
+    "local_micro_batch_size": 4,
+    "world_size": 32,
+}
 
 
 def _sha256(path: Path) -> str:
@@ -72,6 +78,7 @@ def validate(marker: Path, expected_sha256: str, output_parent: Path) -> dict[st
     except json.JSONDecodeError as error:
         raise ValueError(f"invalid ZeRO-2 smoke marker JSON: {error}") from error
     required_fields = {
+        "batch_accounting",
         "code_commit",
         "filesystem_device",
         "image_digest",
@@ -104,6 +111,12 @@ def validate(marker: Path, expected_sha256: str, output_parent: Path) -> dict[st
                 f"ZeRO-2 smoke marker field {key!r} must be {expected_value!r}, "
                 f"got {payload[key]!r}"
             )
+    if payload["batch_accounting"] != EXPECTED_BATCH_ACCOUNTING:
+        raise ValueError(
+            "ZeRO-2 smoke marker batch accounting mismatch: "
+            f"expected={EXPECTED_BATCH_ACCOUNTING} "
+            f"observed={payload['batch_accounting']!r}"
+        )
     roundtrip = payload["roundtrip"]
     if not isinstance(roundtrip, dict) or set(roundtrip) != ROUNDTRIP_KEYS or not all(
         value is True for value in roundtrip.values()
@@ -188,7 +201,18 @@ def validate(marker: Path, expected_sha256: str, output_parent: Path) -> dict[st
             expected_proof = f"smoke-proof/{prefix}-rank-{rank:05d}.json"
             if expected_proof not in proof_paths:
                 raise ValueError(f"sealed ZeRO-2 state tree is missing {expected_proof}")
+            proof = json.loads((state_root / expected_proof).read_text(encoding="utf-8"))
+            if proof.get("rank") != rank or proof.get("world_size") != 32:
+                raise ValueError(
+                    f"sealed ZeRO-2 {prefix} proof rank/world mismatch at rank {rank}"
+                )
+            if proof.get("batch_accounting") != EXPECTED_BATCH_ACCOUNTING:
+                raise ValueError(
+                    f"sealed ZeRO-2 {prefix} proof batch accounting mismatch "
+                    f"at rank {rank}"
+                )
     return {
+        "batch_accounting": EXPECTED_BATCH_ACCOUNTING,
         "marker_sha256": actual_marker_sha256,
         "state_tree_manifest_sha256": manifest_sha256,
         "state_tree_files": summary["file_count"],

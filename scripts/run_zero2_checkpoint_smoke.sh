@@ -77,6 +77,7 @@ launch_phase() {
   local phase="$1"
   env -u WORLD_SIZE -u RANK -u LOCAL_RANK -u LOCAL_WORLD_SIZE \
     -u GROUP_RANK -u ROLE_RANK \
+    -u ACCELERATE_GRADIENT_ACCUMULATION_STEPS \
     "${PYTHON_TOOL}" -m accelerate.commands.launch \
     --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" \
     --num_machines "${NUM_MACHINES}" \

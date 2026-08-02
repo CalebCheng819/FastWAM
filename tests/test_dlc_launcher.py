@@ -1157,10 +1157,25 @@ def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
         state_root = smoke_root / "zero2-state"
         proof_root = state_root / "smoke-proof"
         proof_root.mkdir(parents=True)
+        batch_accounting = {
+            "global_train_batch_size": 128,
+            "gradient_accumulation_steps": 1,
+            "local_micro_batch_size": 4,
+            "world_size": 32,
+        }
         for rank in range(32):
             for prefix in ("save", "mutated", "load"):
                 (proof_root / f"{prefix}-rank-{rank:05d}.json").write_text(
-                    json.dumps({"rank": rank, "phase": prefix}) + "\n",
+                    json.dumps(
+                        {
+                            "batch_accounting": batch_accounting,
+                            "rank": rank,
+                            "phase": prefix,
+                            "schema_version": 2,
+                            "world_size": 32,
+                        }
+                    )
+                    + "\n",
                     encoding="utf-8",
                 )
         (state_root / "optimizer-shard.bin").write_bytes(b"real state fixture")
@@ -1193,6 +1208,7 @@ def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
         image_reference = "registry.example/fastwam@sha256:test"
         image_digest = "sha256:" + "7" * 64
         payload = {
+            "batch_accounting": batch_accounting,
             "code_commit": commit,
             "filesystem_device": os.stat(smoke_root).st_dev,
             "image_digest": image_digest,
@@ -1248,7 +1264,73 @@ def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
             command, text=True, capture_output=True, check=False, env=env
         )
         assert passed.returncode == 0, passed.stderr
-        assert json.loads(passed.stdout)["status"] == "PASS"
+        validated = json.loads(passed.stdout)
+        assert validated["status"] == "PASS"
+        assert validated["batch_accounting"] == batch_accounting
+
+        bad_proof = proof_root / "load-rank-00031.json"
+        bad_payload = json.loads(bad_proof.read_text(encoding="utf-8"))
+        bad_payload["batch_accounting"] = {
+            **batch_accounting,
+            "gradient_accumulation_steps": 2,
+        }
+        bad_proof.write_text(json.dumps(bad_payload) + "\n", encoding="utf-8")
+        state_manifest.unlink()
+        rebuilt = subprocess.run(
+            [
+                sys.executable,
+                str(STATE_TREE_SCRIPT),
+                "build",
+                "--state-root",
+                str(state_root),
+                "--output",
+                str(state_manifest),
+                "--role",
+                "zero2_roundtrip_smoke_state",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rebuilt.returncode == 0, rebuilt.stderr
+        payload["state_tree_manifest_sha256"] = _sha256(state_manifest)
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
+        wrong_batch = subprocess.run(
+            command, text=True, capture_output=True, check=False, env=env
+        )
+        assert wrong_batch.returncode != 0
+        assert "proof batch accounting mismatch at rank 31" in wrong_batch.stderr
+
+        bad_payload["batch_accounting"] = batch_accounting
+        bad_proof.write_text(json.dumps(bad_payload) + "\n", encoding="utf-8")
+        state_manifest.unlink()
+        rebuilt = subprocess.run(
+            [
+                sys.executable,
+                str(STATE_TREE_SCRIPT),
+                "build",
+                "--state-root",
+                str(state_root),
+                "--output",
+                str(state_manifest),
+                "--role",
+                "zero2_roundtrip_smoke_state",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rebuilt.returncode == 0, rebuilt.stderr
+        payload["state_tree_manifest_sha256"] = _sha256(state_manifest)
+        marker.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        command[command.index("--expected-sha256") + 1] = _sha256(marker)
 
         (state_root / "optimizer-shard.bin").write_bytes(b"same-shape corrupted state")
         failed = subprocess.run(
@@ -1266,6 +1348,7 @@ def test_zero_smoke_runner_clears_pai_topology_and_initializes_accelerator_first
     shell = ZERO_RUNNER_SCRIPT.read_text(encoding="utf-8")
     assert "env -u WORLD_SIZE -u RANK -u LOCAL_RANK -u LOCAL_WORLD_SIZE" in shell
     assert "-u GROUP_RANK -u ROLE_RANK" in shell
+    assert "-u ACCELERATE_GRADIENT_ACCUMULATION_STEPS" in shell
     source = ZERO_ROUNDTRIP_SCRIPT.read_text(encoding="utf-8")
     build_runtime = source[source.index("def _build_runtime"):source.index("def _train_step")]
     assert build_runtime.index("Accelerator(") < build_runtime.index(
@@ -1274,36 +1357,125 @@ def test_zero_smoke_runner_clears_pai_topology_and_initializes_accelerator_first
     assert build_runtime.index("Accelerator(") < build_runtime.index(
         "_configure_smoke_deepspeed_batch_accounting(accelerator)"
     ) < build_runtime.index("accelerator.prepare(")
+    train_step = source[source.index("def _train_step"):source.index("def _atomic_json")]
+    assert ".reshape(SMOKE_LOCAL_MICRO_BATCH_SIZE, 16)" in train_step
+    assert ".reshape(SMOKE_LOCAL_MICRO_BATCH_SIZE, 8)" in train_step
+
+
+def _zero_smoke_batch_helper_namespace() -> dict[str, object]:
+    source = ZERO_ROUNDTRIP_SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    helper_names = {
+        "_configure_smoke_deepspeed_batch_accounting",
+        "_require_smoke_gradient_accumulation",
+        "_resolved_smoke_batch_accounting",
+    }
+    helpers = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in helper_names
+    ]
+    assert {helper.name for helper in helpers} == helper_names
+    namespace: dict[str, object] = {
+        "SMOKE_GRADIENT_ACCUMULATION_STEPS": 1,
+        "SMOKE_LOCAL_MICRO_BATCH_SIZE": 4,
+    }
+    exec(
+        compile(ast.Module(body=helpers, type_ignores=[]), str(ZERO_ROUNDTRIP_SCRIPT), "exec"),
+        namespace,
+    )
+    return namespace
+
+
+class _ZeroSmokePluginStub:
+    def __init__(self, deepspeed_config: dict[str, object]) -> None:
+        self.deepspeed_config = deepspeed_config
+
+
+class _ZeroSmokeStateStub:
+    def __init__(self, plugin) -> None:
+        self.deepspeed_plugin = plugin
+
+
+class _ZeroSmokeAcceleratorStub:
+    def __init__(
+        self,
+        plugin,
+        *,
+        gradient_accumulation_steps: int = 1,
+        num_processes: int = 32,
+    ) -> None:
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.num_processes = num_processes
+        self.state = _ZeroSmokeStateStub(plugin)
 
 
 def test_zero_smoke_resolves_fixed_micro_batch_without_a_dataloader() -> None:
-    source = ZERO_ROUNDTRIP_SCRIPT.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    helper = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_configure_smoke_deepspeed_batch_accounting"
-    )
-    namespace = {"SMOKE_LOCAL_MICRO_BATCH_SIZE": 4}
-    helper_module = ast.Module(body=[helper], type_ignores=[])
-    exec(
-        compile(helper_module, str(ZERO_ROUNDTRIP_SCRIPT), "exec"),
-        namespace,
-    )
+    namespace = _zero_smoke_batch_helper_namespace()
     configure = namespace["_configure_smoke_deepspeed_batch_accounting"]
+    resolved = namespace["_resolved_smoke_batch_accounting"]
+    plugin = _ZeroSmokePluginStub(
+        {"train_micro_batch_size_per_gpu": "auto"}
+    )
+    accelerator = _ZeroSmokeAcceleratorStub(plugin)
+    configure(accelerator)
+    assert plugin.deepspeed_config["train_micro_batch_size_per_gpu"] == 4
+    plugin.deepspeed_config.update(
+        {
+            "gradient_accumulation_steps": 1,
+            "train_batch_size": 128,
+        }
+    )
+    assert resolved(accelerator) == {
+        "global_train_batch_size": 128,
+        "gradient_accumulation_steps": 1,
+        "local_micro_batch_size": 4,
+        "world_size": 32,
+    }
 
-    class Plugin:
-        deepspeed_config = {"train_micro_batch_size_per_gpu": "auto"}
 
-    class State:
-        deepspeed_plugin = Plugin()
+def test_zero_smoke_rejects_ambient_accumulation_override() -> None:
+    configure = _zero_smoke_batch_helper_namespace()[
+        "_configure_smoke_deepspeed_batch_accounting"
+    ]
+    accelerator = _ZeroSmokeAcceleratorStub(
+        _ZeroSmokePluginStub({"train_micro_batch_size_per_gpu": "auto"}),
+        gradient_accumulation_steps=8,
+    )
+    try:
+        configure(accelerator)
+    except ValueError as error:
+        assert "ACCELERATE_GRADIENT_ACCUMULATION_STEPS" in str(error)
+    else:
+        raise AssertionError("ambient gradient accumulation override was accepted")
 
-    class AcceleratorStub:
-        state = State()
 
-    configure(AcceleratorStub())
-    assert Plugin.deepspeed_config["train_micro_batch_size_per_gpu"] == 4
+def test_zero_smoke_rejects_wrong_micro_batch_value() -> None:
+    configure = _zero_smoke_batch_helper_namespace()[
+        "_configure_smoke_deepspeed_batch_accounting"
+    ]
+    accelerator = _ZeroSmokeAcceleratorStub(
+        _ZeroSmokePluginStub({"train_micro_batch_size_per_gpu": 2})
+    )
+    try:
+        configure(accelerator)
+    except ValueError as error:
+        assert "train_micro_batch_size_per_gpu=4" in str(error)
+    else:
+        raise AssertionError("wrong DeepSpeed local micro batch was accepted")
+
+
+def test_zero_smoke_requires_deepspeed_plugin() -> None:
+    configure = _zero_smoke_batch_helper_namespace()[
+        "_configure_smoke_deepspeed_batch_accounting"
+    ]
+    accelerator = _ZeroSmokeAcceleratorStub(None)
+    try:
+        configure(accelerator)
+    except RuntimeError as error:
+        assert "requires the DeepSpeed plugin" in str(error)
+    else:
+        raise AssertionError("missing DeepSpeed plugin was accepted")
 
 
 def test_pod_image_digest_probe_outputs_only_normalized_identity() -> None:
@@ -3123,6 +3295,9 @@ if __name__ == "__main__":
         test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound,
         test_zero_smoke_runner_clears_pai_topology_and_initializes_accelerator_first,
         test_zero_smoke_resolves_fixed_micro_batch_without_a_dataloader,
+        test_zero_smoke_rejects_ambient_accumulation_override,
+        test_zero_smoke_rejects_wrong_micro_batch_value,
+        test_zero_smoke_requires_deepspeed_plugin,
         test_pod_image_digest_probe_outputs_only_normalized_identity,
         test_runtime_rank_zero_atomic_config_file_barrier,
         test_prepare_local_training_bundle_rewrites_stats_provenance_without_mutating_source,
