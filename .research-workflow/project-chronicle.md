@@ -21,3 +21,15 @@ single-seed G2/G3 feasibility pilot; the paper-level positive conclusion still
 requires `G0 && G1 && G2 && G3 == PASS`. Detection, router probes, sidecar
 recovery, training, and final evaluation use separate globally unique
 Experiment IDs and pages. The current runtime authorizer remains hard-disabled.
+
+## 2026-08-03 — G0 evidence pipeline deployment
+
+- Implementation commit `a36295442fb3aafe204adb4a771fd184cdb00ae7` was
+  pushed to `fork/exp/mf-wam-validation`; local and remote branch readback match.
+- 942 uses the same CPFS data disk but a new control instance. The official
+  baseline and instrumentation were deployed as separate commit-addressed clean
+  clones under `/mnt/workspace/MF-WAM/repos`; both have zero status, ignored, and
+  replace-ref bytes and passed the exact-tree source gate.
+- The 942 control runtime remains diagnostic-only: Hydra 1.3.4 differs from the
+  locked 1.3.2, MuJoCo is absent, and no CUDA device is visible. No DLC or GPU
+  job was launched; `formal_training_allowed=false` remains authoritative.

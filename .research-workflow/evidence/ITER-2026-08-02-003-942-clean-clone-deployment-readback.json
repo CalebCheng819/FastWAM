@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "kind": "mf_wam_g0_942_clean_clone_deployment_readback",
+  "checked_at": "2026-08-03T00:12:36+08:00",
+  "control_instance": {
+    "ssh_target": "root@123.57.187.96:942",
+    "hostname": "dsw-473663-68974db5d7-wz9c6",
+    "strict_host_key_alias": "[123.57.187.96]:970"
+  },
+  "shared_mount": {
+    "/mnt/workspace": "1048633:79458992131",
+    "/cpfs/user/chengjuntao": "1048633:79458992131",
+    "same_device_and_inode": true
+  },
+  "deployments": {
+    "official": {
+      "path": "/mnt/workspace/MF-WAM/repos/FastWAM-official-45d8e1458921d83f8ad6cf9ce993d371208dabd0",
+      "commit": "45d8e1458921d83f8ad6cf9ce993d371208dabd0",
+      "git_dir_is_in_tree_directory": true,
+      "git_common_dir_is_in_tree_directory": true,
+      "status_bytes": 0,
+      "ignored_bytes": 0,
+      "replace_ref_bytes": 0
+    },
+    "instrumentation": {
+      "path": "/mnt/workspace/MF-WAM/repos/FastWAM-mfwam-a36295442fb3aafe204adb4a771fd184cdb00ae7",
+      "commit": "a36295442fb3aafe204adb4a771fd184cdb00ae7",
+      "remote_branch": "fork/exp/mf-wam-validation",
+      "remote_branch_readback_commit": "a36295442fb3aafe204adb4a771fd184cdb00ae7",
+      "git_dir_is_in_tree_directory": true,
+      "git_common_dir_is_in_tree_directory": true,
+      "status_bytes": 0,
+      "ignored_bytes": 0,
+      "replace_ref_bytes": 0
+    }
+  },
+  "read_only_source_verification": {
+    "source_gate": "PASS",
+    "python_bytecode_disabled": true,
+    "compileall_run_inside_formal_clones": false,
+    "compiled_python_files_in_memory": {
+      "official": 161,
+      "instrumentation": 181
+    },
+    "strict_json_files": {
+      "official": 620,
+      "instrumentation": 647
+    },
+    "upstream_syntax_warning_count": 2
+  },
+  "instrumentation_sha256": {
+    "scripts/run_mf_wam_g0_manager.py": "487cd64ec174cdf5acf026caae22921854aa81f49192278dc30de0548d3bb203",
+    "scripts/run_mf_wam_g0_traced.py": "d83ea77732afec5140f9c871ae90db59f49b45c6b1daafa5d720f6ec6c07cf94",
+    "scripts/mf_wam_g0_instrumentation.py": "ba704d2430fd9a6375bf6589b618b4cbc7b4f74beec61bd84a9e67d96d6fe2ac",
+    "scripts/audit_mf_wam_g0_bundle.py": "bee226395741c3e0523b277f9ac7bd8cfaf28536a9938c8284a8f026099147b2",
+    "src/fastwam/validation/g0_contract.py": "321d0a55fe2148d62eb48d5ce0e1bbce27c2d5ca17339d550465bde0a1bd54fa",
+    "configs/validation/mf_wam_g0_approved_assets.json": "f4cbb8ce0f518782f7083ce9e0c90dfd0c8f1000a624ea3e46251488b62bc690",
+    "configs/validation/mf_wam_g0_task_map.json": "71b79aa08e9f73a1107ccc54fb7070da67b56c147b0f77f73a72201582e4b96b"
+  },
+  "control_instance_runtime": {
+    "python": "3.12.13",
+    "hydra": "1.3.4",
+    "omegaconf": "2.3.0",
+    "torch": "2.10.0+cu128",
+    "torch_cuda_available": false,
+    "torch_cuda_device_count": 0,
+    "mujoco_importable": false
+  },
+  "formal_runtime_lock": {
+    "hydra": "1.3.2",
+    "omegaconf": "2.3.0",
+    "match": false
+  },
+  "old_active_checkout_modified": false,
+  "filesystem_mutations": [
+    "created two new commit-addressed clean Git clones under /mnt/workspace/MF-WAM/repos"
+  ],
+  "dlc_mutations_called": [],
+  "gpu_jobs_started": 0,
+  "training_started": false,
+  "notion_chronicle": {
+    "page_id": "3b021e77-89cc-81b9-8238-e3cdbf44dda2",
+    "append_request_id": "e426aee2-fc85-4b6b-bf3d-0ac293b7d585",
+    "block_ids": [
+      "3b021e77-89cc-8196-9f2a-c373fb1f70b8",
+      "3b021e77-89cc-81b2-b37d-c54d0027f289",
+      "3b021e77-89cc-815b-ae6c-c8be2d29cc4a",
+      "3b021e77-89cc-814c-981e-ffea362b9515"
+    ],
+    "markdown_readback_truncated": false,
+    "unknown_block_ids": [],
+    "readback_contains_commit_and_no_go_decision": true
+  },
+  "formal_training_allowed": false
+}
