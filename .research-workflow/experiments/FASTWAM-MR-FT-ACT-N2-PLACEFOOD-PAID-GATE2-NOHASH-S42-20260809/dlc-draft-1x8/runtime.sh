@@ -25,7 +25,7 @@ umask 077
 : "${FASTWAM_MIN_TMP_FREE_BYTES:?}"
 : "${NPROC_PER_NODE:?}"
 
-EXPECTED_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R6-S42-20260811"
+EXPECTED_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R7-S42-20260811"
 SOURCE_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-S42-20260809"
 EXPECTED_TASK="robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5_nohash_gate"
 EXPECTED_DATASET_ROOT="/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
@@ -667,9 +667,16 @@ with stats_path.open("r", encoding="utf-8") as handle:
 if not isinstance(payload, dict):
     raise TypeError("normalization stats must be a JSON object")
 source_root = payload.get("source_root")
-if source_root != dataset_root_literal or str(dataset_root) != dataset_root_literal:
+if source_root != dataset_root_literal:
     raise RuntimeError(
-        f"normalization stats source_root mismatch: stats={source_root!r} dataset={dataset_root}"
+        "normalization stats source_root literal mismatch: "
+        f"stats={source_root!r} dataset={dataset_root_literal!r}"
+    )
+stats_source_root = Path(source_root).resolve(strict=True)
+if stats_source_root != dataset_root:
+    raise RuntimeError(
+        "normalization stats source_root canonical mismatch: "
+        f"stats={stats_source_root} dataset={dataset_root}"
     )
 for field in ("action", "state", "files", "trajectories", "cardinality", "normalization_fit"):
     if field not in payload:
