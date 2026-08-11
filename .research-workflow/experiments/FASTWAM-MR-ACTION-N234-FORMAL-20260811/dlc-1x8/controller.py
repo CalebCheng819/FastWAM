@@ -29,7 +29,7 @@ CONTRACT = "action_only_native_agents_1x8_v1"
 PER_RUN_OSS_BUDGET_BYTES = 62 * 1024**3
 SUITE_OSS_BUDGET_BYTES = 190 * 1024**3
 PLATFORM_QUOTA_MAX_AGE = timedelta(hours=6)
-SUITE_ID = "FASTWAM-MR-ACTION-N234-FORMAL-R3-20260812"
+SUITE_ID = "FASTWAM-MR-ACTION-N234-FORMAL-R4-20260812"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
 REGION = "cn-beijing"
@@ -37,8 +37,9 @@ PROFILE = Path("/root/.aliyun/config.json")
 CONTROL_ENTRYPOINT = "submit_from_ssh970.sh"
 CONTROL_NODE = "ssh970"
 
-LOCAL_CONTROL_ROOT = Path("/tmp/fastwam-dlc-submit-state/workspace-270969")
-CONTROL_LOCK_PATH = LOCAL_CONTROL_ROOT / "action-n234-formal-r3-controller.lock"
+CONTROL_ANCHOR = Path("/run")
+LOCAL_CONTROL_ROOT = CONTROL_ANCHOR / "fastwam-dlc-submit-state/workspace-270969"
+CONTROL_LOCK_PATH = LOCAL_CONTROL_ROOT / "action-n234-formal-r4-controller.lock"
 DURABLE_CONTROL_ROOT = Path(
     "/oss-chengjuntao/artifacts/fastwam-dlc-submit-ledger/workspace-270969"
 )
@@ -46,8 +47,11 @@ SUITE_STORAGE_RESERVATION_PATH = (
     DURABLE_CONTROL_ROOT / SUITE_ID / "suite-storage-reservation.json"
 )
 SOURCE_PREFIX = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots")
+EXPECTED_SOURCE_ROOT = (
+    SOURCE_PREFIX / "fastwam-action-n234-formal-r4-20260812-r1"
+)
 OUTPUT_PREFIX = Path(
-    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812"
+    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812"
 )
 OSS_ROOT = Path("/oss-chengjuntao")
 GAUSSIAN_PREFIX = Path(
@@ -139,27 +143,27 @@ MEMBER_RESERVATION_KEYS = {
 
 MEMBERS: dict[str, dict[str, Any]] = {
     "n2": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R3-20260812",
-        "run_id": "fastwam-act-n2-placefood-1k-s42-r3-20260812",
-        "display_name": "fw-act-n2-placefood-1k-s42-r3",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R4-20260812",
+        "run_id": "fastwam-act-n2-placefood-1k-s42-r4-20260812",
+        "display_name": "fw-act-n2-placefood-1k-s42-r4",
         "config": "robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 2,
         "tasks": ["PlaceFood-rf"],
     },
     "n3": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R3-20260812",
-        "run_id": "fastwam-act-n3-pool-1k-s42-r3-20260812",
-        "display_name": "fw-act-n3-pool-1k-s42-r3",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R4-20260812",
+        "run_id": "fastwam-act-n3-pool-1k-s42-r4-20260812",
+        "display_name": "fw-act-n3-pool-1k-s42-r4",
         "config": "robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 3,
         "tasks": ["ThreeRobotsPlaceShoes-rf", "ThreeRobotsStackCube-rf"],
     },
     "n4": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R3-20260812",
-        "run_id": "fastwam-act-n4-stackcube-1k-s42-r3-20260812",
-        "display_name": "fw-act-n4-stackcube-1k-s42-r3",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R4-20260812",
+        "run_id": "fastwam-act-n4-stackcube-1k-s42-r4-20260812",
+        "display_name": "fw-act-n4-stackcube-1k-s42-r4",
         "config": "robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 4,
@@ -391,7 +395,7 @@ def require_controller_lock() -> None:
         path_metadata = os.lstat(CONTROL_LOCK_PATH)
     except OSError as error:
         raise RuntimeError(
-            f"R3 controller lock path is unavailable: {CONTROL_LOCK_PATH}"
+            f"R4 controller lock path is unavailable: {CONTROL_LOCK_PATH}"
         ) from error
     if (
         not stat.S_ISREG(descriptor_metadata.st_mode)
@@ -405,7 +409,7 @@ def require_controller_lock() -> None:
         descriptor_metadata.st_ino,
     ) != (path_metadata.st_dev, path_metadata.st_ino):
         raise RuntimeError(
-            f"file descriptor 9 is not the R3 controller lock: {CONTROL_LOCK_PATH}"
+            f"file descriptor 9 is not the R4 controller lock: {CONTROL_LOCK_PATH}"
         )
     fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -422,6 +426,12 @@ def canonical_direct_child(value: str, *, prefix: Path, label: str) -> Path:
     if not resolved.is_dir() or str(resolved) != value:
         raise ValueError(f"{label} must be an existing canonical directory")
     return resolved
+
+
+def canonical_expected_source_root(value: str, *, label: str) -> Path:
+    if value != str(EXPECTED_SOURCE_ROOT):
+        raise ValueError(f"{label} must equal the frozen R4 source root")
+    return canonical_direct_child(value, prefix=SOURCE_PREFIX, label=label)
 
 
 def canonical_oss_path(value: str, *, kind: str, label: str) -> Path:
@@ -1656,8 +1666,8 @@ def validate_request(
     source_literal = envs.get("FASTWAM_SOURCE_ROOT")
     if type(source_literal) is not str:
         raise RuntimeError("source root must be a string")
-    if Path(source_literal).parent != SOURCE_PREFIX:
-        raise RuntimeError("source root is outside the unique snapshot prefix")
+    if source_literal != str(EXPECTED_SOURCE_ROOT):
+        raise RuntimeError("source root differs from the frozen R4 snapshot")
     output_literal = envs.get("FASTWAM_OSS_OUTPUT_ROOT")
     if type(output_literal) is not str:
         raise RuntimeError("output root must be a string")
@@ -1715,7 +1725,7 @@ def validate_request(
     if not strict_value_equal(settings, expected_settings):
         raise RuntimeError("DLC RDMA/settings contract mismatch")
     if live:
-        source = canonical_direct_child(source_literal, prefix=SOURCE_PREFIX, label="source root")
+        source = canonical_expected_source_root(source_literal, label="source root")
         current_runtime, _ = stable_read(source / RUNTIME_REL)
         if current_runtime != runtime:
             raise RuntimeError("request-carried runtime differs from source runtime")
@@ -2154,7 +2164,7 @@ def prepare(args: argparse.Namespace) -> None:
     source_commit = args.source_commit.strip().lower()
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise ValueError("--source-commit must be a lowercase full 40-character Git object ID")
-    source = canonical_direct_child(args.source_root, prefix=SOURCE_PREFIX, label="source root")
+    source = canonical_expected_source_root(args.source_root, label="source root")
     source_entries = validate_source(source, names)
     trusted_runtime, _ = stable_read(source / RUNTIME_REL)
     dataset = canonical_oss_path(args.dataset_root, kind="directory", label="dataset")
@@ -2641,8 +2651,8 @@ def validate_reservation_live(
     canonical_oss_path(
         str(OUTPUT_PREFIX), kind="directory", label="formal output prefix"
     )
-    source = canonical_direct_child(
-        reservation["source"]["root"], prefix=SOURCE_PREFIX, label="source root"
+    source = canonical_expected_source_root(
+        reservation["source"]["root"], label="source root"
     )
     observed_source_inventory = source_inventory(source)
     assert_source_inventory_matches(

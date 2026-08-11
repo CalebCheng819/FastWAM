@@ -38,9 +38,9 @@ done
 [[ "${NPROC_PER_NODE}" == 8 ]] || die "this runtime requires exactly eight ranks"
 [[ "${FASTWAM_MAX_OSS_PUBLISH_BYTES}" == $((62 * 1024 * 1024 * 1024)) ]] || die "per-run publication cap mismatch"
 [[ "${FASTWAM_MIN_TMP_FREE_BYTES}" == $((200 * 1024 * 1024 * 1024)) ]] || die "local scratch floor mismatch"
-[[ "${FASTWAM_OSS_OUTPUT_ROOT}" == /oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812/* ]] || die "durable output prefix mismatch"
+[[ "${FASTWAM_OSS_OUTPUT_ROOT}" == /oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812/* ]] || die "durable output prefix mismatch"
 [[ -d "$(dirname -- "${FASTWAM_OSS_OUTPUT_ROOT}")" && ! -L "$(dirname -- "${FASTWAM_OSS_OUTPUT_ROOT}")" ]] || die "prepared durable output prefix is absent"
-[[ "${FASTWAM_SOURCE_ROOT}" == /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r3-20260812-r1 ]] || die "frozen R3 source mismatch"
+[[ "${FASTWAM_SOURCE_ROOT}" == /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r4-20260812-r1 ]] || die "frozen R4 source mismatch"
 [[ "${FASTWAM_PREPARED_RESERVATION_PATH}" == /oss-chengjuntao/* ]] || die "reservation must be on OSS"
 [[ "${FASTWAM_SUITE_STORAGE_RESERVATION_PATH}" == /oss-chengjuntao/* ]] || die "suite reservation must be on OSS"
 [[ "${FASTWAM_DATASET_ROOT}" == /oss-chengjuntao/* ]] || die "dataset must be sourced from OSS"
@@ -60,22 +60,22 @@ resolved_python="$(readlink -f -- "${FASTWAM_PYTHON}")" || die "cannot resolve p
 case "${FASTWAM_MEMBER}" in
   n2)
     expected_agents=2
-    expected_experiment=FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R3-20260812
-    expected_run=fastwam-act-n2-placefood-1k-s42-r3-20260812
+    expected_experiment=FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R4-20260812
+    expected_run=fastwam-act-n2-placefood-1k-s42-r4-20260812
     expected_config=robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5
     expected_tasks='["PlaceFood-rf"]'
     ;;
   n3)
     expected_agents=3
-    expected_experiment=FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R3-20260812
-    expected_run=fastwam-act-n3-pool-1k-s42-r3-20260812
+    expected_experiment=FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R4-20260812
+    expected_run=fastwam-act-n3-pool-1k-s42-r4-20260812
     expected_config=robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5
     expected_tasks='["ThreeRobotsPlaceShoes-rf","ThreeRobotsStackCube-rf"]'
     ;;
   n4)
     expected_agents=4
-    expected_experiment=FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R3-20260812
-    expected_run=fastwam-act-n4-stackcube-1k-s42-r3-20260812
+    expected_experiment=FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R4-20260812
+    expected_run=fastwam-act-n4-stackcube-1k-s42-r4-20260812
     expected_config=robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5
     expected_tasks='["FourRobotsStackCube-rf"]'
     ;;
@@ -133,7 +133,7 @@ tmp_available="$(df -PB1 /tmp | awk 'NR==2 {print $4}')"
 [[ "${tmp_available}" =~ ^[0-9]+$ ]] || die "cannot read local scratch capacity"
 (( tmp_available >= FASTWAM_MIN_TMP_FREE_BYTES )) || die "local scratch is below the 200 GiB floor"
 
-SCRATCH="$(mktemp -d /tmp/fastwam-action-n234-formal-r3.XXXXXX)"
+SCRATCH="$(mktemp -d /tmp/fastwam-action-n234-formal-r4.XXXXXX)"
 LOCAL_SOURCE="${SCRATCH}/source"
 TRAIN_OUTPUT="${SCRATCH}/train"
 VERIFY_OUTPUT="${SCRATCH}/fresh-load"

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 CONTROLLER = ROOT / "controller.py"
 RUNTIME = ROOT / "runtime.sh"
 WRAPPER = ROOT / "submit_from_ssh970.sh"
+README = ROOT / "README.md"
 
 
 def load_controller():
@@ -42,7 +43,7 @@ def build_test_request(module, member: str) -> dict:
         member,
         source_root=(
             module.SOURCE_PREFIX
-            / "fastwam-action-n234-formal-r3-20260812-r1"
+            / "fastwam-action-n234-formal-r4-20260812-r1"
         ),
         source_commit="a" * 40,
         dataset_root=module.OSS_ROOT / "dataset",
@@ -194,17 +195,21 @@ def test_controller_structure(module) -> None:
         "external generic reservation; trainer terminal contract fields remain null; "
         "terminal success is granted only by the runtime receipt"
     )
-    assert module.SUITE_ID == "FASTWAM-MR-ACTION-N234-FORMAL-R3-20260812"
+    assert module.SUITE_ID == "FASTWAM-MR-ACTION-N234-FORMAL-R4-20260812"
     assert str(module.OUTPUT_PREFIX).endswith(
-        "/fastwam-action-n234-formal-r3-20260812"
+        "/fastwam-action-n234-formal-r4-20260812"
+    )
+    assert module.CONTROL_ANCHOR == Path("/run")
+    assert module.LOCAL_CONTROL_ROOT == Path(
+        "/run/fastwam-dlc-submit-state/workspace-270969"
     )
     assert module.CONTROL_LOCK_PATH == (
-        module.LOCAL_CONTROL_ROOT / "action-n234-formal-r3-controller.lock"
+        module.LOCAL_CONTROL_ROOT / "action-n234-formal-r4-controller.lock"
     )
     for spec in module.MEMBERS.values():
-        assert "-R3-20260812" in spec["experiment_id"]
-        assert "-r3-20260812" in spec["run_id"]
-        assert spec["display_name"].endswith("-r3")
+        assert "-R4-20260812" in spec["experiment_id"]
+        assert "-r4-20260812" in spec["run_id"]
+        assert spec["display_name"].endswith("-r4")
     assert module.SUITE_OSS_BUDGET_BYTES == 190 * 1024**3
     assert module.PER_RUN_OSS_BUDGET_BYTES == 62 * 1024**3
     assert str(module.PINNED_PYTHON).endswith(
@@ -422,14 +427,14 @@ def test_controller_structure(module) -> None:
     assert not module.exact_job(strict_scalar_observed, strict_scalar_request)
 
 
-def test_r3_controller_lock_binds_fd_to_exact_path(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-controller-lock-") as name:
+def test_r4_controller_lock_binds_fd_to_exact_path(module) -> None:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-controller-lock-") as name:
         root = Path(name)
-        r3_lock = root / "action-n234-formal-r3-controller.lock"
-        old_lock = root / "action-n234-formal-r2-controller.lock"
-        r3_lock.write_bytes(b"")
+        r4_lock = root / "action-n234-formal-r4-controller.lock"
+        old_lock = root / "retired-controller.lock"
+        r4_lock.write_bytes(b"")
         old_lock.write_bytes(b"")
-        r3_metadata = os.lstat(r3_lock)
+        r4_metadata = os.lstat(r4_lock)
         old_metadata = os.lstat(old_lock)
         environment = {
             "FASTWAM_CONTROL_NODE": module.CONTROL_NODE,
@@ -438,8 +443,8 @@ def test_r3_controller_lock_binds_fd_to_exact_path(module) -> None:
 
         with (
             mock.patch.dict(os.environ, environment, clear=False),
-            mock.patch.object(module, "CONTROL_LOCK_PATH", r3_lock),
-            mock.patch.object(module.os, "fstat", return_value=r3_metadata),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r4_lock),
+            mock.patch.object(module.os, "fstat", return_value=r4_metadata),
             mock.patch.object(module.fcntl, "flock") as lock,
         ):
             module.require_controller_lock()
@@ -449,7 +454,7 @@ def test_r3_controller_lock_binds_fd_to_exact_path(module) -> None:
 
         with (
             mock.patch.dict(os.environ, environment, clear=False),
-            mock.patch.object(module, "CONTROL_LOCK_PATH", r3_lock),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r4_lock),
             mock.patch.object(module.os, "fstat", return_value=old_metadata),
             mock.patch.object(module.fcntl, "flock") as lock,
         ):
@@ -459,23 +464,23 @@ def test_r3_controller_lock_binds_fd_to_exact_path(module) -> None:
             )
         lock.assert_not_called()
 
-        bound_metadata = os.lstat(r3_lock)
+        bound_metadata = os.lstat(r4_lock)
         replacement = root / "replacement.lock"
         replacement.write_bytes(b"")
-        os.replace(replacement, r3_lock)
+        os.replace(replacement, r4_lock)
         assert (bound_metadata.st_dev, bound_metadata.st_ino) != (
-            os.lstat(r3_lock).st_dev,
-            os.lstat(r3_lock).st_ino,
+            os.lstat(r4_lock).st_dev,
+            os.lstat(r4_lock).st_ino,
         )
         with (
             mock.patch.dict(os.environ, environment, clear=False),
-            mock.patch.object(module, "CONTROL_LOCK_PATH", r3_lock),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r4_lock),
             mock.patch.object(module.os, "fstat", return_value=bound_metadata),
             mock.patch.object(module.fcntl, "flock") as lock,
         ):
             _assert_runtime_rejected(
                 module.require_controller_lock,
-                "R3 lock path replaced after descriptor open",
+                "R4 lock path replaced after descriptor open",
             )
         lock.assert_not_called()
 
@@ -497,7 +502,7 @@ def test_r3_controller_lock_binds_fd_to_exact_path(module) -> None:
 
 
 def test_controller_exclusive_writer_fails_closed(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-exclusive-writer-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-exclusive-writer-") as name:
         root = Path(name)
 
         collision = root / "collision.json"
@@ -525,7 +530,7 @@ def test_controller_exclusive_writer_fails_closed(module) -> None:
         except FileExistsError:
             pass
         else:
-            raise AssertionError("partial immutable record must poison the R3 identity")
+            raise AssertionError("partial immutable record must poison the R4 identity")
 
         local_state = root / "local-state.json"
         local_state.write_bytes(b"old-local-state\n")
@@ -582,7 +587,7 @@ def _submit_with_n2_evidence(
 ):
     requests = {name: build_test_request(module, name) for name in module.MEMBERS}
     shared_source = {
-        "root": str(module.SOURCE_PREFIX / "fastwam-action-n234-formal-r3-20260812-r1"),
+        "root": str(module.EXPECTED_SOURCE_ROOT),
         "git_commit": "a" * 40,
         "inventory": {
             "schema": module.SOURCE_INVENTORY_SCHEMA,
@@ -600,7 +605,7 @@ def _submit_with_n2_evidence(
     selected_reservation = reservations[member]
     alternate_source = str(
         module.SOURCE_PREFIX
-        / f"fastwam-action-n234-formal-r3-20260812-{member}-alternate"
+        / f"fastwam-action-n234-formal-r4-20260812-{member}-alternate"
     )
     if fixture_mutation == "suite_path":
         selected_reservation["request"]["Envs"][
@@ -621,9 +626,9 @@ def _submit_with_n2_evidence(
     elif fixture_mutation not in {None, "selected_vs_suite", "n2_reread_vs_suite"}:
         raise AssertionError(f"unknown scientific-gate fixture mutation: {fixture_mutation}")
 
-    # These request changes are individually schema-valid; the gate must reject
-    # them because they disagree with N2, not because of malformed values.
-    if fixture_mutation in {"source_root", "source_commit", "shared_request_env"}:
+    # Commit and shared-environment changes remain individually request-valid;
+    # source-root drift now also violates the R4 exact frozen-source contract.
+    if fixture_mutation in {"source_commit", "shared_request_env"}:
         module.validate_request(member, selected_reservation["request"])
 
     selected_readback = copy.deepcopy(selected_reservation)
@@ -631,15 +636,13 @@ def _submit_with_n2_evidence(
     if fixture_mutation == "selected_vs_suite":
         selected_readback["source"]["root"] = alternate_source
         selected_readback["request"]["Envs"]["FASTWAM_SOURCE_ROOT"] = alternate_source
-        module.validate_request(member, selected_readback["request"])
     elif fixture_mutation == "n2_reread_vs_suite":
         alternate_n2_source = str(
             module.SOURCE_PREFIX
-            / "fastwam-action-n234-formal-r3-20260812-n2-reread"
+            / "fastwam-action-n234-formal-r4-20260812-n2-reread"
         )
         n2_readback["source"]["root"] = alternate_n2_source
         n2_readback["request"]["Envs"]["FASTWAM_SOURCE_ROOT"] = alternate_n2_source
-        module.validate_request("n2", n2_readback["request"])
     events: list[str] = []
 
     class Client:
@@ -649,7 +652,7 @@ def _submit_with_n2_evidence(
             assert headers == {}
             assert runtime_options == {"autoretry": False}
             return SimpleNamespace(
-                body=SimpleNamespace(to_map=lambda: {"JobId": "dlc-r3-test"})
+                body=SimpleNamespace(to_map=lambda: {"JobId": "dlc-r4-test"})
             )
 
     def read_records(_path):
@@ -701,7 +704,7 @@ def _submit_with_n2_evidence(
     def publish_local_state(_path, _value):
         events.append("local-state")
 
-    with tempfile.TemporaryDirectory(prefix=f"formal-r3-submit-gate-{member}-") as name:
+    with tempfile.TemporaryDirectory(prefix=f"formal-r4-submit-gate-{member}-") as name:
         root = Path(name)
         with ExitStack() as stack:
             read_json = stack.enter_context(
@@ -763,7 +766,7 @@ def _submit_with_n2_evidence(
                 mock.patch.object(
                     module,
                     "get_job",
-                    return_value={"JobId": "dlc-r3-test", "Status": "Running"},
+                    return_value={"JobId": "dlc-r4-test", "Status": "Running"},
                 )
             )
             stack.enter_context(mock.patch.object(module, "exact_job", return_value=True))
@@ -771,7 +774,7 @@ def _submit_with_n2_evidence(
                 mock.patch.object(
                     module,
                     "publish_acknowledgement",
-                    return_value={"job_id": "dlc-r3-test", "job_status": "Running"},
+                    return_value={"job_id": "dlc-r4-test", "job_status": "Running"},
                 )
             )
             stack.enter_context(
@@ -933,9 +936,9 @@ def _write_portable_fixture(root: Path, payload: bytes = b"portable-source") -> 
 def test_source_inventory_cross_mount_portability(module) -> None:
     shared_memory = Path("/dev/shm")
     assert shared_memory.is_dir(), "/dev/shm is required for the cross-mount test"
-    with tempfile.TemporaryDirectory(prefix="formal-r3-posix-", dir="/tmp") as left_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-posix-", dir="/tmp") as left_name:
         with tempfile.TemporaryDirectory(
-            prefix="formal-r3-shm-", dir=shared_memory
+            prefix="formal-r4-shm-", dir=shared_memory
         ) as right_name:
             left = Path(left_name)
             right = Path(right_name)
@@ -958,7 +961,7 @@ def test_source_inventory_cross_mount_portability(module) -> None:
 
 
 def test_source_inventory_ignores_mode_and_mtime(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-metadata-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-metadata-") as temporary:
         root = Path(temporary)
         _write_portable_fixture(root)
         first = module.source_inventory(root)
@@ -974,7 +977,7 @@ def test_source_inventory_ignores_mode_and_mtime(module) -> None:
 
 
 def test_source_inventory_content_difference_is_path_only(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-content-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-content-") as temporary:
         root = Path(temporary)
         _write_portable_fixture(root, b"first-content")
         expected = module.source_inventory(root)
@@ -1046,7 +1049,7 @@ def test_source_inventory_schema_rejects_float_bool_and_noncanonical(module) -> 
 
 
 def test_source_inventory_rejects_symlink_and_path_race(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-link-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-link-") as temporary:
         root = Path(temporary)
         (root / "payload.bin").write_bytes(b"payload")
         (root / "payload-link").symlink_to("payload.bin")
@@ -1057,7 +1060,7 @@ def test_source_inventory_rejects_symlink_and_path_race(module) -> None:
         else:
             raise AssertionError("source symlink must fail closed")
 
-    with tempfile.TemporaryDirectory(prefix="formal-r3-race-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-race-") as temporary:
         root = Path(temporary)
         child = root / "nested"
         moved = root / "nested-moved"
@@ -1689,7 +1692,7 @@ def test_gaussian_manifest_reversible_descriptor_contract(module) -> None:
 
 
 def test_gaussian_manifest_large_raw_bounds(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-large-manifest-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-large-manifest-") as name:
         prefix = Path(name)
         cache = prefix / "large"
         cache.mkdir()
@@ -1822,12 +1825,12 @@ def test_member_inputs_cross_mount_mode_and_mtime_portability(module) -> None:
     member = "n3"
     shared_memory = Path("/dev/shm")
     assert shared_memory.is_dir(), "/dev/shm is required for the cross-mount test"
-    with tempfile.TemporaryDirectory(prefix="formal-r3-input-left-", dir="/tmp") as left_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-input-left-", dir="/tmp") as left_name:
         with tempfile.TemporaryDirectory(
-            prefix="formal-r3-input-right-", dir=shared_memory
+            prefix="formal-r4-input-right-", dir=shared_memory
         ) as right_name:
             with tempfile.TemporaryDirectory(
-                prefix="formal-r3-input-alias-", dir="/tmp"
+                prefix="formal-r4-input-alias-", dir="/tmp"
             ) as alias_name:
                 left = Path(left_name)
                 right = Path(right_name)
@@ -1887,7 +1890,7 @@ def _same_size_replace(path: Path, payload: bytes) -> None:
 
 def test_same_size_stats_and_gaussian_control_replacements_are_detected(module) -> None:
     member = "n2"
-    with tempfile.TemporaryDirectory(prefix="formal-r3-control-content-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-control-content-") as name:
         root = Path(name)
         request, paths = _write_member_input_fixture(
             module, root, member=member, declared_dataset_root=root / "dataset"
@@ -2145,7 +2148,7 @@ def test_prepare_one_is_pure_and_publish_is_explicit(module) -> None:
         "schema": module.SOURCE_INVENTORY_SCHEMA,
         "entries": [{"path": ".", "kind": "directory"}],
     }
-    with tempfile.TemporaryDirectory(prefix="formal-r3-prepare-behavior-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-prepare-behavior-") as name:
         root = Path(name)
         reservation_destination = root / "prepared-reservation.json"
         output_destination = root / "output"
@@ -2257,7 +2260,9 @@ def _prepare_test_args(root: Path) -> SimpleNamespace:
 def _prepare_read_only_patches(module, root: Path):
     source = root / "source"
     return (
-        mock.patch.object(module, "canonical_direct_child", return_value=source),
+        mock.patch.object(
+            module, "canonical_expected_source_root", return_value=source
+        ),
         mock.patch.object(
             module,
             "validate_source",
@@ -2298,7 +2303,7 @@ def test_prepare_member_failures_leave_no_durable_or_local_state(module) -> None
     for failure_stage in ("collect", "validate"):
         for failing_member in module.MEMBERS:
             with tempfile.TemporaryDirectory(
-                prefix=f"formal-r3-atomic-{failure_stage}-{failing_member}-"
+                prefix=f"formal-r4-atomic-{failure_stage}-{failing_member}-"
             ) as name:
                 root = Path(name)
                 python_target = root / "python-target"
@@ -2434,7 +2439,7 @@ def test_prepare_member_failures_leave_no_durable_or_local_state(module) -> None
 
 
 def test_prepare_phase_two_follows_all_pure_results(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-phase-two-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-phase-two-") as name:
         root = Path(name)
         python_target = root / "python-target"
         python_target.write_bytes(b"runtime")
@@ -2691,7 +2696,7 @@ def test_suite_rejects_common_input_mismatch(module) -> None:
 
 
 def test_first_frozen_controller_import_does_not_mutate_source() -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r3-import-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-import-") as temporary:
         source = Path(temporary) / "source"
         controller = source / CONTROLLER.name
         source.mkdir()
@@ -2739,14 +2744,14 @@ def test_runtime_structure() -> None:
     text = RUNTIME.read_text(encoding="utf-8")
     assert text.count("launch_training \"") == 3
     for identity in (
-        "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812/",
-        "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r3-20260812-r1",
-        "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R3-20260812",
-        "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R3-20260812",
-        "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R3-20260812",
-        "fastwam-act-n2-placefood-1k-s42-r3-20260812",
-        "fastwam-act-n3-pool-1k-s42-r3-20260812",
-        "fastwam-act-n4-stackcube-1k-s42-r3-20260812",
+        "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812/",
+        "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r4-20260812-r1",
+        "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R4-20260812",
+        "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R4-20260812",
+        "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R4-20260812",
+        "fastwam-act-n2-placefood-1k-s42-r4-20260812",
+        "fastwam-act-n3-pool-1k-s42-r4-20260812",
+        "fastwam-act-n4-stackcube-1k-s42-r4-20260812",
     ):
         assert identity in text
     for required in (
@@ -2904,7 +2909,7 @@ def test_runtime_durable_writers_fail_closed() -> None:
     exec("def write_all(fd, payload):\n" + writers, namespace)
     create_bytes = namespace["create_bytes"]
 
-    with tempfile.TemporaryDirectory(prefix="formal-r3-runtime-writer-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-runtime-writer-") as name:
         root = Path(name)
         collision = root / "COMPLETE"
         collision.write_bytes(b"immutable-existing-marker\n")
@@ -2950,7 +2955,7 @@ def test_runtime_staged_copy_uses_prepared_inventory_counterexample() -> None:
     assert text.count(marker) == 1
     stage_script = text.split(marker, 1)[1].split("\nPY\n", 1)[0]
 
-    with tempfile.TemporaryDirectory(prefix="formal-r3-stage-binding-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-stage-binding-") as name:
         root = Path(name)
         controller = root / "controller.py"
         source = root / "source"
@@ -3046,7 +3051,12 @@ def assert_source_inventory_matches(expected, observed, *, label):
 
 
 def _make_wrapper_fixture(
-    case_root: Path, lock_root: Path, *, pause_before_revalidation: bool = False
+    case_root: Path,
+    lock_anchor: Path,
+    lock_root: Path,
+    *,
+    pause_before_revalidation: bool = False,
+    reported_euid: int | None = None,
 ) -> tuple[Path, Path, Path, dict[str, str]]:
     case_root.mkdir(mode=0o700)
     os.chmod(case_root, 0o700)
@@ -3067,7 +3077,7 @@ named = os.lstat(lock_path)
 if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
     raise RuntimeError("descriptor 9 is not a single-link regular lock")
 if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
-    raise RuntimeError("descriptor 9 is not the named R3 lock")
+    raise RuntimeError("descriptor 9 is not the named R4 lock")
 if os.get_inheritable(9) is not True:
     raise RuntimeError("descriptor 9 did not survive exec")
 if os.environ.get("FASTWAM_CONTROL_NODE") != "ssh970":
@@ -3083,7 +3093,7 @@ with open(marker_path, "xb") as handle:
 
     wrapper_text = WRAPPER.read_text(encoding="utf-8")
     preflight_start = wrapper_text.index('"${CONTROL_PYTHON}" -I -c')
-    lock_assignment = wrapper_text.index('LOCK_ROOT="', preflight_start)
+    lock_assignment = wrapper_text.index('LOCK_ANCHOR="', preflight_start)
     wrapper_text = (
         wrapper_text[:preflight_start]
         + '"${CONTROL_PYTHON}" -B -I -S -c \'pass\'\n'
@@ -3096,7 +3106,8 @@ with open(marker_path, "xb") as handle:
         "CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12": (
             f"CONTROL_PYTHON_TARGET={json.dumps(str(interpreter_target))}"
         ),
-        'LOCK_ROOT="/tmp/fastwam-dlc-submit-state/workspace-270969"': (
+        'LOCK_ANCHOR="/run"': f"LOCK_ANCHOR={json.dumps(str(lock_anchor))}",
+        'LOCK_ROOT="/run/fastwam-dlc-submit-state/workspace-270969"': (
             f"LOCK_ROOT={json.dumps(str(lock_root))}"
         ),
     }
@@ -3109,16 +3120,23 @@ with open(marker_path, "xb") as handle:
         {
             "SSH_CONNECTION": "127.0.0.1 12345 127.0.0.1 970",
             "FASTWAM_WRAPPER_EXPECTED_LOCK": str(
-                lock_root / "action-n234-formal-r3-controller.lock"
+                lock_root / "action-n234-formal-r4-controller.lock"
             ),
             "FASTWAM_WRAPPER_CONTROLLER_MARKER": str(marker),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
+    bootstrap_imports = ""
+    if reported_euid is not None:
+        environment["FASTWAM_LOCK_TEST_REPORTED_EUID"] = str(reported_euid)
+        bootstrap_imports += (
+            'os.geteuid = lambda: int('
+            'os.environ["FASTWAM_LOCK_TEST_REPORTED_EUID"])\n'
+        )
     if pause_before_revalidation:
         ready = case_root / "lock-bootstrap-ready"
         release = case_root / "lock-bootstrap-release"
-        wrapper_text = wrapper_text.replace("import sys\n", "import sys\nimport time\n", 1)
+        bootstrap_imports += "import time\n"
         injection = """        ready_path = os.environ["FASTWAM_LOCK_TEST_READY"]
         release_path = os.environ["FASTWAM_LOCK_TEST_RELEASE"]
         ready_fd = os.open(
@@ -3141,13 +3159,18 @@ with open(marker_path, "xb") as handle:
         environment["FASTWAM_LOCK_TEST_READY"] = str(ready)
         environment["FASTWAM_LOCK_TEST_RELEASE"] = str(release)
 
+    assert wrapper_text.count("import sys\n") == 1
+    wrapper_text = wrapper_text.replace(
+        "import sys\n", f"import sys\n{bootstrap_imports}", 1
+    )
+
     wrapper = case_root / "submit_from_ssh970.sh"
     wrapper.write_text(wrapper_text, encoding="utf-8")
     wrapper.chmod(0o700)
     return wrapper, marker, interpreter_target, environment
 
 
-def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
+def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
     wrapper_text = WRAPPER.read_text(encoding="utf-8")
     assert '[[ -n "${SSH_CONNECTION:-}" ]]' in wrapper_text
     control_python = (
@@ -3164,11 +3187,16 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
     assert 'environment["FASTWAM_CONTROL_NODE"] = "ssh970"' in wrapper_text
     assert 'environment["FASTWAM_LOCK_FD"] = str(expected_lock_fd)' in wrapper_text
     assert 'environment["PYTHONDONTWRITEBYTECODE"] = "1"' in wrapper_text
-    assert "action-n234-formal-r3-controller.lock" in wrapper_text
+    assert 'LOCK_ANCHOR="/run"' in wrapper_text
+    assert 'LOCK_ROOT="/run/fastwam-dlc-submit-state/workspace-270969"' in wrapper_text
+    assert "action-n234-formal-r4-controller.lock" in wrapper_text
     assert "action-n234-formal-controller.lock" not in wrapper_text
     assert "exec 9>" not in wrapper_text
     assert "flock -n 9" not in wrapper_text
     assert "os.O_NOFOLLOW" in wrapper_text
+    assert "opened.st_uid != os.geteuid()" in wrapper_text
+    assert "stat.S_IMODE(opened.st_mode) & 0o022" in wrapper_text
+    assert "validate_anchor(anchor_fd)" in wrapper_text
     assert "dir_fd=parent_fd" in wrapper_text
     assert "validate_private_directory(*edge)" in wrapper_text
     assert "validate_lock(parent_fd, lock_fd)" in wrapper_text
@@ -3177,18 +3205,27 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
     assert "os.execve(" in wrapper_text
     assert '[control_python, "-B", "-I", controller, *controller_args]' in wrapper_text
     assert "/usr/bin/python3" not in wrapper_text
+    expected_lock = str(module.CONTROL_LOCK_PATH)
+    assert expected_lock == (
+        "/run/fastwam-dlc-submit-state/workspace-270969/"
+        "action-n234-formal-r4-controller.lock"
+    )
+    assert expected_lock in README.read_text(encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(
-        prefix="formal-r3-real-wrapper-", dir="/tmp"
-    ) as base_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r4-real-wrapper-") as base_name:
         base = Path(base_name)
         os.chmod(base, 0o700)
 
         positive_case = base / "positive"
-        positive_root = positive_case / "state" / "workspace"
+        positive_anchor = positive_case / "anchor"
+        positive_root = positive_anchor / "state" / "workspace"
         positive_wrapper, positive_marker, _target, positive_env = (
-            _make_wrapper_fixture(positive_case, positive_root)
+            _make_wrapper_fixture(positive_case, positive_anchor, positive_root)
         )
+        positive_anchor.mkdir(mode=0o755)
+        os.chmod(positive_anchor, 0o755)
+        assert stat.S_IMODE(os.lstat(positive_anchor).st_mode) == 0o755
+        assert not os.lstat(positive_anchor).st_mode & stat.S_ISVTX
         positive = subprocess.run(
             ["/bin/bash", str(positive_wrapper)],
             env=positive_env,
@@ -3199,23 +3236,125 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
         assert positive.returncode == 0, positive.stderr
         assert positive_marker.read_bytes() == b"controller-ran\n"
         lock_metadata = os.lstat(
-            positive_root / "action-n234-formal-r3-controller.lock"
+            positive_root / "action-n234-formal-r4-controller.lock"
         )
         assert stat.S_ISREG(lock_metadata.st_mode)
         assert stat.S_IMODE(lock_metadata.st_mode) == 0o600
         assert lock_metadata.st_nlink == 1
+        assert stat.S_IMODE(os.lstat(positive_anchor / "state").st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(positive_root).st_mode) == 0o700
+
+        for label, unsafe_mode in (("world-writable", 0o777), ("other-writable", 0o757)):
+            unsafe_case = base / label
+            unsafe_anchor = unsafe_case / "anchor"
+            unsafe_root = unsafe_anchor / "state" / "workspace"
+            unsafe_wrapper, unsafe_marker, _target, unsafe_env = (
+                _make_wrapper_fixture(unsafe_case, unsafe_anchor, unsafe_root)
+            )
+            unsafe_anchor.mkdir(mode=0o700)
+            os.chmod(unsafe_anchor, unsafe_mode)
+            assert not os.lstat(unsafe_anchor).st_mode & stat.S_ISVTX
+            rejected_unsafe = subprocess.run(
+                ["/bin/bash", str(unsafe_wrapper)],
+                env=unsafe_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert rejected_unsafe.returncode != 0
+            assert "unsafe controller lock anchor" in rejected_unsafe.stderr
+            assert not (unsafe_anchor / "state").exists()
+            assert not unsafe_marker.exists()
+
+        wrong_owner_case = base / "wrong-owner"
+        wrong_owner_anchor = wrong_owner_case / "anchor"
+        wrong_owner_root = wrong_owner_anchor / "state" / "workspace"
+        wrong_owner_wrapper, wrong_owner_marker, _target, wrong_owner_env = (
+            _make_wrapper_fixture(
+                wrong_owner_case,
+                wrong_owner_anchor,
+                wrong_owner_root,
+                reported_euid=os.geteuid() + 1,
+            )
+        )
+        wrong_owner_anchor.mkdir(mode=0o755)
+        os.chmod(wrong_owner_anchor, 0o755)
+        rejected_owner = subprocess.run(
+            ["/bin/bash", str(wrong_owner_wrapper)],
+            env=wrong_owner_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected_owner.returncode != 0
+        assert "unsafe controller lock anchor" in rejected_owner.stderr
+        assert not (wrong_owner_anchor / "state").exists()
+        assert not wrong_owner_marker.exists()
+
+        anchor_link_case = base / "anchor-symlink"
+        anchor_link = anchor_link_case / "anchor"
+        anchor_target = anchor_link_case / "anchor-target"
+        anchor_link_root = anchor_link / "state" / "workspace"
+        anchor_link_wrapper, anchor_link_marker, _target, anchor_link_env = (
+            _make_wrapper_fixture(
+                anchor_link_case, anchor_link, anchor_link_root
+            )
+        )
+        anchor_target.mkdir(mode=0o755)
+        os.chmod(anchor_target, 0o755)
+        anchor_link.symlink_to(anchor_target, target_is_directory=True)
+        rejected_anchor_link = subprocess.run(
+            ["/bin/bash", str(anchor_link_wrapper)],
+            env=anchor_link_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected_anchor_link.returncode != 0
+        assert not (anchor_target / "state").exists()
+        assert not anchor_link_marker.exists()
+
+        public_child_case = base / "public-child"
+        public_child_anchor = public_child_case / "anchor"
+        public_child_root = public_child_anchor / "state" / "workspace"
+        public_child_wrapper, public_child_marker, _target, public_child_env = (
+            _make_wrapper_fixture(
+                public_child_case, public_child_anchor, public_child_root
+            )
+        )
+        public_child_anchor.mkdir(mode=0o755)
+        os.chmod(public_child_anchor, 0o755)
+        public_state = public_child_anchor / "state"
+        public_state.mkdir(mode=0o755)
+        os.chmod(public_state, 0o755)
+        rejected_public_child = subprocess.run(
+            ["/bin/bash", str(public_child_wrapper)],
+            env=public_child_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected_public_child.returncode != 0
+        assert "unsafe controller lock directory component: state" in (
+            rejected_public_child.stderr
+        )
+        assert not public_child_root.exists()
+        assert not public_child_marker.exists()
 
         symlink_case = base / "symlink"
-        symlink_root = symlink_case / "state" / "workspace"
+        symlink_anchor = symlink_case / "anchor"
+        symlink_root = symlink_anchor / "state" / "workspace"
         symlink_wrapper, symlink_marker, _target, symlink_env = (
-            _make_wrapper_fixture(symlink_case, symlink_root)
+            _make_wrapper_fixture(symlink_case, symlink_anchor, symlink_root)
         )
-        state = symlink_case / "state"
+        symlink_anchor.mkdir(mode=0o755)
+        os.chmod(symlink_anchor, 0o755)
+        state = symlink_anchor / "state"
         state.mkdir(mode=0o700)
         symlink_root.mkdir(mode=0o700)
         lock_target = symlink_case / "lock-target"
         lock_target.write_bytes(b"must-not-be-truncated\n")
-        lock_link = symlink_root / "action-n234-formal-r3-controller.lock"
+        lock_link = symlink_root / "action-n234-formal-r4-controller.lock"
         lock_link.symlink_to(lock_target)
         rejected_link = subprocess.run(
             ["/bin/bash", str(symlink_wrapper)],
@@ -3228,15 +3367,48 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
         assert lock_target.read_bytes() == b"must-not-be-truncated\n"
         assert not symlink_marker.exists()
 
+        hardlink_case = base / "hardlink"
+        hardlink_anchor = hardlink_case / "anchor"
+        hardlink_root = hardlink_anchor / "state" / "workspace"
+        hardlink_wrapper, hardlink_marker, _target, hardlink_env = (
+            _make_wrapper_fixture(hardlink_case, hardlink_anchor, hardlink_root)
+        )
+        hardlink_anchor.mkdir(mode=0o755)
+        os.chmod(hardlink_anchor, 0o755)
+        hardlink_state = hardlink_anchor / "state"
+        hardlink_state.mkdir(mode=0o700)
+        hardlink_root.mkdir(mode=0o700)
+        hardlink_target = hardlink_case / "lock-target"
+        hardlink_target.write_bytes(b"must-remain-single-payload\n")
+        os.chmod(hardlink_target, 0o600)
+        hardlink_path = hardlink_root / "action-n234-formal-r4-controller.lock"
+        os.link(hardlink_target, hardlink_path)
+        rejected_hardlink = subprocess.run(
+            ["/bin/bash", str(hardlink_wrapper)],
+            env=hardlink_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected_hardlink.returncode != 0
+        assert "unsafe R4 controller lock file" in rejected_hardlink.stderr
+        assert hardlink_target.read_bytes() == b"must-remain-single-payload\n"
+        assert os.lstat(hardlink_target).st_nlink == 2
+        assert not hardlink_marker.exists()
+
         replacement_case = base / "ancestor-replacement"
-        replacement_root = replacement_case / "state" / "workspace"
+        replacement_anchor = replacement_case / "anchor"
+        replacement_root = replacement_anchor / "state" / "workspace"
         replacement_wrapper, replacement_marker, _target, replacement_env = (
             _make_wrapper_fixture(
                 replacement_case,
+                replacement_anchor,
                 replacement_root,
                 pause_before_revalidation=True,
             )
         )
+        replacement_anchor.mkdir(mode=0o755)
+        os.chmod(replacement_anchor, 0o755)
         process = subprocess.Popen(
             ["/bin/bash", str(replacement_wrapper)],
             env=replacement_env,
@@ -3258,9 +3430,9 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
                 raise AssertionError("lock bootstrap did not reach revalidation point")
             time.sleep(0.01)
 
-        opened_state = replacement_case / "state-opened-by-wrapper"
-        (replacement_case / "state").rename(opened_state)
-        new_state = replacement_case / "state"
+        opened_state = replacement_anchor / "state-opened-by-wrapper"
+        (replacement_anchor / "state").rename(opened_state)
+        new_state = replacement_anchor / "state"
         new_state.mkdir(mode=0o700)
         (new_state / "workspace").mkdir(mode=0o700)
         Path(replacement_env["FASTWAM_LOCK_TEST_RELEASE"]).write_bytes(b"release\n")
@@ -3274,6 +3446,61 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
         assert "unsafe controller lock directory component" in stderr
         assert not replacement_marker.exists()
 
+        concurrent_anchor = base / "concurrent-anchor"
+        concurrent_root = concurrent_anchor / "state" / "workspace"
+        holder_case = base / "concurrent-holder"
+        holder_wrapper, holder_marker, _target, holder_env = _make_wrapper_fixture(
+            holder_case,
+            concurrent_anchor,
+            concurrent_root,
+            pause_before_revalidation=True,
+        )
+        waiter_case = base / "concurrent-waiter"
+        waiter_wrapper, waiter_marker, _target, waiter_env = _make_wrapper_fixture(
+            waiter_case, concurrent_anchor, concurrent_root
+        )
+        concurrent_anchor.mkdir(mode=0o755)
+        os.chmod(concurrent_anchor, 0o755)
+        holder = subprocess.Popen(
+            ["/bin/bash", str(holder_wrapper)],
+            env=holder_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        holder_ready = Path(holder_env["FASTWAM_LOCK_TEST_READY"])
+        deadline = time.monotonic() + 10
+        while not holder_ready.exists():
+            if holder.poll() is not None:
+                stdout, stderr = holder.communicate()
+                raise AssertionError(
+                    f"lock holder exited before contention: {stdout} {stderr}"
+                )
+            if time.monotonic() >= deadline:
+                holder.kill()
+                holder.communicate()
+                raise AssertionError("lock holder did not reach contention point")
+            time.sleep(0.01)
+        rejected_waiter = subprocess.run(
+            ["/bin/bash", str(waiter_wrapper)],
+            env=waiter_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected_waiter.returncode != 0
+        assert "another formal R4 controller is active" in rejected_waiter.stderr
+        assert not waiter_marker.exists()
+        Path(holder_env["FASTWAM_LOCK_TEST_RELEASE"]).write_bytes(b"release\n")
+        try:
+            holder_stdout, holder_stderr = holder.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.communicate()
+            raise AssertionError("lock holder hung after contention release")
+        assert holder.returncode == 0, f"{holder_stdout} {holder_stderr}"
+        assert holder_marker.read_bytes() == b"controller-ran\n"
+
 
 def main() -> None:
     module = load_controller()
@@ -3281,7 +3508,7 @@ def main() -> None:
     for member in module.MEMBERS:
         assert_request(module, member)
     test_controller_structure(module)
-    test_r3_controller_lock_binds_fd_to_exact_path(module)
+    test_r4_controller_lock_binds_fd_to_exact_path(module)
     test_controller_exclusive_writer_fails_closed(module)
     test_downstream_submit_requires_n2_scientific_completion(module)
     test_downstream_gate_rejects_cross_record_drift_before_submission(module)
@@ -3309,7 +3536,7 @@ def main() -> None:
     test_runtime_structure()
     test_runtime_durable_writers_fail_closed()
     test_runtime_staged_copy_uses_prepared_inventory_counterexample()
-    test_wrapper_uses_pinned_nofollow_lock_bootstrap()
+    test_wrapper_uses_pinned_nofollow_lock_bootstrap(module)
     print("PASS: formal N=2/3/4 full-weight three-world launcher contract")
 
 

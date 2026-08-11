@@ -1,23 +1,24 @@
-# FASTWAM native-agent N=2/3/4 formal DLC launcher R3
+# FASTWAM native-agent N=2/3/4 formal DLC launcher R4
 
 This directory contains a prepare-first, fail-closed 1 Worker x 8 GPU launcher
 for three action-only runs under a canary promotion policy.  N=2 is submitted
 first; N=3 and N=4 are eligible only after the same suite's N=2 run has durable,
 structured scientific-completion evidence.  Nothing in this directory has
-been submitted by creating or testing these files.  R3 uses new experiment
+been submitted by creating or testing these files.  R4 uses new experiment
 IDs, run IDs, output roots, suite/member ledger paths, and a distinct controller
-lock; the submitted R1 identities and durable records are never reused.
+lock; prior formal identities and durable records are never reused.
 
-The frozen R3 suite ID is
-`FASTWAM-MR-ACTION-N234-FORMAL-R3-20260812`; its immutable source is
-`/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r3-20260812-r1`,
+The frozen R4 suite ID is
+`FASTWAM-MR-ACTION-N234-FORMAL-R4-20260812`; its immutable source is
+`/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r4-20260812-r1`,
 its output prefix is
-`/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812`, and its
+`/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812`, and its
 control lock is
-`/tmp/fastwam-dlc-submit-state/workspace-270969/action-n234-formal-r3-controller.lock`.
-The three experiment IDs end in `N2-PLACEFOOD-1K-S42-R3-20260812`,
-`N3-POOL-1K-S42-R3-20260812`, and `N4-STACKCUBE-1K-S42-R3-20260812`;
-their run IDs use the corresponding `-r3-20260812` suffix.
+`/run/fastwam-dlc-submit-state/workspace-270969/action-n234-formal-r4-controller.lock`.
+The three experiment IDs end in `N2-PLACEFOOD-1K-S42-R4-20260812`,
+`N3-POOL-1K-S42-R4-20260812`, and `N4-STACKCUBE-1K-S42-R4-20260812`;
+their run IDs use the corresponding `-r4-20260812` suffix and display names
+use the corresponding `-r4` suffix.
 
 The frozen experiment matrix is N=2 PlaceFood-rf, N=3
 ThreeRobotsPlaceShoes-rf plus ThreeRobotsStackCube-rf, and N=4
@@ -59,8 +60,8 @@ pass does it create the new output parent, publish and read back all member
 reservations, publish the suite marker, and finally record local prepared
 state.  The suite marker is the atomic authorization boundary, not a rollback
 mechanism: if phase two stops after publishing only some member records, those
-records cannot authorize submission and the R3 identity must not be reused.
-A failed R2 identity is never resumed or reused.
+records cannot authorize submission and the R4 identity must not be reused.
+A failed prior identity is never resumed or reused.
 
 This no-hash contract deliberately does not claim content identity for a
 dataset directory or for a same-size replacement of a large checkpoint, VAE,
@@ -108,6 +109,14 @@ Run the local, network-free checks with:
 
 Invoke the controller only on ssh970 through `submit_from_ssh970.sh`; the
 wrapper pins and preflights the known PAI-SDK Python under `/mnt/workspace`.
+It opens the exact `/run` anchor with `O_NOFOLLOW`, requires both its named and
+opened identities to be the same real directory owned by the effective user,
+and rejects any group- or other-writable anchor.  Each descendant lock
+directory is opened relative to its validated parent and must be owned by the
+effective user with exact mode `0700`; the regular, single-link lock must have
+mode `0600`.  The wrapper revalidates the anchor, every directory edge, and the
+lock after taking the nonblocking flock, then carries that exact lock as file
+descriptor 9 through controller exec.
 With no explicit command it defaults to `prepare`; preparation validates paths and
 then applies the suite-wide two-phase protocol above but makes no DLC API
 mutation.  `submit` requires a single member plus its exact experiment ID and

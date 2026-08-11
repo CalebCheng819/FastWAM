@@ -31,15 +31,16 @@ CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12
 "${CONTROL_PYTHON}" -I -c \
   'import alibabacloud_credentials,alibabacloud_pai_dlc20201203,alibabacloud_tea_openapi,alibabacloud_tea_util' \
   || { echo "Error: pinned PAI SDK environment is incomplete" >&2; exit 1; }
-LOCK_ROOT="/tmp/fastwam-dlc-submit-state/workspace-270969"
-LOCK_NAME="action-n234-formal-r3-controller.lock"
+LOCK_ANCHOR="/run"
+LOCK_ROOT="/run/fastwam-dlc-submit-state/workspace-270969"
+LOCK_NAME="action-n234-formal-r4-controller.lock"
 
 # The pinned interpreter opens each component relative to an already validated
 # directory descriptor.  In particular, the lock is never opened by shell
 # redirection: no symlink is followed and no existing file is truncated before
 # its identity has been checked.  Descriptor 9 retains the flock across exec.
 exec "${CONTROL_PYTHON}" -B -I -S - \
-  "${LOCK_ROOT}" "${LOCK_NAME}" "${SCRIPT_DIR}/controller.py" \
+  "${LOCK_ANCHOR}" "${LOCK_ROOT}" "${LOCK_NAME}" "${SCRIPT_DIR}/controller.py" \
   "${CONTROL_PYTHON}" "$@" <<'PY'
 import errno
 import fcntl
@@ -48,8 +49,7 @@ import stat
 import sys
 
 
-lock_root, lock_name, controller, control_python, *controller_args = sys.argv[1:]
-tmp_root = "/tmp"
+lock_anchor, lock_root, lock_name, controller, control_python, *controller_args = sys.argv[1:]
 expected_lock_fd = 9
 
 
@@ -61,16 +61,17 @@ def identity(metadata):
     return metadata.st_dev, metadata.st_ino
 
 
-def validate_tmp(fd):
+def validate_anchor(fd):
     opened = os.fstat(fd)
-    named = os.lstat(tmp_root)
+    named = os.lstat(lock_anchor)
     if (
         not stat.S_ISDIR(opened.st_mode)
         or not stat.S_ISDIR(named.st_mode)
         or identity(opened) != identity(named)
-        or not (named.st_mode & stat.S_ISVTX)
+        or opened.st_uid != os.geteuid()
+        or stat.S_IMODE(opened.st_mode) & 0o022
     ):
-        fail("/tmp is not the pinned sticky directory used for the controller lock")
+        fail("unsafe controller lock anchor")
 
 
 def validate_private_directory(parent_fd, name, fd):
@@ -97,19 +98,22 @@ def validate_lock(parent_fd, fd):
         or opened.st_uid != os.geteuid()
         or stat.S_IMODE(opened.st_mode) != 0o600
     ):
-        fail("unsafe R3 controller lock file")
+        fail("unsafe R4 controller lock file")
 
 
+normal_anchor = os.path.normpath(lock_anchor)
 normal_root = os.path.normpath(lock_root)
 if (
-    not os.path.isabs(lock_root)
+    not os.path.isabs(lock_anchor)
+    or normal_anchor != lock_anchor
+    or not os.path.isabs(lock_root)
     or normal_root != lock_root
-    or os.path.commonpath((tmp_root, lock_root)) != tmp_root
-    or lock_root == tmp_root
+    or os.path.commonpath((lock_anchor, lock_root)) != lock_anchor
+    or lock_root == lock_anchor
     or "/../" in f"{lock_root}/"
 ):
-    fail("controller lock root must be a canonical child of /tmp")
-components = os.path.relpath(lock_root, tmp_root).split(os.sep)
+    fail("controller lock root must be a canonical child of the lock anchor")
+components = os.path.relpath(lock_root, lock_anchor).split(os.sep)
 if not components or any(part in ("", ".", "..") for part in components):
     fail("controller lock root contains an invalid component")
 if not lock_name or os.sep in lock_name or lock_name in (".", ".."):
@@ -121,12 +125,12 @@ directory_flags = (
     | os.O_NOFOLLOW
     | os.O_CLOEXEC
 )
-tmp_fd = os.open(tmp_root, directory_flags)
-directory_fds = [tmp_fd]
+anchor_fd = os.open(lock_anchor, directory_flags)
+directory_fds = [anchor_fd]
 directory_edges = []
 try:
-    validate_tmp(tmp_fd)
-    parent_fd = tmp_fd
+    validate_anchor(anchor_fd)
+    parent_fd = anchor_fd
     for component in components:
         try:
             os.mkdir(component, 0o700, dir_fd=parent_fd)
@@ -151,11 +155,11 @@ try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
             if error.errno in (errno.EACCES, errno.EAGAIN):
-                fail("another formal R3 controller is active")
+                fail("another formal R4 controller is active")
             raise
 
         # LOCK_TEST_REVALIDATION_POINT
-        validate_tmp(tmp_fd)
+        validate_anchor(anchor_fd)
         for edge in directory_edges:
             validate_private_directory(*edge)
         validate_lock(parent_fd, lock_fd)
