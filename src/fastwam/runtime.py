@@ -17,6 +17,7 @@ from .utils.pytorch_utils import set_global_seed
 from .utils.video_io import save_mp4
 from .utils import misc
 from .runtime_provenance import publish_rank_zero_file, rank_and_world_from_environment
+from .nohash_artifacts import publish_rank_zero_payload
 
 logger = get_logger(__name__)
 
@@ -173,6 +174,7 @@ def create_multi_robot_fastwam(
     action_scheduler=None,
     loss=None,
     training_mode: str = "action_only_cache",
+    checkpoint_integrity_mode: str = "sha256",
     mot_checkpoint_mixed_attn: bool = True,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
@@ -215,6 +217,7 @@ def create_multi_robot_fastwam(
         skip_dit_load_from_pretrain=bool(skip_dit_load_from_pretrain),
         mot_checkpoint_mixed_attn=bool(mot_checkpoint_mixed_attn),
         training_mode=str(training_mode),
+        checkpoint_integrity_mode=str(checkpoint_integrity_mode),
         video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
         video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
         video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
@@ -460,23 +463,63 @@ def run_training(cfg: DictConfig):
         config_timeout = float(os.environ.get("FASTWAM_CONFIG_BARRIER_TIMEOUT", "300"))
     except ValueError as error:
         raise RuntimeError("FASTWAM_CONFIG_BARRIER_TIMEOUT must be numeric") from error
-    config_sha256 = publish_rank_zero_file(
-        Path(cfg.output_dir) / config_filename,
-        config_payload,
-        rank=rank,
-        world_size=world_size,
-        timeout_seconds=config_timeout,
-    )
+    artifact_integrity_mode = str(
+        cfg.get("artifact_integrity_mode", "sha256")
+    ).strip().lower()
+    if artifact_integrity_mode not in {"sha256", "metadata_no_hash"}:
+        raise ValueError(
+            "artifact_integrity_mode must be 'sha256' or 'metadata_no_hash', "
+            f"got {artifact_integrity_mode!r}"
+        )
+    if (
+        artifact_integrity_mode == "metadata_no_hash"
+        and not formal_n4_gate
+        and cfg.get("resume", None) not in (None, "", "null")
+    ):
+        resume_name = Path(str(cfg.resume)).expanduser().name
+        if not resume_name or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for character in resume_name
+        ):
+            raise ValueError(
+                "metadata_no_hash resume directory name must contain only "
+                f"letters, digits, '_' or '-': {resume_name!r}"
+            )
+        # A resumed process has a deliberately different resolved config.  Give
+        # it a one-shot record keyed by the selected state directory instead of
+        # replacing the original launch record.
+        config_filename = f"config.resume.{resume_name}.yaml"
+    if artifact_integrity_mode == "metadata_no_hash":
+        config_identity = publish_rank_zero_payload(
+            Path(cfg.output_dir) / config_filename,
+            config_payload,
+            rank=rank,
+            world_size=world_size,
+            timeout_seconds=config_timeout,
+        )
+        # Terminal hash sealing is disabled for this mode.  Keep the legacy
+        # call signature explicit without inventing a digest for the config.
+        config_sha256 = ""
+    else:
+        config_identity = publish_rank_zero_file(
+            Path(cfg.output_dir) / config_filename,
+            config_payload,
+            rank=rank,
+            world_size=world_size,
+            timeout_seconds=config_timeout,
+        )
+        config_sha256 = config_identity
     # Accelerator is instantiated later in the trainer, so the hash-qualified
     # ready marker above is the required pre-process-group barrier.  If a caller
     # initialized torch.distributed early, preserve a real collective barrier too.
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
     logger.info(
-        "Resolved config barrier passed: rank=%d world_size=%d sha256=%s",
+        "Resolved config barrier passed: rank=%d world_size=%d integrity_mode=%s identity=%s",
         rank,
         world_size,
-        config_sha256,
+        artifact_integrity_mode,
+        config_identity,
     )
 
     model_device = _resolve_train_device()

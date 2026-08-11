@@ -18,12 +18,18 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--val-set-proportion", type=float, default=0.1)
+    parser.add_argument(
+        "--integrity-mode",
+        choices=("legacy_hash", "metadata_no_hash"),
+        default="legacy_hash",
+    )
     args = parser.parse_args()
 
     payload = compute_robofactory_stats(
         args.root_dir,
         split_seed=args.split_seed,
         val_set_proportion=args.val_set_proportion,
+        integrity_mode=args.integrity_mode,
     )
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,63 @@
+# @package _global_
+
+# Recovery-validation profile for the N=2 PlaceFood action policy.  This is a
+# two-step save -> fresh-process resume gate, not a terminal research run.
+defaults:
+  - robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5
+  - _self_
+
+artifact_integrity_mode: metadata_no_hash
+max_steps: 2
+log_every: 1
+save_every: 1
+recovery_gate_stop_after_checkpoint_step: 1
+eval_every: 0
+offline_eval_num_samples: 0
+num_workers: 0
+gradient_accumulation_steps: 1
+
+# The launcher stages the official full checkpoint into a private local path
+# and supplies it explicitly.  Resume state is written beneath output_dir.
+resume: null
+init_weights: ${oc.env:FASTWAM_INITIAL_CHECKPOINT}
+checkpoint_state_kind: full
+save_training_state: true
+save_final_checkpoint: true
+
+# Hash-sealed terminal contracts belong to the formal training path and are
+# intentionally disabled for this recovery gate.
+seal_training_state: false
+seal_training_run: false
+terminal_rehash_weights: false
+training_terminal_contract: null
+training_run_profile: null
+training_task_scope_receipt: null
+
+model:
+  checkpoint_integrity_mode: metadata_no_hash
+
+data:
+  train:
+    integrity_mode: metadata_no_hash
+    pretrained_norm_stats: ${oc.env:FASTWAM_N234_NOHASH_STATS}
+    text_embedding_cache_files:
+      PlaceFood-rf: 89bc0bd3ed4a9f6192e149614112915dbd94d0b323d714e2da3c89bb68f6e26a.t5_len128.wan22ti2v5b.pt
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+    gaussian_fallback_cache_dir: ${oc.env:FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR}
+    gaussian_fallback_projection: opacity-aware-moment-matching-cell-mean-alpha-v2
+  val:
+    integrity_mode: metadata_no_hash
+    pretrained_norm_stats: ${oc.env:FASTWAM_N234_NOHASH_STATS}
+    text_embedding_cache_files:
+      PlaceFood-rf: 89bc0bd3ed4a9f6192e149614112915dbd94d0b323d714e2da3c89bb68f6e26a.t5_len128.wan22ti2v5b.pt
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+    gaussian_fallback_cache_dir: ${oc.env:FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR}
+    gaussian_fallback_projection: opacity-aware-moment-matching-cell-mean-alpha-v2
+
+wandb:
+  enabled: false
+  name: fastwam-ft-n2-placefood-nohash-recovery-gate-s42

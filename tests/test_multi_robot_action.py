@@ -1,6 +1,9 @@
+import os
+
 import pytest
 import torch
 
+import fastwam.models.wan22.fastwam_multi_robot as fastwam_multi_robot_module
 from fastwam.models.wan22.fastwam_multi_robot import FastWAMMultiRobot
 from fastwam.models.wan22.mot import MoT
 from fastwam.models.wan22.multi_agent_action_dit import (
@@ -984,6 +987,198 @@ def test_native_v2_top_level_rejects_treatment_mismatch(
         model.load_checkpoint(checkpoint)
 
 
+def test_native_v2_full_can_initialize_across_treatments(tmp_path):
+    source = _bare_checkpoint_model(
+        training_mode="joint",
+        trainable_scope="dit",
+    )
+    checkpoint = tmp_path / "joint-full.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    target = _bare_checkpoint_model(
+        training_mode="action_only_cache",
+        trainable_scope="action",
+    )
+
+    target.load_initialization_checkpoint(checkpoint)
+
+    for key, value in source.mot.state_dict().items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+    assert target._loaded_base_checkpoint == str(checkpoint.resolve())
+
+
+def test_initialization_rejects_wrong_expected_sha_before_deserialization(
+    tmp_path, monkeypatch
+):
+    authorized = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    unauthorized = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    authorized_path = tmp_path / "authorized.pt"
+    live_path = tmp_path / "live.pt"
+    torch.save(_native_full_payload(authorized), authorized_path)
+    torch.save(_native_full_payload(unauthorized), live_path)
+    expected_sha256 = FastWAMMultiRobot._checkpoint_sha256(authorized_path)
+    target = _bare_checkpoint_model(
+        training_mode="action_only_cache", trainable_scope="action"
+    )
+    before = _cloned_state(target.mot)
+
+    def forbidden_torch_load(*args, **kwargs):
+        raise AssertionError("digest mismatch must fail before torch.load")
+
+    monkeypatch.setattr(
+        fastwam_multi_robot_module.torch, "load", forbidden_torch_load
+    )
+    with pytest.raises(ValueError, match="Initialization checkpoint SHA-256 mismatch"):
+        target.load_initialization_checkpoint(
+            live_path, expected_sha256=expected_sha256
+        )
+
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_initialization_rejects_atomic_path_replacement_before_model_mutation(
+    tmp_path, monkeypatch
+):
+    authorized = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    replacement = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    live_path = tmp_path / "live.pt"
+    replacement_path = tmp_path / "replacement.pt"
+    torch.save(_native_full_payload(authorized), live_path)
+    torch.save(_native_full_payload(replacement), replacement_path)
+    expected_sha256 = FastWAMMultiRobot._checkpoint_sha256(live_path)
+    target = _bare_checkpoint_model(
+        training_mode="action_only_cache", trainable_scope="action"
+    )
+    before = _cloned_state(target.mot)
+    original_torch_load = fastwam_multi_robot_module.torch.load
+
+    def replacing_torch_load(checkpoint_file, *args, **kwargs):
+        os.replace(replacement_path, live_path)
+        return original_torch_load(checkpoint_file, *args, **kwargs)
+
+    monkeypatch.setattr(
+        fastwam_multi_robot_module.torch, "load", replacing_torch_load
+    )
+    with pytest.raises(RuntimeError, match="Checkpoint changed"):
+        target.load_initialization_checkpoint(
+            live_path, expected_sha256=expected_sha256
+        )
+
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_initialization_rejects_leaf_symlink_before_model_mutation(tmp_path):
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    real_path = tmp_path / "real.pt"
+    symlink_path = tmp_path / "checkpoint.pt"
+    torch.save(_native_full_payload(source), real_path)
+    expected_sha256 = FastWAMMultiRobot._checkpoint_sha256(real_path)
+    symlink_path.symlink_to(real_path)
+    target = _bare_checkpoint_model()
+    before = _cloned_state(target.mot)
+
+    with pytest.raises(ValueError, match="must not be a symlink"):
+        target.load_initialization_checkpoint(
+            symlink_path, expected_sha256=expected_sha256
+        )
+
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_initialization_rejects_symlinked_ancestor_before_model_mutation(tmp_path):
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    real_directory = tmp_path / "real"
+    real_directory.mkdir()
+    real_path = real_directory / "checkpoint.pt"
+    torch.save(_native_full_payload(source), real_path)
+    expected_sha256 = FastWAMMultiRobot._checkpoint_sha256(real_path)
+    alias_directory = tmp_path / "alias"
+    alias_directory.symlink_to(real_directory, target_is_directory=True)
+    target = _bare_checkpoint_model()
+    before = _cloned_state(target.mot)
+
+    with pytest.raises(ValueError, match="must not traverse symlinks"):
+        target.load_initialization_checkpoint(
+            alias_directory / real_path.name,
+            expected_sha256=expected_sha256,
+        )
+
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_initialization_rejects_hardlink_before_model_mutation(tmp_path):
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    real_path = tmp_path / "real.pt"
+    hardlink_path = tmp_path / "checkpoint.pt"
+    torch.save(_native_full_payload(source), real_path)
+    expected_sha256 = FastWAMMultiRobot._checkpoint_sha256(real_path)
+    os.link(real_path, hardlink_path)
+    target = _bare_checkpoint_model()
+    before = _cloned_state(target.mot)
+
+    with pytest.raises(ValueError, match="must not be hard-linked"):
+        target.load_initialization_checkpoint(
+            hardlink_path, expected_sha256=expected_sha256
+        )
+
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_initialization_rejects_in_place_mutation_before_model_mutation(
+    tmp_path, monkeypatch
+):
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    checkpoint = tmp_path / "checkpoint.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    expected_sha256 = FastWAMMultiRobot._checkpoint_sha256(checkpoint)
+    target = _bare_checkpoint_model()
+    before = _cloned_state(target.mot)
+    original_torch_load = fastwam_multi_robot_module.torch.load
+
+    def mutating_torch_load(checkpoint_file, *args, **kwargs):
+        payload = original_torch_load(checkpoint_file, *args, **kwargs)
+        descriptor = os.open(checkpoint, os.O_RDWR)
+        try:
+            original_byte = os.pread(descriptor, 1, 0)
+            assert len(original_byte) == 1
+            os.pwrite(descriptor, bytes([original_byte[0] ^ 0xFF]), 0)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return payload
+
+    monkeypatch.setattr(
+        fastwam_multi_robot_module.torch, "load", mutating_torch_load
+    )
+    with pytest.raises(RuntimeError, match="Checkpoint changed"):
+        target.load_initialization_checkpoint(
+            checkpoint, expected_sha256=expected_sha256
+        )
+
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_sparse_checkpoint_cannot_be_used_as_initialization(tmp_path):
+    source = _bare_checkpoint_model()
+    base_checkpoint = tmp_path / "base.pt"
+    torch.save(_legacy_mot_payload(source), base_checkpoint)
+    source.load_checkpoint(base_checkpoint)
+    sparse_checkpoint = tmp_path / "sparse.pt"
+    source.save_checkpoint(sparse_checkpoint)
+
+    with pytest.raises(ValueError, match="requires state_kind='full'"):
+        _bare_checkpoint_model().load_initialization_checkpoint(sparse_checkpoint)
+
+
 def test_native_v2_top_level_rejects_architecture_extra_key(tmp_path):
     model = _bare_checkpoint_model()
     payload = _native_full_payload(model)
@@ -1181,6 +1376,59 @@ def test_sparse_v2_rejects_base_hash_mismatch(tmp_path):
 
     with pytest.raises(ValueError, match="Base checkpoint SHA-256 mismatch"):
         _bare_checkpoint_model().load_checkpoint(corrupt_checkpoint)
+
+
+def test_sparse_save_rejects_changed_loaded_base(tmp_path):
+    source = _bare_checkpoint_model()
+    base_checkpoint = tmp_path / "official-base.pt"
+    torch.save(_legacy_mot_payload(source), base_checkpoint)
+    source.load_checkpoint(base_checkpoint)
+
+    replacement = _bare_checkpoint_model()
+    torch.save(_legacy_mot_payload(replacement), base_checkpoint)
+    sparse_checkpoint = tmp_path / "sparse.pt"
+
+    with pytest.raises(RuntimeError, match="changed before sparse save"):
+        source.save_checkpoint(sparse_checkpoint)
+    assert not sparse_checkpoint.exists()
+
+
+def test_sparse_load_rejects_recursive_base_path_replacement_before_mutation(
+    tmp_path, monkeypatch
+):
+    source = _bare_checkpoint_model()
+    base_checkpoint = tmp_path / "official-base.pt"
+    torch.save(_legacy_mot_payload(source), base_checkpoint)
+    source.load_checkpoint(base_checkpoint)
+    sparse_checkpoint = tmp_path / "sparse.pt"
+    source.save_checkpoint(sparse_checkpoint)
+
+    replacement = _bare_checkpoint_model()
+    replacement_path = tmp_path / "replacement-base.pt"
+    torch.save(_legacy_mot_payload(replacement), replacement_path)
+    target = _bare_checkpoint_model()
+    before = _cloned_state(target.mot)
+    original_torch_load = fastwam_multi_robot_module.torch.load
+    load_count = 0
+
+    def replacing_recursive_base_load(checkpoint_file, *args, **kwargs):
+        nonlocal load_count
+        load_count += 1
+        if load_count == 2:
+            os.replace(replacement_path, base_checkpoint)
+        return original_torch_load(checkpoint_file, *args, **kwargs)
+
+    monkeypatch.setattr(
+        fastwam_multi_robot_module.torch,
+        "load",
+        replacing_recursive_base_load,
+    )
+    with pytest.raises(RuntimeError, match="Checkpoint changed"):
+        target.load_checkpoint(sparse_checkpoint)
+
+    assert load_count == 2
+    for key, value in before.items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
 
 
 def test_sparse_v2_native_full_base_allows_different_mode_and_scope(tmp_path):

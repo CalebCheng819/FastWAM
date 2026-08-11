@@ -23,6 +23,7 @@ def main():
     parser.add_argument("--scope", default=None)
     parser.add_argument("--agent-count", type=int, default=None)
     parser.add_argument("--required-agent-counts", type=int, nargs="+", default=None)
+    parser.add_argument("--required-tasks", nargs="+", default=None)
     parser.add_argument("--stats", default=None)
     parser.add_argument("--text-cache", default=None)
     parser.add_argument("--video-height", type=int, default=None)
@@ -38,6 +39,8 @@ def main():
     dataset_overrides = {}
     if args.required_agent_counts is not None:
         dataset_overrides["required_agent_counts"] = args.required_agent_counts
+    if args.required_tasks is not None:
+        dataset_overrides["required_tasks"] = args.required_tasks
     if args.stats is not None:
         dataset_overrides["pretrained_norm_stats"] = args.stats
     if args.text_cache is not None:
@@ -74,7 +77,16 @@ def main():
     print("SMOKE phase=model_init", flush=True)
     model = instantiate(cfg.model, model_dtype=torch.bfloat16, device=args.device)
     print("SMOKE phase=load_checkpoint", flush=True)
-    model.load_checkpoint(str(cfg.resume))
+    resume = cfg.get("resume")
+    init_weights = cfg.get("init_weights")
+    if resume and init_weights:
+        raise ValueError("`resume` and `init_weights` are mutually exclusive")
+    if not resume and not init_weights:
+        raise ValueError("Smoke requires exactly one of `resume` or `init_weights`")
+    if init_weights:
+        model.load_initialization_checkpoint(str(init_weights))
+    else:
+        model.load_checkpoint(str(resume))
     scope = str(cfg.trainable_scope) if args.scope is None else args.scope
     params = model.configure_trainable_parameters(scope)
     print(

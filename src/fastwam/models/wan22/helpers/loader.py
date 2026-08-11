@@ -16,6 +16,7 @@ from fastwam.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
 SKIPPED_PRETRAIN_SENTINEL = "SKIPPED_PRETRAIN"
+CHECKPOINT_INTEGRITY_MODES = {"sha256", "metadata_no_hash"}
 
 
 @dataclass
@@ -92,19 +93,40 @@ def _load_registered_model(
     torch_dtype: torch.dtype,
     device: str,
     model_kwargs_override: dict[str, Any] | None = None,
+    checkpoint_integrity_mode: str = "sha256",
 ):
-    model_hash = hash_model_file(path)
-
-    matched_config = None
-    for config in WAN22_MODEL_REGISTRY:
-        if config["model_hash"] == model_hash and config["model_name"] == model_name:
-            matched_config = config
-            break
-    if matched_config is None:
+    checkpoint_integrity_mode = str(checkpoint_integrity_mode).strip().lower()
+    if checkpoint_integrity_mode not in CHECKPOINT_INTEGRITY_MODES:
         raise ValueError(
-            f"Cannot detect model type for {model_name}. File: {path}. "
-            f"Model hash: {model_hash}. This standalone package follows DiffSynth hash-based loading."
+            "checkpoint_integrity_mode must be one of "
+            f"{sorted(CHECKPOINT_INTEGRITY_MODES)}, got "
+            f"{checkpoint_integrity_mode!r}"
         )
+
+    if checkpoint_integrity_mode == "metadata_no_hash":
+        matches = [
+            config
+            for config in WAN22_MODEL_REGISTRY
+            if config["model_name"] == model_name
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                "metadata_no_hash loading requires exactly one registry entry "
+                f"for explicit model_name={model_name!r}, got {len(matches)}"
+            )
+        matched_config = matches[0]
+    else:
+        model_hash = hash_model_file(path)
+        matched_config = None
+        for config in WAN22_MODEL_REGISTRY:
+            if config["model_hash"] == model_hash and config["model_name"] == model_name:
+                matched_config = config
+                break
+        if matched_config is None:
+            raise ValueError(
+                f"Cannot detect model type for {model_name}. File: {path}. "
+                f"Model hash: {model_hash}. This standalone package follows DiffSynth hash-based loading."
+            )
 
     model_class = matched_config["model_class"]
     model_kwargs = dict(matched_config.get("extra_kwargs", {}))
@@ -117,7 +139,10 @@ def _load_registered_model(
     if state_dict_converter is not None:
         state_dict = state_dict_converter(state_dict)
 
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(
+        state_dict,
+        strict=checkpoint_integrity_mode == "metadata_no_hash",
+    )
     model = model.to(device=device, dtype=torch_dtype)
     return model
 
@@ -148,6 +173,7 @@ def load_wan22_ti2v_5b_components(
     dit_config: dict[str, Any] | None = None,
     skip_dit_load_from_pretrain: bool = False,
     load_text_encoder: bool = True,
+    checkpoint_integrity_mode: str = "sha256",
 ):
     logger.info("Loading Wan2.2-TI2V-5B components...")
     start = time.time()
@@ -182,6 +208,7 @@ def load_wan22_ti2v_5b_components(
             torch_dtype=torch_dtype,
             device=device,
             model_kwargs_override=validated_dit_config,
+            checkpoint_integrity_mode=checkpoint_integrity_mode,
         )
         dit_path = str(dit_model_config.path)
     text_encoder: WanTextEncoder | None = None
@@ -194,6 +221,7 @@ def load_wan22_ti2v_5b_components(
             "wan_video_text_encoder",
             torch_dtype=torch_dtype,
             device=device,
+            checkpoint_integrity_mode=checkpoint_integrity_mode,
         )
         tokenizer = HuggingfaceTokenizer(
             name=tokenizer_config.path,
@@ -207,7 +235,13 @@ def load_wan22_ti2v_5b_components(
             "Skipping pretrained text encoder/tokenizer load (`load_text_encoder=False`); "
             "training must provide cached `context/context_mask`."
         )
-    vae: WanVideoVAE38 = _load_registered_model(vae_config.path, "wan_video_vae", torch_dtype=torch_dtype, device=device)
+    vae: WanVideoVAE38 = _load_registered_model(
+        vae_config.path,
+        "wan_video_vae",
+        torch_dtype=torch_dtype,
+        device=device,
+        checkpoint_integrity_mode=checkpoint_integrity_mode,
+    )
     logger.info("Finished loading Wan2.2-TI2V-5B components in %.2f seconds.", time.time() - start)
     return Wan22LoadedComponents(
         dit=dit,

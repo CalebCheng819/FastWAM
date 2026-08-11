@@ -34,6 +34,11 @@ seed: 42
 max_grad_norm: 1.0
 weight_decay: 0.0
 resume: null
+# A self-contained native full checkpoint may be used as a weight-only warm
+# start when its architecture matches but its training treatment differs (for
+# example joint VideoGen -> action-only policy fine-tuning). This is mutually
+# exclusive with `resume` and never restores optimizer/scheduler/step state.
+init_weights: null
 # Full-state directories without the v1 scientific run contract are refused
 # before Accelerator mutates model/optimizer state.  Set true only for an
 # explicitly audited legacy recovery; formal runs keep this false.
@@ -54,6 +59,14 @@ save_final_checkpoint: true
 # gate phases opt in explicitly so an ordinary local run cannot claim formal
 # completion.
 seal_training_run: false
+# Explicit versioned contract for a formal run. Null preserves the historical
+# 32-GPU/N=4 terminal path and ordinary diagnostic training. The N=2 formal
+# launcher sets action_only_n2_1x8_v1 and supplies a canonical task-scope
+# receipt below; the Trainer then validates reservation/pins before training.
+training_terminal_contract: null
+# Required with action_only_n2_1x8_v1: paid_gate_1step or formal_1k.
+training_run_profile: null
+training_task_scope_receipt: null
 # This flag is owned by the committed N=4 gate scale. It is never a user-side
 # Hydra override surface in the formal launcher.
 formal_n4_fullmodel_gate: false

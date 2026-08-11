@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
+import stat
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
@@ -29,7 +32,15 @@ class FastWAMMultiRobot(FastWAM):
     video/action flow-matching objective.
     """
 
-    def __init__(self, *args, training_mode: str = "action_only_cache", **kwargs):
+    CHECKPOINT_INTEGRITY_MODES = {"sha256", "metadata_no_hash"}
+
+    def __init__(
+        self,
+        *args,
+        training_mode: str = "action_only_cache",
+        checkpoint_integrity_mode: str = "sha256",
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if training_mode not in {"action_only_cache", "joint"}:
             raise ValueError(
@@ -42,10 +53,13 @@ class FastWAMMultiRobot(FastWAM):
             )
         if self.training_mode == "joint" and self.loss_lambda_video <= 0.0:
             raise ValueError("training_mode='joint' requires loss_lambda_video > 0")
+        self.checkpoint_integrity_mode = self._validated_checkpoint_integrity_mode(
+            checkpoint_integrity_mode
+        )
         self._trainable_scope = "dit"
         self._loaded_base_checkpoint: Optional[str] = None
         self._loaded_base_checkpoint_sha256: Optional[str] = None
-        self._loaded_base_checkpoint_descriptor: Optional[dict[str, str]] = None
+        self._loaded_base_checkpoint_descriptor: Optional[dict[str, Any]] = None
         self._loaded_base_checkpoint_can_restore_sparse = False
 
     @classmethod
@@ -72,6 +86,7 @@ class FastWAMMultiRobot(FastWAM):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 0.0,
         loss_lambda_action: float = 1.0,
+        checkpoint_integrity_mode: str = "sha256",
     ) -> "FastWAMMultiRobot":
         if video_dit_config is None or "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config` with `text_dim` is required.")
@@ -88,6 +103,7 @@ class FastWAMMultiRobot(FastWAM):
             dit_config=video_dit_config,
             skip_dit_load_from_pretrain=skip_dit_load_from_pretrain,
             load_text_encoder=load_text_encoder,
+            checkpoint_integrity_mode=checkpoint_integrity_mode,
         )
         video_expert = components.dit
         action_expert = MultiAgentActionDiT.from_pretrained(
@@ -128,6 +144,7 @@ class FastWAMMultiRobot(FastWAM):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            checkpoint_integrity_mode=checkpoint_integrity_mode,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -832,12 +849,269 @@ class FastWAMMultiRobot(FastWAM):
         return upgraded
 
     @staticmethod
-    def _checkpoint_sha256(path: str | Path) -> str:
+    def _absolute_checkpoint_path(path: str | Path) -> Path:
+        """Normalize syntax without resolving any filesystem alias."""
+
+        checkpoint_path = Path(path).expanduser()
+        return Path(os.path.abspath(checkpoint_path))
+
+    @classmethod
+    def _validated_checkpoint_integrity_mode(cls, value: str) -> str:
+        mode = str(value).strip().lower()
+        if mode not in cls.CHECKPOINT_INTEGRITY_MODES:
+            raise ValueError(
+                "checkpoint_integrity_mode must be one of "
+                f"{sorted(cls.CHECKPOINT_INTEGRITY_MODES)}, got {value!r}"
+            )
+        return mode
+
+    def _active_checkpoint_integrity_mode(self) -> str:
+        # The fallback keeps old lightweight tests and manually constructed
+        # objects on the historical path unless they opt in explicitly.
+        return self._validated_checkpoint_integrity_mode(
+            getattr(self, "checkpoint_integrity_mode", "sha256")
+        )
+
+    @classmethod
+    def _open_checkpoint_descriptor(
+        cls, path: str | Path
+    ) -> tuple[Path, int, os.stat_result]:
+        """Open a unique regular checkpoint without following path aliases.
+
+        Every ancestor is opened relative to the already verified parent with
+        ``O_NOFOLLOW``.  The leaf is opened through the final parent descriptor,
+        so neither a leaf symlink nor a symlinked ancestor can be hidden by a
+        prior ``Path.resolve``.  A single hard link is required because the
+        opened inode must have one unambiguous provenance path.
+        """
+
+        checkpoint_path = cls._absolute_checkpoint_path(path)
+        if checkpoint_path == Path(os.sep) or not checkpoint_path.name:
+            raise ValueError(f"Checkpoint path must name a file: {checkpoint_path}")
+
+        directory_flags = (
+            os.O_RDONLY
+            | os.O_DIRECTORY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        file_flags = (
+            os.O_RDONLY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0)
+        )
+        parent_descriptor = os.open(os.sep, directory_flags)
+        file_descriptor: int | None = None
+        try:
+            for component in checkpoint_path.parts[1:-1]:
+                try:
+                    next_descriptor = os.open(
+                        component,
+                        directory_flags,
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as error:
+                    if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise ValueError(
+                            "Checkpoint path must not traverse symlinks or "
+                            f"non-directory ancestors: {checkpoint_path}"
+                        ) from error
+                    raise
+                os.close(parent_descriptor)
+                parent_descriptor = next_descriptor
+            try:
+                file_descriptor = os.open(
+                    checkpoint_path.name,
+                    file_flags,
+                    dir_fd=parent_descriptor,
+                )
+            except OSError as error:
+                if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError(
+                        "Checkpoint path must not be a symlink or traverse "
+                        f"symlinked ancestors: {checkpoint_path}"
+                    ) from error
+                raise
+        finally:
+            os.close(parent_descriptor)
+
+        try:
+            before = os.fstat(file_descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(
+                    f"Checkpoint is not a regular file: {checkpoint_path}"
+                )
+            if before.st_nlink != 1:
+                raise ValueError(
+                    "Checkpoint must not be hard-linked: "
+                    f"nlink={before.st_nlink} path={checkpoint_path}"
+                )
+            return checkpoint_path, file_descriptor, before
+        except BaseException:
+            os.close(file_descriptor)
+            raise
+
+    @classmethod
+    def _checkpoint_sha256(cls, path: str | Path) -> str:
+        checkpoint_path, descriptor, before = cls._open_checkpoint_descriptor(path)
         digest = hashlib.sha256()
-        with open(path, "rb") as checkpoint_file:
+        with os.fdopen(descriptor, "rb", closefd=True) as checkpoint_file:
             while chunk := checkpoint_file.read(8 * 1024 * 1024):
                 digest.update(chunk)
+            after = os.fstat(checkpoint_file.fileno())
+            if cls._checkpoint_file_identity(before) != cls._checkpoint_file_identity(
+                after
+            ):
+                raise RuntimeError(
+                    "Checkpoint changed while being hashed: "
+                    f"{checkpoint_path}"
+                )
         return digest.hexdigest()
+
+    @staticmethod
+    def _checkpoint_file_identity(file_stat: os.stat_result) -> tuple[int, ...]:
+        """Return the metadata that must stay stable across a checkpoint read."""
+
+        return (
+            int(file_stat.st_dev),
+            int(file_stat.st_ino),
+            int(file_stat.st_mode),
+            int(file_stat.st_nlink),
+            int(file_stat.st_size),
+            int(file_stat.st_mtime_ns),
+            int(file_stat.st_ctime_ns),
+        )
+
+    @staticmethod
+    def _checkpoint_metadata_stat(file_stat: os.stat_result) -> dict[str, int]:
+        return {
+            "bytes": int(file_stat.st_size),
+            "mtime_ns": int(file_stat.st_mtime_ns),
+            "dev": int(file_stat.st_dev),
+            "ino": int(file_stat.st_ino),
+            "mode": int(file_stat.st_mode),
+        }
+
+    @classmethod
+    def _metadata_base_descriptor(
+        cls,
+        checkpoint_path: Path,
+        file_stat: os.stat_result,
+    ) -> dict[str, Any]:
+        return {
+            "path": str(checkpoint_path),
+            "role": "base_dependency",
+            "integrity_mode": "metadata_no_hash",
+            "stat": cls._checkpoint_metadata_stat(file_stat),
+        }
+
+    @classmethod
+    def _load_pinned_checkpoint_payload(
+        cls,
+        path: Path,
+        *,
+        expected_sha256: str | None,
+        digest_label: str,
+        integrity_mode: str = "sha256",
+        expected_metadata: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], str | dict[str, Any]]:
+        """Validate and deserialize exactly one opened checkpoint object.
+
+        ``metadata_no_hash`` pins the canonical path and opened inode metadata
+        without reading bytes for a checksum.  Reusing one descriptor makes an
+        atomic pathname replacement incapable of changing the bytes that are
+        deserialized.  Before/after ``fstat`` checks reject mutation of that
+        opened inode during the read.  The historical SHA-256 path remains the
+        default for callers that do not opt in.
+        """
+
+        integrity_mode = cls._validated_checkpoint_integrity_mode(integrity_mode)
+        if integrity_mode == "metadata_no_hash":
+            if expected_sha256 is not None:
+                raise ValueError(
+                    f"{digest_label} expected_sha256 is incompatible with "
+                    "checkpoint_integrity_mode='metadata_no_hash'"
+                )
+            checkpoint_path, descriptor, before = cls._open_checkpoint_descriptor(path)
+            observed_metadata = cls._metadata_base_descriptor(
+                checkpoint_path,
+                before,
+            )
+            if expected_metadata is not None and observed_metadata != expected_metadata:
+                raise ValueError(
+                    f"{digest_label} metadata mismatch before deserialization: "
+                    f"expected={expected_metadata!r} actual={observed_metadata!r} "
+                    f"path={checkpoint_path}"
+                )
+            with os.fdopen(descriptor, "rb", closefd=True) as checkpoint_file:
+                payload = torch.load(
+                    checkpoint_file,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                after = os.fstat(checkpoint_file.fileno())
+                if cls._checkpoint_file_identity(
+                    before
+                ) != cls._checkpoint_file_identity(after):
+                    raise RuntimeError(
+                        "Checkpoint changed while being deserialized; refusing "
+                        f"to mutate the model: {checkpoint_path}"
+                    )
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    f"Checkpoint payload must be a dict: {checkpoint_path}"
+                )
+            return payload, observed_metadata
+
+        normalized_expected = None
+        if expected_sha256 is not None:
+            normalized_expected = str(expected_sha256).strip().lower()
+            if (
+                len(normalized_expected) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in normalized_expected
+                )
+            ):
+                raise ValueError(
+                    f"Invalid expected {digest_label} SHA-256: {expected_sha256!r}"
+                )
+
+        checkpoint_path, descriptor, before = cls._open_checkpoint_descriptor(path)
+        with os.fdopen(descriptor, "rb", closefd=True) as checkpoint_file:
+            digest = hashlib.sha256()
+            while chunk := checkpoint_file.read(8 * 1024 * 1024):
+                digest.update(chunk)
+            actual_sha256 = digest.hexdigest()
+            if (
+                normalized_expected is not None
+                and actual_sha256 != normalized_expected
+            ):
+                raise ValueError(
+                    f"{digest_label} SHA-256 mismatch: "
+                    "expected="
+                    f"{normalized_expected} actual={actual_sha256} "
+                    f"path={checkpoint_path}"
+                )
+
+            checkpoint_file.seek(0)
+            payload = torch.load(
+                checkpoint_file,
+                map_location="cpu",
+                weights_only=True,
+            )
+            after = os.fstat(checkpoint_file.fileno())
+            if cls._checkpoint_file_identity(before) != cls._checkpoint_file_identity(
+                after
+            ):
+                raise RuntimeError(
+                    "Checkpoint changed while being hashed/deserialized; refusing "
+                    f"to mutate the model: {checkpoint_path}"
+                )
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Checkpoint payload must be a dict: {checkpoint_path}")
+        return payload, actual_sha256
 
     @staticmethod
     def _validate_exact_tensor_state(
@@ -1031,14 +1305,90 @@ class FastWAMMultiRobot(FastWAM):
                 f"missing={missing[:12]} (count={len(missing)}) in {path}"
             )
 
-    @classmethod
     def _validated_base_dependency_descriptor(
-        cls,
+        self,
         descriptor: Any,
         *,
         owner_path: str | Path,
         active_paths: set[Path],
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
+        integrity_mode = self._active_checkpoint_integrity_mode()
+        if integrity_mode == "metadata_no_hash":
+            required_fields = {"path", "role", "integrity_mode", "stat"}
+            if not isinstance(descriptor, dict):
+                raise ValueError(
+                    "Native sparse checkpoint base_checkpoint must be a "
+                    "metadata_no_hash descriptor: "
+                    f"{owner_path}"
+                )
+            if set(descriptor) != required_fields:
+                raise ValueError(
+                    "Native sparse checkpoint metadata base descriptor fields "
+                    f"mismatch: expected={sorted(required_fields)} "
+                    f"got={sorted(descriptor)} in {owner_path}"
+                )
+            if descriptor["role"] != "base_dependency":
+                raise ValueError(
+                    "Native sparse checkpoint base descriptor role must be "
+                    f"'base_dependency', got {descriptor['role']!r} in {owner_path}"
+                )
+            if descriptor["integrity_mode"] != "metadata_no_hash":
+                raise ValueError(
+                    "Native sparse checkpoint integrity mode mismatch: expected "
+                    f"'metadata_no_hash', got {descriptor['integrity_mode']!r} "
+                    f"in {owner_path}"
+                )
+            raw_path = descriptor["path"]
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise ValueError(f"Invalid base dependency path in {owner_path}")
+            dependency_path = Path(raw_path).expanduser()
+            if not dependency_path.is_absolute():
+                raise ValueError(
+                    "metadata_no_hash base dependency path must be absolute: "
+                    f"{raw_path!r} in {owner_path}"
+                )
+            dependency_path = self._absolute_checkpoint_path(dependency_path)
+            if raw_path != str(dependency_path):
+                raise ValueError(
+                    "metadata_no_hash base dependency path must be canonical: "
+                    f"{raw_path!r} in {owner_path}"
+                )
+            if dependency_path in active_paths:
+                raise ValueError(
+                    "Checkpoint base dependency cycle detected: "
+                    f"{dependency_path} is already active"
+                )
+            received_stat = descriptor["stat"]
+            required_stat_fields = {"bytes", "mtime_ns", "dev", "ino", "mode"}
+            if not isinstance(received_stat, dict) or set(received_stat) != required_stat_fields:
+                got = sorted(received_stat) if isinstance(received_stat, dict) else type(received_stat)
+                raise ValueError(
+                    "metadata_no_hash base stat fields mismatch: "
+                    f"expected={sorted(required_stat_fields)} got={got} "
+                    f"in {owner_path}"
+                )
+            if not all(
+                isinstance(received_stat[field], int)
+                and not isinstance(received_stat[field], bool)
+                for field in required_stat_fields
+            ):
+                raise ValueError(
+                    f"metadata_no_hash base stat values must be integers in {owner_path}"
+                )
+            if received_stat["bytes"] < 0 or not stat.S_ISREG(received_stat["mode"]):
+                raise ValueError(
+                    f"metadata_no_hash base stat must describe a regular file in {owner_path}"
+                )
+            return {
+                "path": str(dependency_path),
+                "role": "base_dependency",
+                "integrity_mode": "metadata_no_hash",
+                "stat": {
+                    field: int(received_stat[field])
+                    for field in ("bytes", "mtime_ns", "dev", "ino", "mode")
+                },
+            }
+
         if not isinstance(descriptor, dict):
             raise ValueError(
                 "Native sparse checkpoint base_checkpoint must be a "
@@ -1062,11 +1412,7 @@ class FastWAMMultiRobot(FastWAM):
         dependency_path = Path(raw_path).expanduser()
         if not dependency_path.is_absolute():
             dependency_path = Path(owner_path).parent / dependency_path
-        dependency_path = dependency_path.resolve(strict=True)
-        if not dependency_path.is_file():
-            raise FileNotFoundError(
-                f"Base checkpoint dependency is not a file: {dependency_path}"
-            )
+        dependency_path = self._absolute_checkpoint_path(dependency_path)
         if dependency_path in active_paths:
             raise ValueError(
                 "Checkpoint base dependency cycle detected: "
@@ -1082,20 +1428,13 @@ class FastWAMMultiRobot(FastWAM):
                 f"Invalid base checkpoint SHA-256 in {owner_path}: {expected_sha256!r}"
             )
         expected_sha256 = expected_sha256.lower()
-        actual_sha256 = cls._checkpoint_sha256(dependency_path)
-        if actual_sha256 != expected_sha256:
-            raise ValueError(
-                "Base checkpoint SHA-256 mismatch: "
-                f"expected={expected_sha256} actual={actual_sha256} "
-                f"path={dependency_path}"
-            )
         return {
             "path": str(dependency_path),
-            "sha256": actual_sha256,
+            "sha256": expected_sha256,
             "role": "base_dependency",
         }
 
-    def _base_dependency_descriptor_for_save(self, output_path) -> dict[str, str]:
+    def _base_dependency_descriptor_for_save(self, output_path) -> dict[str, Any]:
         if not getattr(self, "_loaded_base_checkpoint_can_restore_sparse", False):
             raise RuntimeError(
                 "Cannot save sparse_delta: no loaded full `mot` checkpoint can "
@@ -1104,10 +1443,11 @@ class FastWAMMultiRobot(FastWAM):
         base_path_value = getattr(self, "_loaded_base_checkpoint", None)
         if not base_path_value:
             raise RuntimeError("Cannot save sparse_delta without a base checkpoint path.")
-        base_path = Path(str(base_path_value)).expanduser().resolve(strict=True)
-        if not base_path.is_file():
-            raise FileNotFoundError(f"Base checkpoint is not a file: {base_path}")
-        output_resolved = Path(output_path).expanduser().resolve(strict=False)
+        base_path = self._absolute_checkpoint_path(str(base_path_value))
+        if self._active_checkpoint_integrity_mode() == "metadata_no_hash":
+            output_resolved = self._absolute_checkpoint_path(output_path)
+        else:
+            output_resolved = Path(output_path).expanduser().resolve(strict=False)
         if output_resolved == base_path:
             raise ValueError(
                 "A sparse checkpoint cannot overwrite its own base dependency: "
@@ -1115,17 +1455,74 @@ class FastWAMMultiRobot(FastWAM):
             )
 
         cached = getattr(self, "_loaded_base_checkpoint_descriptor", None)
+        if self._active_checkpoint_integrity_mode() == "metadata_no_hash":
+            checkpoint_path, descriptor_fd, before = self._open_checkpoint_descriptor(
+                base_path
+            )
+            with os.fdopen(descriptor_fd, "rb", closefd=True) as checkpoint_file:
+                after = os.fstat(checkpoint_file.fileno())
+            if self._checkpoint_file_identity(before) != self._checkpoint_file_identity(
+                after
+            ):
+                raise RuntimeError(
+                    "Loaded base checkpoint changed while validating sparse save: "
+                    f"{checkpoint_path}"
+                )
+            current_descriptor = self._metadata_base_descriptor(
+                checkpoint_path,
+                before,
+            )
+            if not isinstance(cached, dict) or cached != current_descriptor:
+                raise RuntimeError(
+                    "Loaded base checkpoint metadata changed before sparse save: "
+                    f"expected={cached!r} actual={current_descriptor!r} "
+                    f"path={base_path}"
+                )
+            self._loaded_base_checkpoint_sha256 = None
+            self._loaded_base_checkpoint_descriptor = current_descriptor
+            return dict(current_descriptor)
+
+        current_sha256 = self._checkpoint_sha256(base_path)
         if isinstance(cached, dict) and cached.get("path") == str(base_path):
+            cached_sha256 = str(cached.get("sha256", "")).strip().lower()
+            if current_sha256 != cached_sha256:
+                raise RuntimeError(
+                    "Loaded base checkpoint changed before sparse save: "
+                    f"expected={cached_sha256} actual={current_sha256} path={base_path}"
+                )
             return dict(cached)
-        cached_sha256 = self._checkpoint_sha256(base_path)
         descriptor = {
             "path": str(base_path),
-            "sha256": cached_sha256,
+            "sha256": current_sha256,
             "role": "base_dependency",
         }
-        self._loaded_base_checkpoint_sha256 = cached_sha256
+        self._loaded_base_checkpoint_sha256 = current_sha256
         self._loaded_base_checkpoint_descriptor = descriptor
         return dict(descriptor)
+
+    def _remember_loaded_base_checkpoint(
+        self,
+        checkpoint_path: Path,
+        checkpoint_evidence: str | dict[str, Any],
+    ) -> None:
+        self._loaded_base_checkpoint = str(checkpoint_path)
+        if self._active_checkpoint_integrity_mode() == "metadata_no_hash":
+            if not isinstance(checkpoint_evidence, dict):
+                raise RuntimeError(
+                    "metadata_no_hash checkpoint load did not return metadata evidence"
+                )
+            self._loaded_base_checkpoint_sha256 = None
+            self._loaded_base_checkpoint_descriptor = dict(checkpoint_evidence)
+        else:
+            if not isinstance(checkpoint_evidence, str):
+                raise RuntimeError("SHA-256 checkpoint load did not return a digest")
+            self._loaded_base_checkpoint_sha256 = checkpoint_evidence
+            self._loaded_base_checkpoint_descriptor = {
+                "path": str(checkpoint_path),
+                "sha256": checkpoint_evidence,
+                "role": "base_dependency",
+            }
+        self._loaded_base_checkpoint_can_restore_sparse = True
 
     def _multi_robot_architecture_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -1283,8 +1680,20 @@ class FastWAMMultiRobot(FastWAM):
         optimizer=None,
         step=None,
         checkpoint_state_kind: str | None = None,
+        checkpoint_integrity_mode: str | None = None,
     ):
         del optimizer
+        active_integrity_mode = self._active_checkpoint_integrity_mode()
+        if checkpoint_integrity_mode is not None:
+            requested_integrity_mode = self._validated_checkpoint_integrity_mode(
+                checkpoint_integrity_mode
+            )
+            if requested_integrity_mode != active_integrity_mode:
+                raise ValueError(
+                    "Checkpoint publication integrity mode must match the model: "
+                    f"requested={requested_integrity_mode!r} "
+                    f"model={active_integrity_mode!r}"
+                )
         if checkpoint_state_kind is None or checkpoint_state_kind == "auto":
             checkpoint_state_kind = (
                 "full" if self._trainable_scope == "dit" else "sparse_delta"
@@ -1344,7 +1753,44 @@ class FastWAMMultiRobot(FastWAM):
             optimizer=optimizer,
             load_role="top_level",
             active_paths=set(),
+            validate_treatment=True,
             validate_trainable_scope=validate_trainable_scope,
+            require_full_top_level=False,
+        )
+
+    def load_initialization_checkpoint(
+        self,
+        path,
+        *,
+        expected_sha256: str | None = None,
+        checkpoint_integrity_mode: str = "sha256",
+    ):
+        """Warm-start from an exact native full checkpoint across treatments.
+
+        Architecture and tensor identity stay strict. Only training-mode and
+        trainable-scope provenance may differ; optimizer/scheduler/step state is
+        deliberately outside this weights-only operation.
+        """
+
+        requested_integrity_mode = self._validated_checkpoint_integrity_mode(
+            checkpoint_integrity_mode
+        )
+        active_integrity_mode = self._active_checkpoint_integrity_mode()
+        if requested_integrity_mode != active_integrity_mode:
+            raise ValueError(
+                "Initialization checkpoint integrity mode must match the model: "
+                f"requested={requested_integrity_mode!r} "
+                f"model={active_integrity_mode!r}"
+            )
+        return self._load_checkpoint_with_role(
+            path,
+            optimizer=None,
+            load_role="top_level",
+            active_paths=set(),
+            validate_treatment=False,
+            validate_trainable_scope=False,
+            require_full_top_level=True,
+            expected_sha256=expected_sha256,
         )
 
     def _load_checkpoint_with_role(
@@ -1354,11 +1800,13 @@ class FastWAMMultiRobot(FastWAM):
         optimizer=None,
         load_role: str,
         active_paths: set[Path],
+        validate_treatment: bool = True,
         validate_trainable_scope: bool = True,
+        require_full_top_level: bool = False,
+        expected_sha256: str | None = None,
+        expected_metadata: dict[str, Any] | None = None,
     ):
-        checkpoint_path = Path(path).expanduser().resolve(strict=True)
-        if not checkpoint_path.is_file():
-            raise FileNotFoundError(f"Checkpoint is not a file: {checkpoint_path}")
+        checkpoint_path = self._absolute_checkpoint_path(path)
         if checkpoint_path in active_paths:
             raise ValueError(
                 f"Checkpoint base dependency cycle detected at {checkpoint_path}"
@@ -1366,19 +1814,40 @@ class FastWAMMultiRobot(FastWAM):
         active_paths = set(active_paths)
         active_paths.add(checkpoint_path)
 
-        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        if not isinstance(payload, dict):
-            raise ValueError(f"Checkpoint payload must be a dict: {checkpoint_path}")
+        digest_label = (
+            "Base checkpoint"
+            if load_role == "base_dependency"
+            else "Initialization checkpoint"
+            if require_full_top_level
+            else "Checkpoint"
+        )
+        payload, checkpoint_evidence = self._load_pinned_checkpoint_payload(
+            checkpoint_path,
+            expected_sha256=expected_sha256,
+            digest_label=digest_label,
+            integrity_mode=self._active_checkpoint_integrity_mode(),
+            expected_metadata=expected_metadata,
+        )
 
         checkpoint_format = payload.get("format")
+        if require_full_top_level and checkpoint_format != "fastwam_multi_robot_v2":
+            raise ValueError(
+                "Initialization requires a self-contained native v2 full checkpoint: "
+                f"{checkpoint_path}"
+            )
         if checkpoint_format == "fastwam_multi_robot_v2":
             self._validate_multi_robot_checkpoint_metadata(
                 payload,
                 checkpoint_path,
-                validate_treatment=load_role == "top_level",
+                validate_treatment=validate_treatment and load_role == "top_level",
                 validate_trainable_scope=validate_trainable_scope,
             )
             state_kind = self._native_checkpoint_state_kind(payload, checkpoint_path)
+            if require_full_top_level and state_kind != "full":
+                raise ValueError(
+                    "Initialization requires state_kind='full', got "
+                    f"{state_kind!r} in {checkpoint_path}"
+                )
             if load_role == "base_dependency" and state_kind != "full":
                 raise ValueError(
                     "Nested sparse native v2 checkpoints are forbidden; a "
@@ -1397,16 +1866,10 @@ class FastWAMMultiRobot(FastWAM):
                 )
                 self.mot.load_state_dict(mot_state, strict=True)
                 if load_role == "top_level":
-                    self._loaded_base_checkpoint = str(checkpoint_path)
-                    self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
-                        checkpoint_path
+                    self._remember_loaded_base_checkpoint(
+                        checkpoint_path,
+                        checkpoint_evidence,
                     )
-                    self._loaded_base_checkpoint_descriptor = {
-                        "path": str(checkpoint_path),
-                        "sha256": self._loaded_base_checkpoint_sha256,
-                        "role": "base_dependency",
-                    }
-                    self._loaded_base_checkpoint_can_restore_sparse = True
             else:
                 if load_role != "top_level":
                     raise ValueError(
@@ -1428,7 +1891,15 @@ class FastWAMMultiRobot(FastWAM):
                     optimizer=None,
                     load_role="base_dependency",
                     active_paths=active_paths,
+                    validate_treatment=False,
                     validate_trainable_scope=validate_trainable_scope,
+                    require_full_top_level=False,
+                    expected_sha256=descriptor.get("sha256"),
+                    expected_metadata=(
+                        descriptor
+                        if descriptor.get("integrity_mode") == "metadata_no_hash"
+                        else None
+                    ),
                 )
                 result = self.mot.load_state_dict(trainable_state, strict=False)
                 if result.unexpected_keys:
@@ -1437,7 +1908,7 @@ class FastWAMMultiRobot(FastWAM):
                         f"{result.unexpected_keys}"
                     )
                 self._loaded_base_checkpoint = descriptor["path"]
-                self._loaded_base_checkpoint_sha256 = descriptor["sha256"]
+                self._loaded_base_checkpoint_sha256 = descriptor.get("sha256")
                 self._loaded_base_checkpoint_descriptor = descriptor
                 self._loaded_base_checkpoint_can_restore_sparse = True
         elif checkpoint_format is not None:
@@ -1454,16 +1925,10 @@ class FastWAMMultiRobot(FastWAM):
             )
             self._load_matching_state(self.mot, mot_state, label="legacy mot")
             if load_role == "top_level":
-                self._loaded_base_checkpoint = str(checkpoint_path)
-                self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
-                    checkpoint_path
+                self._remember_loaded_base_checkpoint(
+                    checkpoint_path,
+                    checkpoint_evidence,
                 )
-                self._loaded_base_checkpoint_descriptor = {
-                    "path": str(checkpoint_path),
-                    "sha256": self._loaded_base_checkpoint_sha256,
-                    "role": "base_dependency",
-                }
-                self._loaded_base_checkpoint_can_restore_sparse = True
         elif "dit" in payload:
             self._validate_legacy_minimum_coverage(
                 payload["dit"],

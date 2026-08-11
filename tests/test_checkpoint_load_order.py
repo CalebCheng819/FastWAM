@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 import threading
 import time
@@ -7,6 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from fastwam.formal_artifacts import (
+    ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT,
+    canonical_json_bytes,
+)
 from fastwam.trainer import Wan22Trainer
 
 
@@ -18,9 +23,15 @@ class _WeightModel:
         self.loads.append((str(path), optimizer))
 
 
+class _InitializationModel(_WeightModel):
+    def load_initialization_checkpoint(self, path, *, expected_sha256=None):
+        self.loads.append((str(path), "initialization", expected_sha256))
+
+
 def _trainer(resume: Path, model=None):
     trainer = Wan22Trainer.__new__(Wan22Trainer)
     trainer.resume = str(resume)
+    trainer.init_weights = None
     trainer.model = _WeightModel() if model is None else model
     trainer._weight_checkpoint_loaded_before_prepare = False
     trainer.formal_n4_fullmodel_gate = False
@@ -41,6 +52,40 @@ def test_weight_checkpoint_is_loaded_once_before_prepare(tmp_path):
     # the module a second time after ZeRO has already created FP32 masters.
     trainer._resume_training_state_after_prepare()
     assert trainer.model.loads == [(str(checkpoint), None)]
+
+
+def test_initialization_checkpoint_is_loaded_once_before_prepare(tmp_path):
+    checkpoint = tmp_path / "initialization.pt"
+    checkpoint.write_bytes(b"test-checkpoint")
+    trainer = _trainer(checkpoint, model=_InitializationModel())
+    trainer.resume = None
+    trainer.init_weights = str(checkpoint)
+
+    trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == [(str(checkpoint), "initialization", None)]
+    assert trainer._weight_checkpoint_loaded_before_prepare is True
+    trainer._resume_training_state_after_prepare()
+    assert trainer.model.loads == [(str(checkpoint), "initialization", None)]
+
+
+def test_formal_initialization_passes_expected_sha256_before_prepare(
+    tmp_path, monkeypatch
+):
+    checkpoint = tmp_path / "initialization.pt"
+    checkpoint.write_bytes(b"test-checkpoint")
+    trainer = _trainer(checkpoint, model=_InitializationModel())
+    trainer.resume = None
+    trainer.init_weights = str(checkpoint)
+    trainer.training_terminal_contract = ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT
+    expected_sha256 = "a" * 64
+    monkeypatch.setenv("FASTWAM_INIT_CHECKPOINT_SHA256", expected_sha256)
+
+    trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == [
+        (str(checkpoint), "initialization", expected_sha256)
+    ]
 
 
 def test_full_state_directory_is_deferred_until_after_prepare(tmp_path):
@@ -86,16 +131,15 @@ def test_full_state_contract_mismatch_fails_before_accelerator_mutation(tmp_path
     state_dir = tmp_path / "step_000123"
     state_dir.mkdir()
     state_file = state_dir / "trainer_state.json"
-    state_file.write_text(
-        json.dumps(
+    state_file.write_bytes(
+        canonical_json_bytes(
             {
                 "global_step": 123,
                 "epoch": 0,
                 "batch_in_epoch": 0,
                 "run_contract": {"contract_version": 1, "treatment": "hub0"},
             }
-        ),
-        encoding="utf-8",
+        )
     )
     trainer = Wan22Trainer.__new__(Wan22Trainer)
     trainer.allow_legacy_resume = False
@@ -114,9 +158,10 @@ def test_full_state_contract_mismatch_fails_before_accelerator_mutation(tmp_path
 def test_missing_full_state_contract_fails_before_accelerator_mutation(tmp_path):
     state_dir = tmp_path / "step_000123"
     state_dir.mkdir()
-    (state_dir / "trainer_state.json").write_text(
-        json.dumps({"global_step": 123, "epoch": 0, "batch_in_epoch": 0}),
-        encoding="utf-8",
+    (state_dir / "trainer_state.json").write_bytes(
+        canonical_json_bytes(
+            {"global_step": 123, "epoch": 0, "batch_in_epoch": 0}
+        )
     )
     trainer = Wan22Trainer.__new__(Wan22Trainer)
     trainer.allow_legacy_resume = False
@@ -126,6 +171,37 @@ def test_missing_full_state_contract_fails_before_accelerator_mutation(tmp_path)
         trainer.load_training_state(str(state_dir))
 
     assert trainer.accelerator.loads == []
+
+
+def test_n2_formal_preflight_and_authorization_precede_accelerator_restore():
+    source = inspect.getsource(Wan22Trainer.__init__)
+
+    preflight = source.index("self._preflight_action_only_n2_resume_before_load()")
+    preload_authorization = source.index(
+        "self._validate_action_only_n2_terminal_contract(preload=True)"
+    )
+    weight_load = source.index("self._load_weight_checkpoint_before_prepare()")
+    authorization = source.index("self._validate_action_only_n2_terminal_contract()")
+    load_authorization = source.index(
+        "self._validate_action_only_n2_reload_load_contract(post_load=False)"
+    )
+    prepare = source.index("self.accelerator.prepare(")
+    zero_grad = source.index("self.optimizer.zero_grad(")
+    wandb = source.index("self._init_wandb()")
+    restore = source.index("self._resume_training_state_after_prepare()")
+
+    assert preflight < preload_authorization < weight_load < authorization < prepare
+    assert load_authorization < prepare < zero_grad < wandb < restore
+
+
+def test_n2_paid_profile_refuses_resume_in_preload_preflight(tmp_path):
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.training_terminal_contract = ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT
+    trainer.training_run_profile = "paid_gate_1step"
+    trainer.resume = str(tmp_path)
+
+    with pytest.raises(ValueError, match="cannot resume"):
+        trainer._preflight_action_only_n2_resume_before_load()
 
 
 def test_saved_trainer_metadata_contains_run_contract(tmp_path):

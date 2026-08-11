@@ -1239,6 +1239,159 @@ def test_run_reservation_is_exclusive_and_identity_exact() -> None:
         assert "must not be inside source tree" in refused.stderr
 
 
+def test_n2_action_only_reservation_schema_v2_binds_profile_and_external_request() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        tmp_path = Path(directory)
+        allowed = tmp_path / "cpfs"
+        source = tmp_path / "source"
+        parent = allowed / "runs"
+        parent.mkdir(parents=True)
+        source.mkdir()
+        output = parent / "n2-paid-gate"
+        base = [
+            sys.executable,
+            str(RESERVATION_SCRIPT),
+            "--output-dir",
+            str(output),
+            "--allowed-prefix",
+            str(allowed),
+            "--source-root",
+            str(source),
+            "--run-id",
+            "n2-paid-gate",
+            "--code-commit",
+            "a" * 40,
+            "--task",
+            "robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5",
+            "--num-machines",
+            "1",
+            "--nproc-per-node",
+            "8",
+            "--expected-global-world-size",
+            "8",
+            "--checkpoint-sha256",
+            "b" * 64,
+            "--image-reference",
+            "registry.example/fastwam@sha256:" + "c" * 64,
+            "--image-digest-status",
+            "resolved",
+            "--image-digest",
+            "sha256:" + "c" * 64,
+            "--pyproject-sha256",
+            "d" * 64,
+            "--output-storage",
+            "cpfs",
+            "--training-terminal-contract",
+            "action_only_n2_1x8_v1",
+            "--run-profile",
+            "paid_gate_1step",
+            "--effective-patched-tree",
+            "e" * 40,
+            # This is SUBMISSION.RESERVED.json[request_body_sha256], not
+            # the reservation-file digest and not a self-referential input.
+            "--request-sha256",
+            "f" * 64,
+            "--init-checkpoint-sha256",
+            "b" * 64,
+            "--task-scope-receipt",
+            "authorization/task-scope.json",
+            "--task-scope-receipt-sha256",
+            "1" * 64,
+            "--checkpoint-state-kind",
+            "sparse_delta",
+            "--trainable-scope",
+            "action",
+            "--training-mode",
+            "action_only_cache",
+        ]
+
+        owner = subprocess.run(
+            [*base, "--mode", "owner"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert owner.returncode == 0, owner.stderr
+        reservation = json.loads((output / ".RUN_RESERVED").read_text(encoding="utf-8"))
+        expected_keys = {
+            "base_code_commit",
+            "bundle_manifest_sha256",
+            "cache_manifest_sha256",
+            "cache_selection_sha256",
+            "cache_source_identity_sha256",
+            "checkpoint_sha256",
+            "checkpoint_state_kind",
+            "code_commit",
+            "cpfs_bundle_manifest_sha256",
+            "effective_patched_tree",
+            "erdma_bootstrap_sha256",
+            "erdma_bundle_sha256",
+            "erdma_env_sha256",
+            "erdma_source_manifest_sha256",
+            "formal_n4_fullmodel_gate",
+            "global_world_size",
+            "identity_sha256",
+            "image_digest",
+            "image_digest_status",
+            "image_reference",
+            "init_checkpoint_sha256",
+            "n4_fullmodel_gate_complete_sha256",
+            "nproc_per_node",
+            "num_machines",
+            "oss_bundle_manifest_sha256",
+            "output_storage",
+            "output_zero_checkpoint_smoke_sha256",
+            "pyproject_sha256",
+            "request_sha256",
+            "run_id",
+            "run_profile",
+            "schema_version",
+            "stats_sha256",
+            "task",
+            "task_scope_receipt",
+            "task_scope_receipt_sha256",
+            "trainable_scope",
+            "training_env_bundle_manifest_sha256",
+            "training_mode",
+            "training_terminal_contract",
+            "training_terminal_contract_version",
+            "vae_sha256",
+        }
+        assert set(reservation) == expected_keys
+        identity_payload = dict(reservation)
+        identity_sha256 = identity_payload.pop("identity_sha256")
+        assert identity_sha256 == hashlib.sha256(
+            (json.dumps(identity_payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        assert reservation["schema_version"] == 2
+        assert reservation["run_profile"] == "paid_gate_1step"
+        assert reservation["request_sha256"] == "f" * 64
+        assert reservation["training_mode"] == "action_only_cache"
+
+        changed_profile = list(base)
+        changed_profile[changed_profile.index("--run-profile") + 1] = "formal_1k"
+        mismatch = subprocess.run(
+            [*changed_profile, "--mode", "wait", "--timeout", "1"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert mismatch.returncode != 0
+        assert "reservation identity mismatch" in mismatch.stderr
+
+        missing_profile = list(base)
+        profile_index = missing_profile.index("--run-profile")
+        del missing_profile[profile_index : profile_index + 2]
+        refused = subprocess.run(
+            [*missing_profile, "--mode", "validate"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert refused.returncode != 0
+        assert "requires --run-profile" in refused.stderr
+
+
 def test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -3489,6 +3642,7 @@ if __name__ == "__main__":
         test_python_environment_preflight_propagates_pip_check_failure,
         test_whole_file_manifest_generator_is_deterministic_atomic_and_safe,
         test_run_reservation_is_exclusive_and_identity_exact,
+        test_n2_action_only_reservation_schema_v2_binds_profile_and_external_request,
         test_zero_checkpoint_smoke_evidence_is_hash_and_filesystem_bound,
         test_zero_smoke_runner_clears_pai_topology_and_initializes_accelerator_first,
         test_zero_smoke_resolves_fixed_micro_batch_without_a_dataloader,

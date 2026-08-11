@@ -7,6 +7,7 @@ returns ``{"agent_gaussian": float16[N,13,H,W]}`` in the requested agent order.
 from .compact import (
     COMPACT_HEIGHT,
     COMPACT_WIDTH,
+    MOMENT_MATCH_METHOD,
     opacity_aware_moment_match,
     project_compact_cache,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "COMPACT_WIDTH",
     "COMPLETE_FILENAME",
     "MANIFEST_FILENAME",
+    "MOMENT_MATCH_METHOD",
     "PARTITION_ALGORITHM",
     "FrameKey",
     "GaussianCache",

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -26,11 +27,173 @@ from .schema import (
     MIN_SHARD_BYTES,
     SCHEMA_NAME,
     SCHEMA_VERSION,
+    FrameKey,
     GaussianCacheSchema,
     normalize_source_path,
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_INTEGRITY_MODES = {"legacy_hash", "metadata_no_hash"}
+
+
+def _normalize_integrity_mode(value: str) -> str:
+    mode = str(value).lower()
+    if mode not in _INTEGRITY_MODES:
+        raise ValueError(
+            f"integrity_mode must be one of {sorted(_INTEGRITY_MODES)}, got {value!r}"
+        )
+    return mode
+
+
+def _stat_signature(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_nlink),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
+def stable_regular_file_stat(
+    path: str | Path, *, expected_bytes: int | None = None
+) -> os.stat_result:
+    """Validate one non-symlink regular file with stable pre/open/post metadata."""
+
+    file_path = Path(path)
+    try:
+        before = file_path.lstat()
+    except FileNotFoundError:
+        raise FileNotFoundError(file_path) from None
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"Expected a regular non-symlink file: {file_path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(file_path, flags)
+    except OSError as exc:
+        raise ValueError(f"Could not safely open regular file {file_path}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _stat_signature(opened) != _stat_signature(before):
+            raise ValueError(f"Regular file changed while opening: {file_path}")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = file_path.lstat()
+    if (
+        _stat_signature(before) != _stat_signature(after)
+        or _stat_signature(after) != _stat_signature(final)
+    ):
+        raise ValueError(f"Regular file metadata changed during validation: {file_path}")
+    if expected_bytes is not None and int(final.st_size) != int(expected_bytes):
+        raise ValueError(
+            f"Regular file byte count mismatch: path={file_path} "
+            f"expected={int(expected_bytes)} actual={int(final.st_size)}"
+        )
+    return final
+
+
+def _read_stable_regular_file(path: str | Path) -> bytes:
+    """Read a small metadata file while rejecting replacement or mutation."""
+
+    file_path = Path(path)
+    before = stable_regular_file_stat(file_path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(file_path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if _stat_signature(opened) != _stat_signature(before):
+            raise ValueError(f"Regular file changed before read: {file_path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    final = file_path.lstat()
+    if (
+        _stat_signature(opened) != _stat_signature(after)
+        or _stat_signature(after) != _stat_signature(final)
+    ):
+        raise ValueError(f"Regular file metadata changed during read: {file_path}")
+    payload = b"".join(chunks)
+    if len(payload) != int(final.st_size):
+        raise ValueError(f"Regular file byte count changed during read: {file_path}")
+    return payload
+
+
+def _validate_selection_index_metadata_no_hash(
+    root: Path, selection: Mapping[str, Any]
+) -> None:
+    raw_filename = selection.get("index_filename")
+    if not isinstance(raw_filename, str):
+        raise ValueError("Gaussian selection index_filename must be a relative path")
+    index_path = root / normalize_source_path(raw_filename)
+    payload = _read_stable_regular_file(index_path)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Gaussian selection index is not UTF-8: {index_path}") from exc
+    keys: set[FrameKey] = set()
+    record_count = 0
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+            if not isinstance(record, Mapping):
+                raise TypeError("record is not a JSON object")
+            required = {"source_path", "trajectory", "timestep"}
+            missing = sorted(required - set(record))
+            if missing:
+                raise ValueError(f"record is missing fields {missing}")
+            has_one = "agent_name" in record
+            has_many = "agent_names" in record
+            if has_one == has_many:
+                raise ValueError(
+                    "record must contain exactly one of agent_name or agent_names"
+                )
+            names = [record["agent_name"]] if has_one else record["agent_names"]
+            if not isinstance(names, list) or not names:
+                raise ValueError("agent_names must be a non-empty list")
+            expanded = [
+                FrameKey(
+                    source_path=str(record["source_path"]),
+                    trajectory=str(record["trajectory"]),
+                    timestep=int(record["timestep"]),
+                    agent_name=str(name),
+                )
+                for name in names
+            ]
+        except Exception as exc:
+            raise ValueError(
+                f"Invalid Gaussian selection JSONL at {index_path}:{line_number}: {exc}"
+            ) from exc
+        record_count += 1
+        for key in expanded:
+            if key in keys:
+                raise ValueError(f"Duplicate Gaussian selection key in {index_path}: {key}")
+            keys.add(key)
+    if record_count == 0 or not keys:
+        raise ValueError(f"Gaussian selection JSONL contains no records: {index_path}")
+    selected_key_count = selection.get("selected_key_count")
+    if (
+        isinstance(selected_key_count, bool)
+        or not isinstance(selected_key_count, int)
+        or selected_key_count <= 0
+    ):
+        raise ValueError("Gaussian selection selected_key_count must be a positive integer")
+    if len(keys) != selected_key_count:
+        raise ValueError(
+            "Gaussian selection selected_key_count mismatch: "
+            f"manifest={selected_key_count} index={len(keys)} path={index_path}"
+        )
 
 
 def sha256_file(path: str | Path, *, chunk_bytes: int = 8 << 20) -> str:
@@ -690,24 +853,55 @@ def validate_manifest_structure(manifest: Mapping[str, Any]) -> GaussianCacheSch
     return schema
 
 
-def load_manifest(cache_root: str | Path, *, require_complete: bool = True) -> dict[str, Any]:
+def load_manifest(
+    cache_root: str | Path,
+    *,
+    require_complete: bool = True,
+    integrity_mode: str = "legacy_hash",
+    validate_shards: bool = True,
+) -> dict[str, Any]:
+    integrity_mode = _normalize_integrity_mode(integrity_mode)
     root = Path(cache_root)
     manifest_path = root / MANIFEST_FILENAME
     complete_path = root / COMPLETE_FILENAME
-    if require_complete and not complete_path.is_file():
-        raise FileNotFoundError(f"Gaussian cache is incomplete: missing {complete_path}")
-    manifest_payload = manifest_path.read_bytes()
+    if integrity_mode == "metadata_no_hash":
+        manifest_payload = _read_stable_regular_file(manifest_path)
+    else:
+        if require_complete and not complete_path.is_file():
+            raise FileNotFoundError(f"Gaussian cache is incomplete: missing {complete_path}")
+        manifest_payload = manifest_path.read_bytes()
     manifest = json.loads(manifest_payload)
+    if not isinstance(manifest, Mapping):
+        raise TypeError(f"Gaussian cache manifest must be a JSON object: {manifest_path}")
     validate_manifest_structure(manifest)
+    selection = manifest.get("selection", {})
+    if integrity_mode == "metadata_no_hash" and selection.get("mode") == "index":
+        _validate_selection_index_metadata_no_hash(root, selection)
+    if integrity_mode == "metadata_no_hash" and validate_shards:
+        for shard in manifest["shards"]:
+            shard_path = root / normalize_source_path(str(shard["path"]))
+            stable_regular_file_stat(
+                shard_path,
+                expected_bytes=int(shard["bytes"]),
+            )
     if require_complete:
-        complete = json.loads(complete_path.read_text(encoding="utf-8"))
+        if integrity_mode == "metadata_no_hash":
+            complete_payload = _read_stable_regular_file(complete_path)
+            complete = json.loads(complete_payload)
+        else:
+            complete = json.loads(complete_path.read_text(encoding="utf-8"))
+        if not isinstance(complete, Mapping):
+            raise TypeError(f"Gaussian cache COMPLETE must be a JSON object: {complete_path}")
         if complete.get("complete") is not True:
             raise ValueError(f"Invalid Gaussian cache COMPLETE marker: {complete_path}")
         if complete.get("schema_name") != SCHEMA_NAME or complete.get("schema_version") != SCHEMA_VERSION:
             raise ValueError("COMPLETE marker schema does not match canonical cache v1")
-        actual_sha256 = hashlib.sha256(manifest_payload).hexdigest()
-        if complete.get("manifest_sha256") != actual_sha256:
-            raise ValueError("COMPLETE marker manifest checksum mismatch")
+        if integrity_mode == "legacy_hash":
+            actual_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+            if complete.get("manifest_sha256") != actual_sha256:
+                raise ValueError("COMPLETE marker manifest checksum mismatch")
+        elif complete.get("manifest") != MANIFEST_FILENAME:
+            raise ValueError("COMPLETE marker manifest filename mismatch")
         if int(complete.get("manifest_bytes", -1)) != len(manifest_payload):
             raise ValueError("COMPLETE marker manifest byte count mismatch")
         if int(complete.get("total_frames", -1)) != int(manifest["total_frames"]):

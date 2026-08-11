@@ -1,0 +1,14 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_ft_n2_vg0_hub1_gau1_224_3e-5
+  - _self_
+
+data:
+  train:
+    required_tasks: [PlaceFood-rf, StrikeCubeHard-rf]
+  val:
+    required_tasks: [PlaceFood-rf, StrikeCubeHard-rf]
+
+wandb:
+  name: fastwam-ft-n2-placefood-strike-vg0-hub1-gau1-1k-s42

@@ -15,12 +15,13 @@ from .base_lerobot_dataset import BaseLerobotDataset
 from .utils.normalizer import save_dataset_stats_to_json, load_dataset_stats_from_json
 from ..dataset_utils import ResizeSmallestSideAspectPreserving, CenterCrop, Normalize
 from fastwam.utils.logging_config import get_logger
+from fastwam.datasets.prompt_templates import DEFAULT_ROBOT_VIDEO_PROMPT
 from fastwam.utils import misc, pytorch_utils
 from accelerate import PartialState
 logger = get_logger(__name__)
 
 
-DEFAULT_PROMPT = "A video recorded from a robot's point of view executing the following instruction: {task}"
+DEFAULT_PROMPT = DEFAULT_ROBOT_VIDEO_PROMPT
 
 class RobotVideoDataset(torch.utils.data.Dataset):
     def __init__(

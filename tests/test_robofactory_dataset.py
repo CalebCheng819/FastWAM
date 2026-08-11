@@ -666,6 +666,98 @@ def test_required_agent_counts_select_scope_and_preserve_full_source_provenance(
     }
 
 
+def test_required_tasks_select_scope_and_preserve_source_and_cache_keys(tmp_path):
+    first_task = "SyntheticTwoRobotFirst-rf"
+    second_task = "SyntheticTwoRobotSecond-rf"
+    first_instruction = "two robots complete the first synthetic task"
+    second_instruction = "two robots complete the second synthetic task"
+    _, cache_dir = _write_demo(
+        tmp_path,
+        task_name=first_task,
+        num_agents=2,
+        instruction=first_instruction,
+    )
+    _write_demo(
+        tmp_path,
+        task_name=second_task,
+        num_agents=2,
+        instruction=second_instruction,
+        write_cache=False,
+    )
+    stats_path = tmp_path / "unified_stats.json"
+    stats_path.write_text(
+        json.dumps(compute_robofactory_stats(str(tmp_path))),
+        encoding="utf-8",
+    )
+
+    selected = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        val_set_proportion=0.0,
+        is_training_set=True,
+        required_agent_counts=[2],
+        required_tasks=[first_task],
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={
+            first_task: first_instruction,
+            second_task: second_instruction,
+        },
+    )
+
+    assert set(selected.task_ids) == {first_task}
+    assert selected._source_metadata["files"] == 2
+    assert selected.entries[0]["source_path"].startswith(f"{first_task}/")
+
+
+def test_required_tasks_fail_closed_when_declared_task_is_absent(tmp_path):
+    task_name = "SyntheticTwoRobotTask-rf"
+    instruction = "two robots complete the synthetic task"
+    stats_path, cache_dir = _write_demo(
+        tmp_path,
+        task_name=task_name,
+        num_agents=2,
+        instruction=instruction,
+    )
+
+    with pytest.raises(RuntimeError, match="No train windows"):
+        RoboFactoryMultiRobotDataset(
+            str(tmp_path),
+            video_size=(32, 32),
+            val_set_proportion=0.0,
+            is_training_set=True,
+            required_agent_counts=[2],
+            required_tasks=["MissingTask-rf"],
+            pretrained_norm_stats=str(stats_path),
+            text_embedding_cache_dir=str(cache_dir),
+            instruction_map={task_name: instruction},
+        )
+
+
+@pytest.mark.parametrize("required_tasks", [[], "PlaceFood-rf", [""], [1]])
+def test_required_tasks_reject_empty_or_non_string_values(tmp_path, required_tasks):
+    task_name = "SyntheticTwoRobotTask-rf"
+    instruction = "two robots complete the synthetic task"
+    stats_path, cache_dir = _write_demo(
+        tmp_path,
+        task_name=task_name,
+        num_agents=2,
+        instruction=instruction,
+    )
+
+    with pytest.raises(ValueError, match="required_tasks"):
+        RoboFactoryMultiRobotDataset(
+            str(tmp_path),
+            video_size=(32, 32),
+            val_set_proportion=0.0,
+            is_training_set=True,
+            required_tasks=required_tasks,
+            pretrained_norm_stats=str(stats_path),
+            text_embedding_cache_dir=str(cache_dir),
+            instruction_map={task_name: instruction},
+        )
+
+
 def test_n4_gate_selection_and_main_n234_scope_use_same_source(tmp_path):
     instructions = {}
     cache_dir = None

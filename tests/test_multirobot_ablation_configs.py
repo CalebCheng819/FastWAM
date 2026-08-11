@@ -6,7 +6,6 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 from omegaconf.errors import InterpolationResolutionError
 
-
 TEST_GAUSSIAN_CACHE_DIR = "/cpfs/test/robofactory/compact-gaussian-v1"
 TEST_GAUSSIAN_MANIFEST_SHA256 = "1" * 64
 TEST_GAUSSIAN_SELECTION_SHA256 = "2" * 64
@@ -84,6 +83,25 @@ LEGACY_ALIASES = {
     "robofactory_multi_robot_nohub_224_1e-4": "robofactory_multi_robot_vg0_hub0_224_1e-4",
 }
 
+FINE_TUNE_ARMS = {
+    "robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5": (
+        2,
+        ["PlaceFood-rf"],
+    ),
+    "robofactory_multi_robot_ft_n2_placefood_strike_vg0_hub1_gau1_224_3e-5": (
+        2,
+        ["PlaceFood-rf", "StrikeCubeHard-rf"],
+    ),
+    "robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5": (
+        3,
+        ["ThreeRobotsPlaceShoes-rf", "ThreeRobotsStackCube-rf"],
+    ),
+    "robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5": (
+        4,
+        ["FourRobotsStackCube-rf"],
+    ),
+}
+
 
 def _compose_arm(task_name, *extra_overrides):
     config_dir = Path(__file__).resolve().parents[1] / "configs"
@@ -145,6 +163,7 @@ def test_multirobot_2x2x2_arm_invariants(task_name, expected, monkeypatch):
     for split in ("train", "val"):
         data_cfg = cfg["data"][split]
         assert data_cfg["required_agent_counts"] == [2, 3, 4]
+        assert data_cfg["required_tasks"] is None
         assert data_cfg["agent_geometry_dim"] == 7
         assert data_cfg["load_future_video"] is expected["load_future_video"]
         expected_cache = (
@@ -181,6 +200,44 @@ def test_multirobot_2x2x2_arm_invariants(task_name, expected, monkeypatch):
         "robofactory-multirobot-videogen-hub-gaussian-2x2x2"
     )
     assert cfg["wandb"]["name"].endswith("-s42")
+
+
+@pytest.mark.parametrize(
+    ("task_name", "scope"),
+    FINE_TUNE_ARMS.items(),
+)
+def test_native_agent_task_scope_finetune_contract(task_name, scope, monkeypatch):
+    _set_gaussian_env(monkeypatch)
+    cfg = _compose_arm(task_name)
+    required_agent_count, required_tasks = scope
+
+    assert cfg["resume"] is None
+    assert cfg["init_weights"].endswith("/weights/step_005000.pt")
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["checkpoint_state_kind"] == "full"
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["action_dit_config"]["hub_enabled"] is True
+    assert cfg["model"]["action_dit_config"]["enable_gaussian"] is True
+    assert cfg["model"]["loss"] == {
+        "lambda_video": 0.0,
+        "lambda_action": 1.0,
+    }
+    assert cfg["learning_rate"] == pytest.approx(3.0e-5)
+    assert cfg["max_steps"] == 1000
+    assert cfg["save_every"] == 500
+    assert cfg["eval_every"] == 500
+    assert cfg["offline_eval_num_samples"] == 32
+    assert cfg["gradient_accumulation_steps"] == 4
+    assert cfg["seed"] == 42
+    assert "max_agents" not in cfg["model"]["action_dit_config"]
+    assert "num_hub_tokens" not in cfg["model"]["action_dit_config"]
+    for split in ("train", "val"):
+        assert cfg["data"][split]["required_agent_counts"] == [
+            required_agent_count
+        ]
+        assert cfg["data"][split]["required_tasks"] == required_tasks
+        assert cfg["data"][split]["load_future_video"] is False
+        assert "max_agents" not in cfg["data"][split]
 
 
 def test_gaussian_conditioning_axis_is_explicit_and_fail_closed(monkeypatch):

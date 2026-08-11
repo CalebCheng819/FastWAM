@@ -23,6 +23,14 @@ from torch.utils.data import DataLoader
 
 from .utils.fs import ensure_dir
 from .formal_artifacts import (
+    ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT,
+    ACTION_ONLY_N2_1X8_WORLD_SIZE,
+    ACTION_ONLY_N2_PAID_GATE_STEP,
+    ACTION_ONLY_N2_RELOAD_LOAD_ATTEMPTS_DIR,
+    ACTION_ONLY_N2_RELOAD_PROOF_DIR,
+    ACTION_ONLY_N2_RELOAD_PROOF_SCHEMA_VERSION,
+    ACTION_ONLY_N2_RUN_PROFILES,
+    ACTION_ONLY_N2_TERMINAL_CANDIDATE,
     N4_GATE_GLOBAL_TRAIN_BATCH_SIZE,
     N4_GATE_GRADIENT_ACCUMULATION_STEPS,
     N4_GATE_LOCAL_MICRO_BATCH_SIZE,
@@ -31,13 +39,23 @@ from .formal_artifacts import (
     N4_GATE_TRAIN_STEPS,
     N4_GATE_WORLD_SIZE,
     canonical_json_sha256,
+    checkpoint_seal_descriptor,
+    finalize_action_only_n2_paid_gate,
     next_rng_sample,
     normalize_formal_evaluation_records,
     publish_exclusive_json,
     publish_failure_marker,
+    publish_action_only_n2_terminal_candidate,
+    publish_action_only_n2_reload_attempt_commit,
+    publish_action_only_n2_reload_proof_record,
     publish_training_terminal_seal,
     read_canonical_json,
+    require_proof_attempt_id,
+    require_sha256,
+    resolved_unaliased_directory,
     state_fingerprints,
+    validate_action_only_n2_reload_proof,
+    validate_action_only_n2_terminal_reservation,
 )
 from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
@@ -49,17 +67,83 @@ from .utils.samplers import (
 )
 from .utils.video_io import save_mp4
 from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
+from .nohash_artifacts import (
+    copy_exclusive_and_compare as nohash_copy_exclusive_and_compare,
+    publish_exclusive_json as nohash_publish_exclusive_json,
+    read_json as nohash_read_json,
+    regular_file_metadata as nohash_regular_file_metadata,
+)
 
 logger = get_logger(__name__)
 
 
 class Wan22Trainer:
+    # Preserve the historical integrity behavior for lightweight callers and
+    # tests that construct the trainer with ``__new__`` instead of ``__init__``.
+    # Normal training always replaces this with the explicitly configured mode.
+    artifact_integrity_mode = "sha256"
+
+    @staticmethod
+    def _validate_recovery_gate_stop_after_checkpoint_step(
+        configured_step,
+        *,
+        artifact_integrity_mode,
+        max_steps,
+        save_every,
+    ):
+        if configured_step is None:
+            return None
+        if isinstance(configured_step, bool) or not isinstance(configured_step, int):
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` must be a positive "
+                f"integer when enabled, got {configured_step!r}"
+            )
+        if artifact_integrity_mode != "metadata_no_hash":
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` is restricted to "
+                "artifact_integrity_mode='metadata_no_hash'"
+            )
+        if configured_step <= 0:
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` must be positive, "
+                f"got {configured_step}"
+            )
+        if max_steps is None:
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` requires an explicit "
+                "max_steps"
+            )
+        if configured_step >= max_steps:
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` must be smaller than "
+                f"max_steps ({max_steps}), got {configured_step}"
+            )
+        if save_every <= 0:
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` requires save_every>0"
+            )
+        if configured_step % save_every != 0:
+            raise ValueError(
+                "`recovery_gate_stop_after_checkpoint_step` must coincide with a "
+                f"checkpoint step selected by save_every={save_every}, got "
+                f"{configured_step}"
+            )
+        return configured_step
+
     def __init__(self, model, train_dataset, val_dataset=None, *, cfg: DictConfig):
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.cfg = cfg
         self.output_dir = str(cfg.output_dir)
+        self.artifact_integrity_mode = str(
+            cfg.get("artifact_integrity_mode", "sha256")
+        ).strip().lower()
+        if self.artifact_integrity_mode not in {"sha256", "metadata_no_hash"}:
+            raise ValueError(
+                "artifact_integrity_mode must be 'sha256' or "
+                f"'metadata_no_hash', got {self.artifact_integrity_mode!r}"
+            )
         self.learning_rate = float(cfg.learning_rate)
         self.weight_decay = float(cfg.weight_decay)
         self.batch_size = int(cfg.batch_size)
@@ -69,6 +153,14 @@ class Wan22Trainer:
         self.max_steps = int(max_steps) if max_steps is not None else None
         self.log_every = int(cfg.log_every)
         self.save_every = int(cfg.save_every)
+        self.recovery_gate_stop_after_checkpoint_step = (
+            self._validate_recovery_gate_stop_after_checkpoint_step(
+                cfg.get("recovery_gate_stop_after_checkpoint_step", None),
+                artifact_integrity_mode=self.artifact_integrity_mode,
+                max_steps=self.max_steps,
+                save_every=self.save_every,
+            )
+        )
         self.eval_every = int(cfg.eval_every)
         self.eval_num_inference_steps = int(cfg.eval_num_inference_steps)
         self.offline_eval_num_samples = int(cfg.get("offline_eval_num_samples", 0))
@@ -103,6 +195,9 @@ class Wan22Trainer:
             )
         
         self.resume = cfg.resume
+        self.init_weights = cfg.get("init_weights", None)
+        if self.resume and self.init_weights:
+            raise ValueError("`resume` and `init_weights` are mutually exclusive")
         self.trainable_scope = str(cfg.get("trainable_scope", "dit")).strip().lower()
         requested_checkpoint_state_kind = str(
             cfg.get("checkpoint_state_kind", "auto")
@@ -131,6 +226,72 @@ class Wan22Trainer:
         self.save_final_checkpoint_enabled = bool(cfg.get("save_final_checkpoint", True))
         self.seal_training_run = bool(cfg.get("seal_training_run", False))
         self.terminal_rehash_weights = bool(cfg.get("terminal_rehash_weights", True))
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            if self.seal_training_state or self.seal_training_run:
+                raise ValueError(
+                    "metadata_no_hash requires seal_training_state=false and "
+                    "seal_training_run=false"
+                )
+            if self.terminal_rehash_weights:
+                raise ValueError(
+                    "metadata_no_hash requires terminal_rehash_weights=false"
+                )
+        configured_terminal_contract = cfg.get("training_terminal_contract", None)
+        self.training_terminal_contract = (
+            None
+            if configured_terminal_contract in (None, "", "null")
+            else str(configured_terminal_contract).strip()
+        )
+        if (
+            self.artifact_integrity_mode == "metadata_no_hash"
+            and self.training_terminal_contract is not None
+        ):
+            raise ValueError(
+                "metadata_no_hash is a non-formal recovery gate and forbids "
+                "training_terminal_contract"
+            )
+        if self.training_terminal_contract not in {
+            None,
+            ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT,
+        }:
+            raise ValueError(
+                "unsupported training_terminal_contract: "
+                f"{self.training_terminal_contract!r}"
+            )
+        configured_run_profile = cfg.get("training_run_profile", None)
+        self.training_run_profile = (
+            None
+            if configured_run_profile in (None, "", "null")
+            else str(configured_run_profile).strip()
+        )
+        if self.training_terminal_contract is None:
+            if self.training_run_profile is not None:
+                raise ValueError(
+                    "training_run_profile requires an explicit "
+                    "training_terminal_contract"
+                )
+        elif self.training_run_profile not in ACTION_ONLY_N2_RUN_PROFILES:
+            raise ValueError(
+                "action_only_n2_1x8_v1 requires training_run_profile in "
+                f"{sorted(ACTION_ONLY_N2_RUN_PROFILES)}, got "
+                f"{self.training_run_profile!r}"
+            )
+        configured_task_scope_receipt = cfg.get(
+            "training_task_scope_receipt", None
+        )
+        self.training_task_scope_receipt = (
+            None
+            if configured_task_scope_receipt in (None, "", "null")
+            else str(configured_task_scope_receipt).strip()
+        )
+        if (
+            self.training_terminal_contract is None
+            and self.training_task_scope_receipt is not None
+        ):
+            raise ValueError(
+                "training_task_scope_receipt requires an explicit "
+                "training_terminal_contract"
+            )
         self.formal_n4_fullmodel_gate = bool(
             cfg.get("formal_n4_fullmodel_gate", False)
         )
@@ -153,6 +314,79 @@ class Wan22Trainer:
                 )
             self.n4_fullmodel_gate_phase = None
         self._gate_pre_load_fingerprints = None
+        requested_n2_reload_phase = os.environ.get(
+            "FASTWAM_N2_RELOAD_PROOF_PHASE", ""
+        ).strip().lower()
+        requested_n2_source_output = os.environ.get(
+            "FASTWAM_N2_RELOAD_SOURCE_OUTPUT", ""
+        ).strip()
+        requested_n2_reload_attempt_id = os.environ.get(
+            "FASTWAM_N2_RELOAD_PROOF_ATTEMPT_ID", ""
+        ).strip()
+        requested_n2_load_attempt_id = os.environ.get(
+            "FASTWAM_N2_RELOAD_LOAD_ATTEMPT_ID", ""
+        ).strip()
+        if requested_n2_reload_phase not in {"", "load"}:
+            raise ValueError(
+                "FASTWAM_N2_RELOAD_PROOF_PHASE must be unset or 'load'; "
+                "the paid save phase is selected by its terminal contract"
+            )
+        is_n2_paid_save = (
+            self.training_terminal_contract == ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT
+            and self.training_run_profile == "paid_gate_1step"
+        )
+        if is_n2_paid_save:
+            if (
+                requested_n2_reload_phase
+                or requested_n2_source_output
+                or requested_n2_load_attempt_id
+            ):
+                raise ValueError(
+                    "N=2 paid save phase forbids fresh-load environment markers"
+                )
+            self.n2_reload_proof_phase = "save"
+            self.n2_reload_source_output = self.output_dir
+        elif requested_n2_reload_phase == "load":
+            if self.training_terminal_contract is not None:
+                raise ValueError(
+                    "N=2 fresh reload must drop terminal publication authority"
+                )
+            if not requested_n2_source_output:
+                raise ValueError(
+                    "FASTWAM_N2_RELOAD_SOURCE_OUTPUT is required in the load phase"
+                )
+            self._n2_reload_load_attempt_id = require_proof_attempt_id(
+                requested_n2_load_attempt_id,
+                label="FASTWAM_N2_RELOAD_LOAD_ATTEMPT_ID",
+            )
+            self.n2_reload_proof_phase = "load"
+            self.n2_reload_source_output = requested_n2_source_output
+        else:
+            if requested_n2_source_output or requested_n2_load_attempt_id:
+                raise ValueError(
+                    "N=2 fresh-load environment markers require the load phase"
+                )
+            self.n2_reload_proof_phase = None
+            self.n2_reload_source_output = None
+            self._n2_reload_load_attempt_id = None
+        if self.n2_reload_proof_phase is not None:
+            self._n2_reload_proof_attempt_id = require_proof_attempt_id(
+                requested_n2_reload_attempt_id,
+                label="FASTWAM_N2_RELOAD_PROOF_ATTEMPT_ID",
+            )
+            self._n2_reload_process_nonce = secrets.token_hex(16)
+            self._n2_reload_process_pid = os.getpid()
+            self._n2_reload_process_start_ticks = self._process_start_ticks()
+            if self.n2_reload_proof_phase == "save":
+                self._n2_reload_load_attempt_id = None
+        else:
+            if requested_n2_reload_attempt_id:
+                raise ValueError(
+                    "FASTWAM_N2_RELOAD_PROOF_ATTEMPT_ID is forbidden outside "
+                    "the N=2 paid save/load proof phases"
+                )
+            self._n2_reload_proof_attempt_id = None
+        self._n2_reload_pre_load_fingerprints = None
         self._last_step_metrics: dict[str, object] = {}
         self._evaluation_records: list[dict[str, object]] = []
         self.process_group_timeout_seconds = int(
@@ -217,11 +451,16 @@ class Wan22Trainer:
         # Freeze the scientific data identity once.  Recomputing the indexed
         # window hash at every checkpoint is unnecessary and would add a
         # sizeable synchronous metadata pass to formal runs.
-        train_data_contract = self._dataset_contract(self.train_dataset)
+        dataset_contract_builder = (
+            self._dataset_contract_metadata_no_hash
+            if self.artifact_integrity_mode == "metadata_no_hash"
+            else self._dataset_contract
+        )
+        train_data_contract = dataset_contract_builder(self.train_dataset)
         val_data_contract = (
             train_data_contract
             if self.val_dataset is self.train_dataset
-            else self._dataset_contract(self.val_dataset)
+            else dataset_contract_builder(self.val_dataset)
         )
         self._dataset_run_contract = {
             "train": train_data_contract,
@@ -236,6 +475,19 @@ class Wan22Trainer:
             self.model,
             trainable_scope=self.trainable_scope,
         )
+
+        # Reject an unauthorized or unsealed formal N=2 resume before any
+        # checkpoint bytes can mutate the model.  The preflight depends only
+        # on the resolved run configuration and sealed on-disk metadata; the
+        # full terminal authorization remains below because it also verifies
+        # the checkpoint descriptor installed by the weight loader.
+        if self.training_terminal_contract is not None:
+            self._preflight_action_only_n2_resume_before_load()
+            if self.init_weights:
+                # Authorize the immutable run/task scope before deserializing
+                # any initialization tensor into the live model.  Sampler and
+                # loaded-checkpoint checks remain in the full validation below.
+                self._validate_action_only_n2_terminal_contract(preload=True)
 
         # A weight-only checkpoint must be loaded before the optimizer and
         # DeepSpeed engine are constructed.  ZeRO keeps FP32 master weights;
@@ -286,6 +538,13 @@ class Wan22Trainer:
         ensure_dir(self.state_dir)
         ensure_dir(self.eval_dir)
 
+        # Every formal N=2 authorization and immutable checkpoint contract is
+        # checked before prepare/zero_grad/W&B can mutate state or publish data.
+        if self.training_terminal_contract is not None:
+            self._validate_action_only_n2_terminal_contract()
+        elif self.n2_reload_proof_phase == "load":
+            self._validate_action_only_n2_reload_load_contract(post_load=False)
+
         self.model, self.optimizer, self.train_loader, self.scheduler = self.accelerator.prepare(
             self.model, self.optimizer, self.train_loader, self.scheduler
         )
@@ -296,6 +555,9 @@ class Wan22Trainer:
 
         if self.formal_n4_fullmodel_gate:
             self._validate_n4_fullmodel_gate_contract()
+        elif self.n2_reload_proof_phase == "load":
+            self._validate_action_only_n2_reload_load_contract(post_load=True)
+            self.publish_action_only_n2_reload_load_proof()
 
         val_size = len(self.val_dataset) if self.val_dataset is not None else len(self.train_dataset)
         logger.info("Train/val dataset size: %d/%d", len(self.train_dataset), val_size)
@@ -479,6 +741,829 @@ class Wan22Trainer:
                     f"observed={loaded_checkpoint_sha256!r}"
                 )
         self._resolved_n4_gate_batch_accounting()
+
+    def _preflight_action_only_n2_resume_before_load(self) -> None:
+        """Validate a formal N=2 resume without mutating prepared state.
+
+        In particular, a resume directory is accepted only when it is the
+        canonical, sealed step-500/step-1000 directory owned by this run.  Its
+        trainer contract is read through the no-symlink canonical JSON reader
+        and checked before ``accelerator.load_state`` can run.  The contract
+        check also restores the immutable base-checkpoint descriptor needed by
+        the subsequent terminal-authorization validation.
+        """
+
+        if self.training_terminal_contract != ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT:
+            raise ValueError(
+                "unexpected N=2 terminal contract during resume preflight: "
+                f"{self.training_terminal_contract!r}"
+            )
+        if self.training_run_profile == "paid_gate_1step":
+            if self.resume:
+                raise ValueError(
+                    "N=2 paid gate must start from init_weights and cannot resume"
+                )
+            return
+        if self.training_run_profile != "formal_1k" or not self.resume:
+            return
+        if self.init_weights:
+            raise ValueError("N=2 formal resume must not also apply init_weights")
+
+        resume_supplied = Path(str(self.resume)).expanduser()
+        if not resume_supplied.is_absolute():
+            raise ValueError("N=2 formal resume path must be absolute")
+        resume_path = resolved_unaliased_directory(
+            resume_supplied,
+            label="N=2 formal resume state",
+        )
+        expected_parent = resolved_unaliased_directory(
+            Path(self.output_dir) / "checkpoints" / "state",
+            label="N=2 formal state parent",
+        )
+        if resume_path.parent != expected_parent:
+            raise RuntimeError(
+                "N=2 formal resume must stay inside this run's sealed state root"
+            )
+        match = re.fullmatch(r"step_(\d{6})", resume_path.name)
+        resume_step = int(match.group(1)) if match else -1
+        if resume_step not in {500, 1000}:
+            raise RuntimeError(
+                "N=2 formal resume requires a sealed step-500 or step-1000 state"
+            )
+        descriptor = checkpoint_seal_descriptor(
+            self.output_dir,
+            step=resume_step,
+            rehash_weights=True,
+            expected_checkpoint_state_kind="sparse_delta",
+        )
+        if (
+            descriptor.get("global_step") != resume_step
+            or descriptor.get("state", {}).get("root")
+            != f"checkpoints/state/step_{resume_step:06d}"
+        ):
+            raise RuntimeError("N=2 formal resume checkpoint descriptor mismatch")
+
+        state_file = resume_path / "trainer_state.json"
+        payload, _, _ = read_canonical_json(state_file)
+        if not isinstance(payload, dict):
+            raise TypeError(f"Trainer state metadata must be a mapping: {state_file}")
+        if payload.get("global_step") != resume_step:
+            raise RuntimeError(
+                "N=2 formal resume trainer step does not match the sealed directory: "
+                f"directory={resume_step} metadata={payload.get('global_step')!r}"
+            )
+        self._validate_training_state_contract(payload, state_file=state_file)
+
+    def _validate_action_only_n2_terminal_contract(
+        self, *, preload: bool = False
+    ) -> None:
+        """Fail closed before training under the versioned N=2 formal contract."""
+
+        if self.training_terminal_contract != ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT:
+            raise ValueError(
+                "unexpected N=2 terminal contract: "
+                f"{self.training_terminal_contract!r}"
+            )
+        profile_scalar_contracts = {
+            "paid_gate_1step": {
+                "batch_size": (self.batch_size, 1),
+                "max_steps": (self.max_steps, 1),
+                "save_every": (self.save_every, 1),
+                "eval_every": (self.eval_every, 0),
+                "offline_eval_num_samples": (self.offline_eval_num_samples, 0),
+            },
+            "formal_1k": {
+                "batch_size": (self.batch_size, 2),
+                "max_steps": (self.max_steps, 1000),
+                "save_every": (self.save_every, 500),
+                "eval_every": (self.eval_every, 500),
+                "offline_eval_num_samples": (self.offline_eval_num_samples, 32),
+            },
+        }
+        if self.training_run_profile not in profile_scalar_contracts:
+            raise ValueError(
+                "N=2 action-only terminal contract lacks a supported run profile: "
+                f"{self.training_run_profile!r}"
+            )
+        scalar_contract = {
+            "gradient_accumulation_steps": (self.gradient_accumulation_steps, 4),
+            "mixed_precision": (self.mixed_precision, "bf16"),
+            "checkpoint_state_kind": (self.checkpoint_state_kind, "sparse_delta"),
+            "trainable_scope": (self.trainable_scope, "action"),
+            "agent_action_token_budget": (self.agent_action_token_budget, 128),
+            "world_size": (int(self.accelerator.num_processes), 8),
+            "formal_n4_fullmodel_gate": (self.formal_n4_fullmodel_gate, False),
+            **profile_scalar_contracts[self.training_run_profile],
+        }
+        mismatches = {
+            name: {"observed": observed, "expected": expected}
+            for name, (observed, expected) in scalar_contract.items()
+            if observed != expected
+        }
+        if mismatches:
+            raise ValueError(
+                f"N=2 action-only terminal scalar contract mismatch: {mismatches}"
+            )
+        if self.terminal_rehash_weights is not True:
+            raise ValueError(
+                "N=2 action-only terminal contracts require "
+                "terminal_rehash_weights=true"
+            )
+        if self.training_run_profile == "paid_gate_1step":
+            if self.resume:
+                raise ValueError(
+                    "N=2 paid gate must start from init_weights and cannot resume"
+                )
+            if not self.init_weights:
+                raise ValueError("N=2 paid gate requires init_weights")
+        elif self.resume:
+            if self.init_weights:
+                raise ValueError("N=2 formal resume must not also apply init_weights")
+            resume_supplied = Path(str(self.resume)).expanduser()
+            if not resume_supplied.is_absolute():
+                raise ValueError("N=2 formal resume path must be absolute")
+            resume_path = resolved_unaliased_directory(
+                resume_supplied, label="N=2 formal resume state"
+            )
+            expected_parent = resolved_unaliased_directory(
+                Path(self.output_dir) / "checkpoints" / "state",
+                label="N=2 formal state parent",
+            )
+            if resume_path.parent != expected_parent:
+                raise RuntimeError(
+                    "N=2 formal resume must stay inside this run's sealed state root"
+                )
+            match = re.fullmatch(r"step_(\d{6})", resume_path.name)
+            resume_step = int(match.group(1)) if match else -1
+            if resume_step not in {500, 1000}:
+                raise RuntimeError(
+                    "N=2 formal resume requires a sealed step-500 or step-1000 state"
+                )
+            checkpoint_seal_descriptor(
+                self.output_dir,
+                step=resume_step,
+                rehash_weights=True,
+                expected_checkpoint_state_kind="sparse_delta",
+            )
+        elif not self.init_weights:
+            raise ValueError("N=2 formal first launch requires init_weights")
+        if not (
+            self.save_training_state_enabled
+            and self.seal_training_state
+            and self.save_final_checkpoint_enabled
+            and self.seal_training_run
+        ):
+            raise ValueError(
+                "N=2 action-only terminal contract requires saved and sealed training "
+                "state, final weights, and the run-level terminal seal"
+            )
+        plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        if plugin is None:
+            raise RuntimeError("N=2 action-only terminal contract requires DeepSpeed")
+        zero_stage = plugin.deepspeed_config.get("zero_optimization", {}).get("stage")
+        if zero_stage != 2:
+            raise ValueError(
+                f"N=2 action-only terminal contract requires ZeRO stage 2, got {zero_stage!r}"
+            )
+        if not preload:
+            if not self._uses_agent_count_batch_sampler:
+                raise ValueError(
+                    "N=2 action-only terminal contract requires the "
+                    "variable-agent sampler"
+                )
+            observed_counts = [
+                int(value) for value in self.train_sampler.observed_agent_counts
+            ]
+            batch_sizes = {
+                int(key): int(value)
+                for key, value in self.train_sampler.batch_size_by_agent_count.items()
+            }
+            if observed_counts != [2] or batch_sizes != {2: 2}:
+                raise ValueError(
+                    "N=2 terminal sampler contract mismatch: "
+                    f"counts={observed_counts} batch_sizes={batch_sizes}"
+                )
+
+        model = self.accelerator.unwrap_model(self.model)
+        training_mode = str(getattr(model, "training_mode", "")).strip().lower()
+        if training_mode != "action_only_cache":
+            raise ValueError(
+                "N=2 action-only terminal contract requires "
+                f"training_mode='action_only_cache', got {training_mode!r}"
+            )
+        effective_patched_tree = os.environ.get(
+            "FASTWAM_EFFECTIVE_PATCHED_TREE", ""
+        ).strip().lower()
+        request_sha256 = os.environ.get("FASTWAM_REQUEST_SHA256", "").strip().lower()
+        init_checkpoint_sha256 = os.environ.get(
+            "FASTWAM_INIT_CHECKPOINT_SHA256", ""
+        ).strip().lower()
+        if not preload:
+            base_descriptor = getattr(
+                model, "_loaded_base_checkpoint_descriptor", None
+            )
+            if (
+                not isinstance(base_descriptor, dict)
+                or set(base_descriptor) != {"path", "role", "sha256"}
+                or base_descriptor.get("role") != "base_dependency"
+            ):
+                raise RuntimeError(
+                    "N=2 action-only terminal contract requires the exact loaded "
+                    "base checkpoint descriptor"
+                )
+            if (
+                str(base_descriptor.get("sha256", "")).strip().lower()
+                != init_checkpoint_sha256
+            ):
+                raise RuntimeError(
+                    "loaded initialization checkpoint does not match "
+                    "FASTWAM_INIT_CHECKPOINT_SHA256"
+                )
+        if not self.training_task_scope_receipt:
+            raise ValueError(
+                "N=2 action-only terminal contract requires "
+                "training_task_scope_receipt"
+            )
+        evidence = validate_action_only_n2_terminal_reservation(
+            self.output_dir,
+            run_id=os.environ.get("RUN_ID", ""),
+            base_code_commit=self._git_commit() or "",
+            effective_patched_tree=effective_patched_tree,
+            request_sha256=request_sha256,
+            init_checkpoint_sha256=init_checkpoint_sha256,
+            world_size=int(self.accelerator.num_processes),
+            formal_n4_fullmodel_gate=self.formal_n4_fullmodel_gate,
+            checkpoint_state_kind=self.checkpoint_state_kind,
+            trainable_scope=self.trainable_scope,
+            training_mode=training_mode,
+            dataset_contract=self._dataset_run_contract,
+            task_scope_receipt_relative_path=self.training_task_scope_receipt,
+            run_profile=self.training_run_profile,
+        )
+        if not preload:
+            required_tasks = evidence["task_scope"]["required_tasks"]
+            sampler_tasks = [
+                str(value)
+                for value in self.train_sampler.tasks_by_agent_count.get(2, ())
+            ]
+            if sampler_tasks != required_tasks:
+                raise ValueError(
+                    "N=2 terminal sampler task scope mismatch: "
+                    f"sampler={sampler_tasks} required={required_tasks}"
+                )
+        for label, dataset in (("train", self.train_dataset), ("val", self.val_dataset)):
+            if getattr(dataset, "load_future_video", True):
+                raise ValueError(
+                    f"N=2 action-only terminal {label} dataset must not load future video"
+                )
+        self._action_only_n2_terminal_evidence = evidence
+
+    def _n2_reload_source_root(self) -> Path:
+        if self.n2_reload_proof_phase is None or not self.n2_reload_source_output:
+            raise RuntimeError("N=2 reload proof has no source output root")
+        return resolved_unaliased_directory(
+            self.n2_reload_source_output,
+            label="N=2 reload source output",
+        )
+
+    def _n2_reload_proof_dir(self) -> Path:
+        path = self._n2_reload_source_root() / ACTION_ONLY_N2_RELOAD_PROOF_DIR
+        if path.exists() or path.is_symlink():
+            return resolved_unaliased_directory(
+                path, label="N=2 reload proof directory"
+            )
+        return path
+
+    def _n2_reload_state_fingerprints(
+        self, *, require_optimizer_state: bool = True
+    ) -> dict[str, object]:
+        return state_fingerprints(
+            model=self.accelerator.unwrap_model(self.model),
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            global_step=self.global_step,
+            require_optimizer_state=require_optimizer_state,
+            full_state=True,
+        )
+
+    def _n2_reload_sampler_cursor(self) -> dict[str, object]:
+        if not self._uses_agent_count_batch_sampler:
+            raise RuntimeError("N=2 reload proof requires the native agent-count sampler")
+        cursor = {
+            "agent_action_token_budget": int(
+                self.train_sampler.agent_action_token_budget
+            ),
+            "batch_in_epoch": int(self.batch_in_epoch),
+            "epoch": int(self.epoch),
+            # The save world's sampler has not been put into resume mode yet.
+            # Bind the semantic cursor restored from trainer_state.json rather
+            # than the sampler's transient resume offset.
+            "global_batch_offset": int(self.batch_in_epoch)
+            * int(self.accelerator.num_processes),
+            "global_batches_per_epoch": int(
+                self.train_sampler.global_batches_per_epoch
+            ),
+            "global_step": int(self.global_step),
+            "gradient_accumulation_steps": int(
+                self.train_sampler.gradient_accumulation_steps
+            ),
+            "microbatches_per_process": int(
+                self.train_sampler.microbatches_per_process
+            ),
+            "num_processes": int(self.train_sampler.num_processes),
+            "optimizer_steps_per_epoch": int(
+                self.train_sampler.optimizer_steps_per_epoch
+            ),
+            "schedule_fingerprint": self.train_sampler.schedule_fingerprint(
+                self.epoch
+            ),
+            "uses_agent_count_batch_sampler": True,
+        }
+        if (
+            self.n2_reload_proof_phase == "load"
+            and int(self.train_sampler.resume_batch_offset)
+            != int(self.batch_in_epoch)
+        ):
+            raise RuntimeError(
+                "N=2 fresh reload sampler did not restore batch_in_epoch: "
+                f"resume_offset={self.train_sampler.resume_batch_offset} "
+                f"batch_in_epoch={self.batch_in_epoch}"
+            )
+        return cursor
+
+    def _read_n2_reload_checkpoint_binding(
+        self,
+    ) -> tuple[dict[str, object], str]:
+        binding_path = self._n2_reload_proof_dir() / "checkpoint-binding.json"
+        binding, binding_sha256, _ = read_canonical_json(binding_path)
+        _, _, candidate_sha256 = self._read_n2_terminal_candidate()
+        if set(binding) != {
+            "checkpoint",
+            "global_step",
+            "proof_attempt_id",
+            "run_id",
+            "schema_name",
+            "schema_version",
+            "terminal_arguments_sha256",
+            "terminal_candidate_sha256",
+            "world_size",
+        }:
+            raise ValueError("N=2 reload checkpoint binding fields mismatch")
+        if (
+            binding.get("schema_name")
+            != "fastwam-action-only-n2-reload-checkpoint-binding"
+            or binding.get("schema_version")
+            != ACTION_ONLY_N2_RELOAD_PROOF_SCHEMA_VERSION
+            or binding.get("run_id") != os.environ.get("RUN_ID", "")
+            or binding.get("global_step") != ACTION_ONLY_N2_PAID_GATE_STEP
+            or binding.get("world_size") != ACTION_ONLY_N2_1X8_WORLD_SIZE
+            or binding.get("proof_attempt_id")
+            != self._n2_reload_proof_attempt_id
+            or binding.get("terminal_candidate_sha256") != candidate_sha256
+        ):
+            raise RuntimeError("N=2 reload checkpoint binding identity mismatch")
+        require_sha256(
+            binding.get("terminal_arguments_sha256", ""),
+            label="N=2 reload binding terminal arguments SHA-256",
+        )
+        candidate, _, _ = self._read_n2_terminal_candidate()
+        if binding.get("terminal_arguments_sha256") != candidate.get(
+            "arguments_sha256"
+        ):
+            raise RuntimeError(
+                "N=2 reload binding does not bind the staged terminal arguments"
+            )
+        checkpoint = binding.get("checkpoint")
+        if not isinstance(checkpoint, dict) or checkpoint.get("global_step") != 1:
+            raise RuntimeError("N=2 reload binding lacks the step-1 checkpoint")
+        state = checkpoint.get("state")
+        weights = checkpoint.get("weights")
+        if (
+            not isinstance(state, dict)
+            or not isinstance(weights, dict)
+            or state.get("root") != "checkpoints/state/step_000001"
+            or weights.get("checkpoint")
+            != "checkpoints/weights/step_000001.pt"
+        ):
+            raise RuntimeError("N=2 reload binding points at an unexpected checkpoint")
+        return binding, binding_sha256
+
+    def _read_n2_terminal_candidate(
+        self,
+    ) -> tuple[dict[str, object], dict[str, object], str]:
+        candidate, candidate_sha256, _ = read_canonical_json(
+            self._n2_reload_source_root() / ACTION_ONLY_N2_TERMINAL_CANDIDATE
+        )
+        if set(candidate) != {
+            "arguments",
+            "arguments_sha256",
+            "run_id",
+            "schema_name",
+            "schema_version",
+            "status",
+        }:
+            raise ValueError("N=2 terminal candidate fields mismatch")
+        arguments = candidate.get("arguments")
+        if not isinstance(arguments, dict):
+            raise TypeError("N=2 terminal candidate arguments must be a mapping")
+        if (
+            candidate.get("schema_name")
+            != "fastwam-action-only-n2-terminal-candidate"
+            or candidate.get("schema_version") != 1
+            or candidate.get("status") != "AWAITING_FRESH_RELOAD"
+            or candidate.get("run_id") != os.environ.get("RUN_ID", "")
+            or candidate.get("run_id") != arguments.get("run_id")
+            or candidate.get("arguments_sha256")
+            != canonical_json_sha256(arguments)
+        ):
+            raise RuntimeError("N=2 terminal candidate identity mismatch")
+        expected = {
+            "checkpoint_state_kind": "sparse_delta",
+            "dataset_contract": self._dataset_run_contract,
+            "dataset_contract_sha256": canonical_json_sha256(
+                self._dataset_run_contract
+            ),
+            "evaluation_records": [],
+            "expected_checkpoint_steps": [1],
+            "expected_evaluation_steps": [],
+            "formal_n4_fullmodel_gate": False,
+            "max_steps": ACTION_ONLY_N2_PAID_GATE_STEP,
+            "offline_eval_num_samples": 0,
+            "run_id": os.environ.get("RUN_ID", ""),
+            "run_profile": "paid_gate_1step",
+            "trainable_scope": "action",
+            "training_mode": "action_only_cache",
+            "training_terminal_contract": ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT,
+            "world_size": ACTION_ONLY_N2_1X8_WORLD_SIZE,
+        }
+        mismatches = {
+            key: {"expected": value, "observed": arguments.get(key)}
+            for key, value in expected.items()
+            if arguments.get(key) != value
+        }
+        if mismatches:
+            raise RuntimeError(
+                f"N=2 terminal candidate contract mismatch: {mismatches}"
+            )
+        if arguments.get("code_commit") != (self._git_commit() or ""):
+            raise RuntimeError("N=2 fresh reload code commit differs from save world")
+        return candidate, arguments, candidate_sha256
+
+    def _validate_action_only_n2_reload_load_contract(
+        self, *, post_load: bool
+    ) -> None:
+        if self.n2_reload_proof_phase != "load":
+            raise RuntimeError("N=2 reload load contract is only valid in load phase")
+        scalar_contract = {
+            "agent_action_token_budget": (self.agent_action_token_budget, 128),
+            "batch_size": (self.batch_size, 1),
+            "checkpoint_state_kind": (self.checkpoint_state_kind, "sparse_delta"),
+            "eval_every": (self.eval_every, 0),
+            "formal_n4_fullmodel_gate": (self.formal_n4_fullmodel_gate, False),
+            "gradient_accumulation_steps": (
+                self.gradient_accumulation_steps,
+                4,
+            ),
+            "max_steps": (self.max_steps, 1),
+            "mixed_precision": (self.mixed_precision, "bf16"),
+            "offline_eval_num_samples": (self.offline_eval_num_samples, 0),
+            "save_every": (self.save_every, 0),
+            "trainable_scope": (self.trainable_scope, "action"),
+            "world_size": (
+                int(self.accelerator.num_processes),
+                ACTION_ONLY_N2_1X8_WORLD_SIZE,
+            ),
+        }
+        mismatches = {
+            key: {"expected": expected, "observed": observed}
+            for key, (observed, expected) in scalar_contract.items()
+            if observed != expected
+        }
+        if mismatches:
+            raise ValueError(f"N=2 fresh reload scalar contract mismatch: {mismatches}")
+        if self.init_weights:
+            raise ValueError("N=2 fresh reload must not apply init_weights")
+        if any(
+            (
+                self.save_training_state_enabled,
+                self.seal_training_state,
+                self.save_final_checkpoint_enabled,
+                self.seal_training_run,
+            )
+        ):
+            raise ValueError("N=2 fresh reload must be read-only and non-sealing")
+        plugin = getattr(self.accelerator.state, "deepspeed_plugin", None)
+        if plugin is None:
+            raise RuntimeError("N=2 fresh reload requires DeepSpeed")
+        zero_stage = plugin.deepspeed_config.get("zero_optimization", {}).get("stage")
+        if zero_stage != 2:
+            raise ValueError(f"N=2 fresh reload requires ZeRO stage 2, got {zero_stage!r}")
+        if not self._uses_agent_count_batch_sampler:
+            raise ValueError("N=2 fresh reload requires the variable-agent sampler")
+        observed_counts = [int(value) for value in self.train_sampler.observed_agent_counts]
+        batch_sizes = {
+            int(key): int(value)
+            for key, value in self.train_sampler.batch_size_by_agent_count.items()
+        }
+        if observed_counts != [2] or batch_sizes != {2: 2}:
+            raise ValueError(
+                "N=2 fresh reload sampler contract mismatch: "
+                f"counts={observed_counts} batch_sizes={batch_sizes}"
+            )
+        model = self.accelerator.unwrap_model(self.model)
+        if str(getattr(model, "training_mode", "")).strip().lower() != "action_only_cache":
+            raise ValueError("N=2 fresh reload requires action_only_cache mode")
+        for label, dataset in (("train", self.train_dataset), ("val", self.val_dataset)):
+            if getattr(dataset, "load_future_video", True):
+                raise ValueError(f"N=2 fresh reload {label} dataset loaded future video")
+
+        source_root = self._n2_reload_source_root()
+        load_output = resolved_unaliased_directory(
+            self.output_dir, label="N=2 reload probe output"
+        )
+        if source_root == load_output:
+            raise ValueError("N=2 fresh reload requires a distinct probe output root")
+        expected_resume = resolved_unaliased_directory(
+            source_root / "checkpoints" / "state" / "step_000001",
+            label="N=2 paid reload state",
+        )
+        resume_path = Path(str(self.resume)).expanduser()
+        if not resume_path.is_absolute():
+            raise ValueError("N=2 fresh reload resume path must be absolute")
+        resume_path = resolved_unaliased_directory(
+            resume_path, label="N=2 fresh reload resume state"
+        )
+        if resume_path != expected_resume:
+            raise RuntimeError(
+                "N=2 fresh reload must resume the exact paid checkpoint state: "
+                f"expected={expected_resume} observed={resume_path}"
+            )
+        _, arguments, _ = self._read_n2_terminal_candidate()
+        binding, _ = self._read_n2_reload_checkpoint_binding()
+        if not post_load:
+            live_checkpoint = checkpoint_seal_descriptor(
+                source_root,
+                step=ACTION_ONLY_N2_PAID_GATE_STEP,
+                rehash_weights=True,
+                expected_checkpoint_state_kind="sparse_delta",
+            )
+            if live_checkpoint != binding["checkpoint"]:
+                raise RuntimeError(
+                    "N=2 fresh reload source checkpoint/state tree changed after "
+                    "the save-world binding"
+                )
+        if post_load:
+            restored_contract = {
+                "batch_in_epoch": (self.batch_in_epoch, 4),
+                "epoch": (self.epoch, 0),
+                "global_step": (self.global_step, ACTION_ONLY_N2_PAID_GATE_STEP),
+                "evaluation_records": (
+                    self._evaluation_records,
+                    arguments.get("evaluation_records"),
+                ),
+                "last_step_metrics": (
+                    self._last_step_metrics,
+                    arguments.get("last_step_metrics"),
+                ),
+            }
+            restored_mismatches = {
+                key: {"expected": expected, "observed": observed}
+                for key, (observed, expected) in restored_contract.items()
+                if observed != expected
+            }
+            if restored_mismatches:
+                raise RuntimeError(
+                    "N=2 fresh reload trainer-state mismatch: "
+                    f"{restored_mismatches}"
+                )
+            cursor = self._n2_reload_sampler_cursor()
+            if cursor["global_batch_offset"] != 32:
+                raise RuntimeError("N=2 fresh reload did not restore sampler cursor 32")
+
+    def publish_action_only_n2_reload_save_proof(self) -> None:
+        if self.n2_reload_proof_phase != "save":
+            raise RuntimeError("N=2 save proof is only valid in paid save phase")
+        if (
+            self.global_step != ACTION_ONLY_N2_PAID_GATE_STEP
+            or int(self.accelerator.num_processes) != ACTION_ONLY_N2_1X8_WORLD_SIZE
+            or self.accelerator.device.type != "cuda"
+        ):
+            raise RuntimeError("N=2 save proof requires CUDA step 1 on exactly 8 ranks")
+        source_root = self._n2_reload_source_root()
+        proof_dir = source_root / ACTION_ONLY_N2_RELOAD_PROOF_DIR
+        binding_path = proof_dir / "checkpoint-binding.json"
+        candidate, _, candidate_sha256 = self._read_n2_terminal_candidate()
+        terminal_arguments_sha256 = require_sha256(
+            candidate.get("arguments_sha256", ""),
+            label="N=2 staged terminal arguments SHA-256",
+        )
+        if self.accelerator.is_main_process:
+            if proof_dir.exists() or proof_dir.is_symlink():
+                raise FileExistsError(f"N=2 reload proof directory already exists: {proof_dir}")
+            proof_dir.mkdir(mode=0o700)
+            (proof_dir / ACTION_ONLY_N2_RELOAD_LOAD_ATTEMPTS_DIR).mkdir(mode=0o700)
+            checkpoint = checkpoint_seal_descriptor(
+                source_root,
+                step=ACTION_ONLY_N2_PAID_GATE_STEP,
+                rehash_weights=True,
+                expected_checkpoint_state_kind="sparse_delta",
+            )
+            publish_action_only_n2_reload_proof_record(
+                source_root,
+                relative_path=(
+                    f"{ACTION_ONLY_N2_RELOAD_PROOF_DIR}/checkpoint-binding.json"
+                ),
+                payload={
+                    "checkpoint": checkpoint,
+                    "global_step": ACTION_ONLY_N2_PAID_GATE_STEP,
+                    "proof_attempt_id": self._n2_reload_proof_attempt_id,
+                    "run_id": os.environ.get("RUN_ID", ""),
+                    "schema_name": (
+                        "fastwam-action-only-n2-reload-checkpoint-binding"
+                    ),
+                    "schema_version": ACTION_ONLY_N2_RELOAD_PROOF_SCHEMA_VERSION,
+                    "terminal_arguments_sha256": terminal_arguments_sha256,
+                    "terminal_candidate_sha256": candidate_sha256,
+                    "world_size": ACTION_ONLY_N2_1X8_WORLD_SIZE,
+                },
+            )
+        else:
+            self._wait_for_published_regular_file(
+                binding_path, label="N=2 reload checkpoint binding"
+            )
+        binding, binding_sha256 = self._read_n2_reload_checkpoint_binding()
+        fingerprints = self._n2_reload_state_fingerprints()
+        sampler_cursor = self._n2_reload_sampler_cursor()
+        rng_sample = next_rng_sample(self.accelerator.device)
+        rank = int(self.accelerator.process_index)
+        publish_action_only_n2_reload_proof_record(
+            source_root,
+            relative_path=(
+                f"{ACTION_ONLY_N2_RELOAD_PROOF_DIR}/save-rank-{rank:05d}.json"
+            ),
+            payload={
+                "checkpoint": binding["checkpoint"],
+                "checkpoint_binding_sha256": binding_sha256,
+                "fingerprints": fingerprints,
+                "global_step": ACTION_ONLY_N2_PAID_GATE_STEP,
+                "next_rng_sample": rng_sample,
+                "phase": "save_after_sealed_checkpoint",
+                "proof_attempt_id": self._n2_reload_proof_attempt_id,
+                "process_nonce": self._n2_reload_process_nonce,
+                "process_pid": self._n2_reload_process_pid,
+                "process_start_ticks": self._n2_reload_process_start_ticks,
+                "rank": rank,
+                "run_id": os.environ.get("RUN_ID", ""),
+                "sampler_cursor": sampler_cursor,
+                "schema_name": "fastwam-action-only-n2-reload-save-proof",
+                "schema_version": ACTION_ONLY_N2_RELOAD_PROOF_SCHEMA_VERSION,
+                "terminal_arguments_sha256": binding[
+                    "terminal_arguments_sha256"
+                ],
+                "terminal_candidate_sha256": binding[
+                    "terminal_candidate_sha256"
+                ],
+                "world_size": ACTION_ONLY_N2_1X8_WORLD_SIZE,
+            },
+        )
+        self.accelerator.wait_for_everyone()
+
+    def publish_action_only_n2_reload_load_proof(self) -> None:
+        if self.n2_reload_proof_phase != "load":
+            raise RuntimeError("N=2 load proof is only valid in fresh load phase")
+        if (
+            self.global_step != ACTION_ONLY_N2_PAID_GATE_STEP
+            or int(self.accelerator.num_processes) != ACTION_ONLY_N2_1X8_WORLD_SIZE
+            or self.accelerator.device.type != "cuda"
+            or self._n2_reload_pre_load_fingerprints is None
+        ):
+            raise RuntimeError(
+                "N=2 load proof requires a captured pre-load state and restored CUDA step 1"
+            )
+        binding, binding_sha256 = self._read_n2_reload_checkpoint_binding()
+        rank = int(self.accelerator.process_index)
+        save_path = self._n2_reload_proof_dir() / f"save-rank-{rank:05d}.json"
+        saved, _, _ = read_canonical_json(save_path)
+        if (
+            saved.get("rank") != rank
+            or saved.get("world_size") != ACTION_ONLY_N2_1X8_WORLD_SIZE
+            or saved.get("run_id") != os.environ.get("RUN_ID", "")
+            or saved.get("checkpoint_binding_sha256") != binding_sha256
+            or saved.get("checkpoint") != binding["checkpoint"]
+            or saved.get("proof_attempt_id")
+            != self._n2_reload_proof_attempt_id
+            or saved.get("terminal_arguments_sha256")
+            != binding["terminal_arguments_sha256"]
+            or saved.get("terminal_candidate_sha256")
+            != binding["terminal_candidate_sha256"]
+        ):
+            raise RuntimeError(f"N=2 save proof identity mismatch on rank {rank}")
+        restored = self._n2_reload_state_fingerprints()
+        sampler_cursor = self._n2_reload_sampler_cursor()
+        observed_next_rng_sample = next_rng_sample(self.accelerator.device)
+        expected_fingerprints = saved.get("fingerprints", {})
+        checks = {
+            "checkpoint_binding": saved.get("checkpoint") == binding["checkpoint"],
+            "fresh_process": (
+                saved.get("process_nonce") != self._n2_reload_process_nonce
+                and (saved.get("process_pid"), saved.get("process_start_ticks"))
+                != (
+                    self._n2_reload_process_pid,
+                    self._n2_reload_process_start_ticks,
+                )
+            ),
+            "global_step": restored.get("global_step")
+            == expected_fingerprints.get("global_step"),
+            "model": restored.get("model") == expected_fingerprints.get("model"),
+            "next_rng_sample": observed_next_rng_sample
+            == saved.get("next_rng_sample"),
+            "optimizer": restored.get("optimizer")
+            == expected_fingerprints.get("optimizer"),
+            "pre_load_was_distinct": any(
+                self._n2_reload_pre_load_fingerprints.get(key)
+                != expected_fingerprints.get(key)
+                for key in ("model", "optimizer")
+            ),
+            "rng": restored.get("rng") == expected_fingerprints.get("rng"),
+            "sampler_cursor": sampler_cursor == saved.get("sampler_cursor"),
+            "scheduler": restored.get("scheduler")
+            == expected_fingerprints.get("scheduler"),
+            "terminal_candidate": (
+                saved.get("terminal_arguments_sha256")
+                == binding["terminal_arguments_sha256"]
+                and saved.get("terminal_candidate_sha256")
+                == binding["terminal_candidate_sha256"]
+            ),
+        }
+        if restored != expected_fingerprints:
+            checks["model"] = False
+        if not all(checks.values()):
+            raise RuntimeError(f"N=2 fresh reload mismatch on rank {rank}: {checks}")
+        load_attempt_id = self._n2_reload_load_attempt_id
+        if load_attempt_id is None:
+            raise RuntimeError("N=2 fresh reload lacks a load attempt id")
+        load_attempt_dir = (
+            self._n2_reload_proof_dir()
+            / ACTION_ONLY_N2_RELOAD_LOAD_ATTEMPTS_DIR
+            / load_attempt_id
+        )
+        if self.accelerator.is_main_process:
+            if load_attempt_dir.exists() or load_attempt_dir.is_symlink():
+                raise FileExistsError(
+                    "N=2 reload load-attempt directory already exists: "
+                    f"{load_attempt_dir}"
+                )
+            load_attempt_dir.mkdir(mode=0o700)
+        self.accelerator.wait_for_everyone()
+        publish_action_only_n2_reload_proof_record(
+            self._n2_reload_source_root(),
+            relative_path=(
+                f"{ACTION_ONLY_N2_RELOAD_PROOF_DIR}/"
+                f"{ACTION_ONLY_N2_RELOAD_LOAD_ATTEMPTS_DIR}/{load_attempt_id}/"
+                f"load-rank-{rank:05d}.json"
+            ),
+            payload={
+                "checkpoint": binding["checkpoint"],
+                "checkpoint_binding_sha256": binding_sha256,
+                "checks": checks,
+                "fingerprints": restored,
+                "global_step": ACTION_ONLY_N2_PAID_GATE_STEP,
+                "load_attempt_id": load_attempt_id,
+                "next_rng_sample": observed_next_rng_sample,
+                "phase": "load_fresh_process",
+                "pre_load_fingerprints": self._n2_reload_pre_load_fingerprints,
+                "proof_attempt_id": self._n2_reload_proof_attempt_id,
+                "process_nonce": self._n2_reload_process_nonce,
+                "process_pid": self._n2_reload_process_pid,
+                "process_start_ticks": self._n2_reload_process_start_ticks,
+                "rank": rank,
+                "run_id": os.environ.get("RUN_ID", ""),
+                "sampler_cursor": sampler_cursor,
+                "schema_name": "fastwam-action-only-n2-reload-load-proof",
+                "schema_version": ACTION_ONLY_N2_RELOAD_PROOF_SCHEMA_VERSION,
+                "terminal_arguments_sha256": binding[
+                    "terminal_arguments_sha256"
+                ],
+                "terminal_candidate_sha256": binding[
+                    "terminal_candidate_sha256"
+                ],
+                "world_size": ACTION_ONLY_N2_1X8_WORLD_SIZE,
+            },
+        )
+        self.accelerator.wait_for_everyone()
+        source_root = self._n2_reload_source_root()
+        if self.accelerator.is_main_process:
+            # A failed fresh-reload attempt is attempt-local runtime evidence;
+            # it must never poison the source training run with TRAINING.FAILED.
+            publish_action_only_n2_reload_attempt_commit(
+                source_root,
+                run_id=os.environ.get("RUN_ID", ""),
+                checkpoint=binding["checkpoint"],
+                terminal_arguments_sha256=binding["terminal_arguments_sha256"],
+                load_attempt_id=load_attempt_id,
+            )
+            finalize_action_only_n2_paid_gate(source_root)
+        self.accelerator.wait_for_everyone()
 
     def _n4_gate_sample_shapes(self, sample) -> dict[str, list[int]]:
         required = {
@@ -752,42 +1837,73 @@ class Wan22Trainer:
             steps.extend(range(self.save_every, self.max_steps + 1, self.save_every))
         if self.save_final_checkpoint_enabled and self.max_steps not in steps:
             steps.append(self.max_steps)
+        terminal_arguments = {
+            "run_id": os.environ.get("RUN_ID", ""),
+            "code_commit": self._git_commit() or "",
+            "config_relative_path": config_relative_path,
+            "config_sha256": config_sha256,
+            "max_steps": self.max_steps,
+            "expected_checkpoint_steps": steps,
+            "expected_evaluation_steps": (
+                []
+                if self.eval_every <= 0
+                else list(
+                    range(
+                        self.eval_every,
+                        self.max_steps + 1,
+                        self.eval_every,
+                    )
+                )
+            ),
+            "world_size": int(self.accelerator.num_processes),
+            "last_step_metrics": self._last_step_metrics,
+            "evaluation_records": self._evaluation_records,
+            "training_mode": training_mode,
+            "dataset_contract_sha256": canonical_json_sha256(
+                self._dataset_run_contract
+            ),
+            "authorization_gate_complete_sha256": os.environ.get(
+                "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256", ""
+            ),
+            "rehash_weights": self.terminal_rehash_weights,
+            "training_terminal_contract": self.training_terminal_contract,
+            "formal_n4_fullmodel_gate": self.formal_n4_fullmodel_gate,
+            "checkpoint_state_kind": self.checkpoint_state_kind,
+            "trainable_scope": self.trainable_scope,
+            "dataset_contract": self._dataset_run_contract,
+            "task_scope_receipt_relative_path": (
+                self.training_task_scope_receipt or ""
+            ),
+            "effective_patched_tree": os.environ.get(
+                "FASTWAM_EFFECTIVE_PATCHED_TREE", ""
+            ),
+            "request_sha256": os.environ.get("FASTWAM_REQUEST_SHA256", ""),
+            "init_checkpoint_sha256": os.environ.get(
+                "FASTWAM_INIT_CHECKPOINT_SHA256", ""
+            ),
+            "offline_eval_num_samples": self.offline_eval_num_samples,
+            "run_profile": self.training_run_profile or "",
+        }
         self.accelerator.wait_for_everyone()
         complete_path = Path(self.output_dir) / "TRAINING.COMPLETE"
         failure_path = Path(self.output_dir) / "TRAINING.FAILED.json"
+        success_path = complete_path
+        success_label = "run-level training terminal seal"
+        if self.n2_reload_proof_phase == "save":
+            success_path = Path(self.output_dir) / ACTION_ONLY_N2_TERMINAL_CANDIDATE
+            success_label = "N=2 paid-gate terminal candidate"
         if self.accelerator.is_main_process:
             try:
-                publish_training_terminal_seal(
-                    self.output_dir,
-                    run_id=os.environ.get("RUN_ID", ""),
-                    code_commit=self._git_commit() or "",
-                    config_relative_path=config_relative_path,
-                    config_sha256=config_sha256,
-                    max_steps=self.max_steps,
-                    expected_checkpoint_steps=steps,
-                    expected_evaluation_steps=(
-                        []
-                        if self.eval_every <= 0
-                        else list(
-                            range(
-                                self.eval_every,
-                                self.max_steps + 1,
-                                self.eval_every,
-                            )
-                        )
-                    ),
-                    world_size=int(self.accelerator.num_processes),
-                    last_step_metrics=self._last_step_metrics,
-                    evaluation_records=self._evaluation_records,
-                    training_mode=training_mode,
-                    dataset_contract_sha256=canonical_json_sha256(
-                        self._dataset_run_contract
-                    ),
-                    authorization_gate_complete_sha256=os.environ.get(
-                        "FASTWAM_N4_FULLMODEL_GATE_COMPLETE_SHA256", ""
-                    ),
-                    rehash_weights=self.terminal_rehash_weights,
-                )
+                if self.n2_reload_proof_phase == "save":
+                    publish_action_only_n2_terminal_candidate(
+                        self.output_dir,
+                        terminal_arguments=terminal_arguments,
+                    )
+                else:
+                    publish_training_terminal_seal(
+                        self.output_dir,
+                        **terminal_arguments,
+                    )
             except BaseException as error:
                 if not complete_path.exists() and not complete_path.is_symlink():
                     publish_failure_marker(
@@ -800,11 +1916,18 @@ class Wan22Trainer:
                 raise
         else:
             self._wait_for_terminal_or_failure(
-                success_path=complete_path,
+                success_path=success_path,
                 failure_path=failure_path,
-                label="run-level training terminal seal",
+                label=success_label,
             )
         self.accelerator.wait_for_everyone()
+        if self.n2_reload_proof_phase == "save":
+            # The checkpoint and its full state-tree seal already exist.  Rank
+            # zero has now exclusively staged the terminal candidate, so all
+            # ranks can bind the same candidate/arguments digests into the
+            # checkpoint binding and their save-world proofs.
+            self.publish_action_only_n2_reload_save_proof()
+            self.accelerator.wait_for_everyone()
 
     def _forward_training_loss(self, sample):
         """Run loss computation through the prepared model wrapper.
@@ -875,10 +1998,23 @@ class Wan22Trainer:
                 agent_action_token_budget=self.agent_action_token_budget,
                 gradient_accumulation_steps=self.gradient_accumulation_steps,
             )
+            schedule_identity = (
+                {
+                    "integrity_mode": "metadata_no_hash",
+                    "epoch": int(self.train_sampler.epoch),
+                    "batch_count": len(
+                        self.train_sampler.global_epoch_batches(
+                            self.train_sampler.epoch
+                        )
+                    ),
+                }
+                if self.artifact_integrity_mode == "metadata_no_hash"
+                else self.train_sampler.schedule_fingerprint()
+            )
             logger.info(
                 "Using hierarchical task/count-balanced batching: counts=%s tasks_by_count=%s "
                 "batch_sizes=%s token_budget=%s global_batches=%d local_microbatches=%d "
-                "optimizer_steps=%d schedule_sha256=%s",
+                "optimizer_steps=%d schedule_identity=%s",
                 self.train_sampler.observed_agent_counts,
                 self.train_sampler.tasks_by_agent_count,
                 self.train_sampler.batch_size_by_agent_count,
@@ -886,7 +2022,7 @@ class Wan22Trainer:
                 self.train_sampler.global_batches_per_epoch,
                 self.train_sampler.microbatches_per_process,
                 self.train_sampler.optimizer_steps_per_epoch,
-                self.train_sampler.schedule_fingerprint(),
+                schedule_identity,
             )
             return DataLoader(
                 dataset,
@@ -1078,6 +2214,7 @@ class Wan22Trainer:
             "randomize_agent_order",
             "require_train_only_stats",
             "gaussian_cache_verify",
+            "gaussian_fallback_projection",
             "gaussian_cache_expected_manifest_sha256",
             "gaussian_cache_expected_selection_sha256",
             "gaussian_cache_expected_source_identity_sha256",
@@ -1093,6 +2230,7 @@ class Wan22Trainer:
             "video_size",
             "video_indices",
             "required_agent_counts",
+            "required_tasks",
             "gaussian_size",
         )
         for name in sequence_attributes:
@@ -1148,6 +2286,127 @@ class Wan22Trainer:
         return contract
 
     @staticmethod
+    def _metadata_value(value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): Wan22Trainer._metadata_value(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [Wan22Trainer._metadata_value(item) for item in value]
+        raise TypeError(
+            "metadata_no_hash contract encountered an unsupported value: "
+            f"{type(value)}"
+        )
+
+    @classmethod
+    def _dataset_contract_metadata_no_hash(cls, dataset):
+        """Record the complete sorted dataset inventory without a digest."""
+
+        if dataset is None:
+            return None
+        contract = {
+            "integrity_mode": "metadata_no_hash",
+            "class": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
+            "length": int(len(dataset)),
+        }
+        scalar_attributes = (
+            "num_frames",
+            "action_horizon",
+            "action_video_freq_ratio",
+            "load_future_video",
+            "action_dim",
+            "state_dim",
+            "agent_geometry_dim",
+            "window_stride",
+            "val_set_proportion",
+            "is_training_set",
+            "split_seed",
+            "randomize_agent_order",
+            "require_train_only_stats",
+            "gaussian_cache_verify",
+            "gaussian_fallback_projection",
+            "gaussian_channels",
+            "context_len",
+        )
+        for name in scalar_attributes:
+            if hasattr(dataset, name):
+                value = getattr(dataset, name)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    contract[name] = value
+        for name in (
+            "video_size",
+            "video_indices",
+            "required_agent_counts",
+            "required_tasks",
+            "gaussian_size",
+        ):
+            if hasattr(dataset, name):
+                value = getattr(dataset, name)
+                contract[name] = None if value is None else cls._metadata_value(value)
+
+        for name in ("gaussian_cache_dir", "gaussian_fallback_cache_dir"):
+            if hasattr(dataset, name):
+                value = getattr(dataset, name)
+                contract[name] = None if value is None else str(Path(value).resolve())
+        preflight = getattr(dataset, "_gaussian_preflight", None)
+        if preflight is not None:
+            contract["gaussian_preflight"] = cls._metadata_value(preflight)
+
+        root = getattr(dataset, "root_dir", None)
+        if root is not None:
+            root_path = Path(root).expanduser().resolve(strict=True)
+            if not root_path.is_dir():
+                raise RuntimeError(f"Dataset root is not a directory: {root_path}")
+            inventory = []
+            for source_path in sorted(root_path.rglob("*.h5")):
+                if source_path.is_symlink():
+                    raise RuntimeError(
+                        f"Dataset source symlink is forbidden in metadata_no_hash: {source_path}"
+                    )
+                metadata = nohash_regular_file_metadata(source_path)
+                inventory.append(
+                    {
+                        "path": source_path.relative_to(root_path).as_posix(),
+                        "bytes": metadata["bytes"],
+                        "mtime_ns": metadata["mtime_ns"],
+                        "dev": metadata["dev"],
+                        "ino": metadata["ino"],
+                        "mode": metadata["mode"],
+                    }
+                )
+            contract["root_dir"] = str(root_path)
+            contract["source_inventory"] = inventory
+
+        entries = getattr(dataset, "entries", None)
+        if entries is not None:
+            contract["window_index"] = [
+                {
+                    str(key): cls._metadata_value(value)
+                    for key, value in sorted(entry.items())
+                    if key != "path"
+                }
+                for entry in entries
+            ]
+
+        stats_path = getattr(dataset, "_stats_path", None)
+        if stats_path is not None:
+            metadata = nohash_regular_file_metadata(stats_path)
+            contract["normalization"] = {
+                "file": metadata,
+                "schema": cls._metadata_value(
+                    getattr(dataset, "_stats_metadata", None)
+                ),
+            }
+        return contract
+
+    @staticmethod
     def _git_commit() -> str | None:
         declared = os.environ.get("FASTWAM_CODE_COMMIT", "").strip().lower()
         if re.fullmatch(r"[0-9a-f]{40}", declared):
@@ -1172,6 +2431,7 @@ class Wan22Trainer:
         for key in (
             "output_dir",
             "resume",
+            "init_weights",
             "num_workers",
             "log_every",
             "save_every",
@@ -1182,7 +2442,6 @@ class Wan22Trainer:
             "seal_training_state",
             "save_final_checkpoint",
             "seal_training_run",
-            "terminal_rehash_weights",
             "allow_legacy_resume",
             "process_group_timeout_seconds",
             "checkpoint_io_timeout_seconds",
@@ -1190,9 +2449,111 @@ class Wan22Trainer:
             "hydra",
         ):
             resolved.pop(key, None)
+        if getattr(self, "n2_reload_proof_phase", None) == "load":
+            # The load-world config is intentionally non-sealing, but its
+            # restored state must still match the exact authorization values
+            # embedded in the save-world contract.  Normalize only this
+            # explicitly unauthoritative probe from the staged candidate.
+            _, arguments, _ = self._read_n2_terminal_candidate()
+            resolved["training_terminal_contract"] = arguments[
+                "training_terminal_contract"
+            ]
+            resolved["training_run_profile"] = arguments["run_profile"]
+            resolved["training_task_scope_receipt"] = arguments[
+                "task_scope_receipt_relative_path"
+            ]
         return resolved
 
+    @classmethod
+    def _drop_digest_named_fields(cls, value):
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if any(token in lowered for token in ("sha", "hash", "digest", "checksum", "md5")):
+                    continue
+                result[str(key)] = cls._drop_digest_named_fields(item)
+            return result
+        if isinstance(value, list):
+            return [cls._drop_digest_named_fields(item) for item in value]
+        return value
+
+    def _training_state_contract_metadata_no_hash(self) -> dict:
+        model = self.accelerator.unwrap_model(self.model)
+        architecture = None
+        architecture_builder = getattr(model, "_multi_robot_architecture_metadata", None)
+        if callable(architecture_builder):
+            architecture = self._metadata_value(architecture_builder())
+        trainable = [
+            {
+                "name": name,
+                "shape": list(parameter.shape),
+                "dtype": str(parameter.dtype),
+            }
+            for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        ]
+        config_contract = self._drop_digest_named_fields(
+            self._resolved_config_contract()
+        )
+        base_checkpoint = None
+        if self.checkpoint_state_kind == "sparse_delta":
+            candidate = getattr(model, "_loaded_base_checkpoint_descriptor", None)
+            if isinstance(candidate, dict):
+                base_checkpoint = self._drop_digest_named_fields(
+                    self._metadata_value(candidate)
+                )
+            else:
+                base_checkpoint = getattr(
+                    self, "_resume_base_checkpoint_provenance", None
+                )
+            is_full_state_resume = bool(self.resume) and Path(
+                str(self.resume)
+            ).is_dir()
+            if not isinstance(base_checkpoint, dict) and not is_full_state_resume:
+                raise RuntimeError(
+                    "metadata_no_hash sparse checkpoint requires a base checkpoint "
+                    "metadata descriptor"
+                )
+        return {
+            "contract_version": 2,
+            "integrity_mode": "metadata_no_hash",
+            "state_kind": "accelerate_full_state",
+            "treatment": {
+                "training_mode": getattr(model, "training_mode", None),
+                "trainable_scope": self.trainable_scope,
+                "checkpoint_state_kind": self.checkpoint_state_kind,
+                "video_gen": getattr(model, "training_mode", None) == "joint",
+                "hub": None if architecture is None else architecture.get("hub_enabled"),
+                "gaussian": None if architecture is None else architecture.get("enable_gaussian"),
+            },
+            "multi_robot_architecture": architecture,
+            "trainable_parameters": trainable,
+            "base_checkpoint": base_checkpoint,
+            "dataset": self._dataset_run_contract,
+            "optimization": {
+                "optimizer": "torch.optim.AdamW",
+                "learning_rate": self.learning_rate,
+                "weight_decay": self.weight_decay,
+                "betas": [0.9, 0.95],
+                "lr_scheduler_type": str(self.cfg.lr_scheduler_type),
+                "max_steps": int(self.max_steps),
+                "warmup_steps": int(self.max_steps * 0.05),
+                "batch_size": self.batch_size,
+                "agent_action_token_budget": self.agent_action_token_budget,
+                "gradient_accumulation_steps": self.gradient_accumulation_steps,
+                "world_size": int(self.accelerator.num_processes),
+                "mixed_precision": self.mixed_precision,
+                "max_grad_norm": self.max_grad_norm,
+                "seed": self.seed,
+            },
+            "resolved_config": self._metadata_value(config_contract),
+            "code_commit": self._git_commit(),
+        }
+
     def _training_state_contract(self) -> dict:
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            return self._training_state_contract_metadata_no_hash()
         model = self.accelerator.unwrap_model(self.model)
         architecture = None
         architecture_builder = getattr(model, "_multi_robot_architecture_metadata", None)
@@ -1373,16 +2734,52 @@ class Wan22Trainer:
                 if self.eval_every <= 0
                 else list(range(self.eval_every, saved_step + 1, self.eval_every))
             )
-            evaluations = normalize_formal_evaluation_records(
-                evaluations,
-                expected_steps=expected_steps,
-                training_mode=training_mode,
-            )
+            evaluation_contract: dict[str, object] = {}
+            if (
+                self.training_terminal_contract
+                == ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT
+            ):
+                evidence = getattr(self, "_action_only_n2_terminal_evidence", None)
+                if not isinstance(evidence, dict):
+                    raise RuntimeError(
+                        "N=2 formal resume evidence lacks the validated terminal contract"
+                    )
+                task_scope = evidence.get("task_scope")
+                if not isinstance(task_scope, dict):
+                    raise RuntimeError(
+                        "N=2 formal resume evidence lacks the validated task scope"
+                    )
+                evaluation_contract = {
+                    "expected_offline_samples": self.offline_eval_num_samples,
+                    "expected_offline_agent_counts": task_scope.get(
+                        "required_agent_counts", []
+                    ),
+                    "expected_offline_tasks": task_scope.get("required_tasks", []),
+                }
+            if not expected_steps:
+                if evaluations:
+                    raise RuntimeError(
+                        "formal eval_every=0 requires evaluation_records=[] in "
+                        f"trainer state: {state_file}"
+                    )
+                evaluations = []
+            else:
+                evaluations = normalize_formal_evaluation_records(
+                    evaluations,
+                    expected_steps=expected_steps,
+                    training_mode=training_mode,
+                    **evaluation_contract,
+                )
         else:
             evaluations = [dict(record) for record in evaluations]
         return dict(last_metrics), evaluations
 
     def _restore_base_checkpoint_provenance(self, descriptor, *, state_file: Path) -> None:
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            self._restore_base_checkpoint_metadata_no_hash(
+                descriptor, state_file=state_file
+            )
+            return
         if not isinstance(descriptor, dict) or set(descriptor) != {
             "path",
             "sha256",
@@ -1448,8 +2845,151 @@ class Wan22Trainer:
             if hasattr(model, name):
                 setattr(model, name, value)
 
+    def _restore_base_checkpoint_metadata_no_hash(
+        self, descriptor, *, state_file: Path
+    ) -> None:
+        if not isinstance(descriptor, dict):
+            raise RuntimeError(
+                f"Invalid metadata_no_hash base descriptor: {state_file}"
+            )
+        allowed = {"path", "role", "integrity_mode", "stat"}
+        if set(descriptor) != allowed:
+            raise RuntimeError(
+                "metadata_no_hash base descriptor has unexpected fields: "
+                f"{sorted(set(descriptor) - allowed)}"
+            )
+        raw_path = descriptor.get("path")
+        expected_stat = descriptor.get("stat")
+        if (
+            not isinstance(raw_path, str)
+            or not raw_path
+            or descriptor.get("role") != "base_dependency"
+            or descriptor.get("integrity_mode") != "metadata_no_hash"
+            or not isinstance(expected_stat, dict)
+        ):
+            raise RuntimeError(
+                f"Invalid metadata_no_hash base descriptor: {state_file}"
+            )
+        expected_stat_keys = {"bytes", "mtime_ns", "dev", "ino", "mode"}
+        if set(expected_stat) != expected_stat_keys or not all(
+            isinstance(expected_stat[key], int) for key in expected_stat_keys
+        ):
+            raise RuntimeError(
+                f"Invalid metadata_no_hash base stat descriptor: {state_file}"
+            )
+
+        verification = None
+        if self.accelerator.is_main_process:
+            try:
+                observed = nohash_regular_file_metadata(raw_path)
+                observed_stat = {
+                    key: observed[key] for key in sorted(expected_stat_keys)
+                }
+                if observed_stat != {
+                    key: expected_stat[key] for key in sorted(expected_stat_keys)
+                }:
+                    raise RuntimeError(
+                        "Base checkpoint metadata changed before full-state resume: "
+                        f"expected={expected_stat} observed={observed_stat}"
+                    )
+                verification = {"ok": True, "error": None}
+            except Exception as error:
+                verification = {
+                    "ok": False,
+                    "error": f"{type(error).__name__}: {error}",
+                }
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            shared = [verification]
+            torch.distributed.broadcast_object_list(shared, src=0)
+            verification = shared[0]
+        if not isinstance(verification, dict) or verification.get("ok") is not True:
+            detail = None if not isinstance(verification, dict) else verification.get("error")
+            raise RuntimeError(
+                "metadata_no_hash base checkpoint verification failed before "
+                f"accelerator.load_state: {detail}"
+            )
+
+        normalized = {
+            "path": str(Path(raw_path).expanduser().resolve(strict=True)),
+            "role": "base_dependency",
+            "integrity_mode": "metadata_no_hash",
+            "stat": {key: expected_stat[key] for key in sorted(expected_stat_keys)},
+        }
+        self._resume_base_checkpoint_provenance = normalized
+        model = self.accelerator.unwrap_model(self.model)
+        for name, value in (
+            ("_loaded_base_checkpoint", normalized["path"]),
+            ("_loaded_base_checkpoint_descriptor", normalized),
+            ("_loaded_base_checkpoint_can_restore_sparse", True),
+        ):
+            if hasattr(model, name):
+                setattr(model, name, value)
+
     def _load_weight_checkpoint_before_prepare(self):
-        """Load a file checkpoint before optimizer/ZeRO master construction."""
+        """Load resume or initialization weights before ZeRO master construction."""
+
+        init_weights = getattr(self, "init_weights", None)
+        if init_weights:
+            init_path = Path(str(init_weights))
+            if not init_path.exists():
+                raise FileNotFoundError(
+                    f"Initialization checkpoint not found: {init_weights}"
+                )
+            if not init_path.is_file():
+                raise ValueError(
+                    "Initialization checkpoint must be a self-contained weights file: "
+                    f"{init_weights}"
+                )
+            load_initialization = getattr(
+                self.model,
+                "load_initialization_checkpoint",
+                None,
+            )
+            if not callable(load_initialization):
+                raise TypeError(
+                    f"Model {type(self.model).__name__} does not support strict "
+                    "cross-treatment initialization"
+                )
+            logger.info(
+                "Loading full initialization weights before optimizer/DeepSpeed "
+                "construction: %s",
+                init_weights,
+            )
+            expected_sha256 = None
+            if (
+                getattr(self, "training_terminal_contract", None)
+                == ACTION_ONLY_N2_1X8_TERMINAL_CONTRACT
+            ):
+                expected_sha256 = os.environ.get(
+                    "FASTWAM_INIT_CHECKPOINT_SHA256", ""
+                ).strip().lower()
+                if (
+                    len(expected_sha256) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in expected_sha256
+                    )
+                ):
+                    raise ValueError(
+                        "Formal N=2 initialization requires a lowercase 64-hex "
+                        "FASTWAM_INIT_CHECKPOINT_SHA256"
+                    )
+            load_parameters = inspect.signature(load_initialization).parameters
+            load_kwargs = {"expected_sha256": expected_sha256}
+            if self.artifact_integrity_mode == "metadata_no_hash":
+                if "checkpoint_integrity_mode" not in load_parameters:
+                    raise RuntimeError(
+                        f"Model {type(self.model).__name__} does not support "
+                        "metadata_no_hash initialization"
+                    )
+                load_kwargs["checkpoint_integrity_mode"] = "metadata_no_hash"
+            load_initialization(str(init_path), **load_kwargs)
+            self._weight_checkpoint_loaded_before_prepare = True
+            logger.warning(
+                "Loaded full initialization weights only; optimizer/scheduler/step "
+                "are intentionally initialized from scratch."
+            )
+            return
 
         resume = self.resume
         if not resume:
@@ -1477,12 +3017,33 @@ class Wan22Trainer:
     def _resume_training_state_after_prepare(self):
         """Restore prepared full state, or confirm an earlier file preload."""
 
+        init_weights = getattr(self, "init_weights", None)
+        if init_weights:
+            if not self._weight_checkpoint_loaded_before_prepare:
+                raise RuntimeError(
+                    "Initialization checkpoint reached post-prepare without being "
+                    f"loaded before optimizer construction: {init_weights}"
+                )
+            logger.info(
+                "Initialization weights were loaded before prepare; no post-prepare "
+                "reload: %s",
+                init_weights,
+            )
+            return
+
         resume = self.resume
         if not resume:
             return
         resume_path = Path(str(resume))
         if resume_path.is_dir():
             logger.info("Resuming full training state from directory: %s", resume)
+            if getattr(self, "n2_reload_proof_phase", None) == "load":
+                self._validate_action_only_n2_reload_load_contract(post_load=False)
+                self._n2_reload_pre_load_fingerprints = (
+                    self._n2_reload_state_fingerprints(
+                        require_optimizer_state=False
+                    )
+                )
             if (
                 self.formal_n4_fullmodel_gate
                 and self.n4_fullmodel_gate_phase == "load"
@@ -2099,6 +3660,8 @@ class Wan22Trainer:
         return result
 
     def _save_weights_checkpoint(self, step_tag: str):
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            return self._save_weights_checkpoint_metadata_no_hash(step_tag)
         model = self.accelerator.unwrap_model(self.model)
         destination = Path(self.weights_dir) / f"{step_tag}.pt"
         manifest_path = destination.with_name(f"{destination.name}.manifest.json")
@@ -2219,6 +3782,126 @@ class Wan22Trainer:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _save_weights_checkpoint_metadata_no_hash(self, step_tag: str):
+        model = self.accelerator.unwrap_model(self.model)
+        destination = Path(self.weights_dir) / f"{step_tag}.pt"
+        manifest_path = destination.with_name(f"{destination.name}.manifest.json")
+        complete_path = destination.with_name(f"{destination.name}.COMPLETE")
+        for output in (destination, manifest_path, complete_path):
+            if output.exists() or output.is_symlink():
+                raise FileExistsError(
+                    f"Refusing to overwrite an existing weights artifact: {output}"
+                )
+        staging_root = Path(
+            os.environ.get("FASTWAM_WEIGHT_STAGING_DIR", "/tmp/fastwam-weight-staging")
+        ).expanduser().resolve()
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staged = staging_root / f".{step_tag}.rank0.{os.getpid()}.{time.time_ns()}.pt"
+        try:
+            save_parameters = inspect.signature(model.save_checkpoint).parameters
+            if "checkpoint_state_kind" not in save_parameters:
+                if self.checkpoint_state_kind != "full":
+                    raise RuntimeError(
+                        f"Model {type(model).__name__} does not support explicit "
+                        f"checkpoint_state_kind={self.checkpoint_state_kind!r}"
+                    )
+                model.save_checkpoint(staged, optimizer=None, step=self.global_step)
+            else:
+                if "checkpoint_integrity_mode" not in save_parameters:
+                    raise RuntimeError(
+                        f"Model {type(model).__name__} does not support "
+                        "metadata_no_hash checkpoint publication"
+                    )
+                model.save_checkpoint(
+                    staged,
+                    optimizer=None,
+                    step=self.global_step,
+                    checkpoint_state_kind=self.checkpoint_state_kind,
+                    checkpoint_integrity_mode="metadata_no_hash",
+                )
+            staged_metadata = nohash_regular_file_metadata(staged)
+            destination_metadata = nohash_copy_exclusive_and_compare(
+                staged, destination
+            )
+            if staged_metadata["bytes"] != destination_metadata["bytes"]:
+                raise RuntimeError(
+                    f"Checkpoint byte count changed during publication: {destination}"
+                )
+            manifest = {
+                "schema_name": "fastwam-weights-checkpoint-metadata-no-hash",
+                "schema_version": 1,
+                "integrity_mode": "metadata_no_hash",
+                "filename": destination.name,
+                "file": destination_metadata,
+                "global_step": int(self.global_step),
+                "checkpoint_state_kind": self.checkpoint_state_kind,
+            }
+            manifest_metadata = nohash_publish_exclusive_json(
+                manifest_path, manifest
+            )
+            nohash_publish_exclusive_json(
+                complete_path,
+                {
+                    "schema_name": "fastwam-weights-checkpoint-complete-metadata-no-hash",
+                    "schema_version": 1,
+                    "integrity_mode": "metadata_no_hash",
+                    "manifest_filename": manifest_path.name,
+                    "manifest_file": manifest_metadata,
+                    "checkpoint_filename": destination.name,
+                    "checkpoint_file": destination_metadata,
+                },
+            )
+            self._validate_weights_checkpoint_metadata_no_hash(step_tag)
+            logger.info(
+                "Published metadata_no_hash weights checkpoint: path=%s bytes=%d manifest=%s",
+                destination,
+                destination_metadata["bytes"],
+                manifest_path,
+            )
+            return str(destination)
+        except BaseException:
+            if not complete_path.exists():
+                manifest_path.unlink(missing_ok=True)
+                destination.unlink(missing_ok=True)
+            raise
+        finally:
+            staged.unlink(missing_ok=True)
+
+    def _validate_weights_checkpoint_metadata_no_hash(self, step_tag: str) -> None:
+        destination = Path(self.weights_dir) / f"{step_tag}.pt"
+        manifest_path = destination.with_name(f"{destination.name}.manifest.json")
+        complete_path = destination.with_name(f"{destination.name}.COMPLETE")
+        complete, _ = nohash_read_json(complete_path)
+        manifest, manifest_metadata = nohash_read_json(manifest_path)
+        checkpoint_metadata = nohash_regular_file_metadata(destination)
+        if not isinstance(complete, dict) or not isinstance(manifest, dict):
+            raise RuntimeError(f"Invalid metadata_no_hash checkpoint metadata: {destination}")
+        expected_complete = {
+            "schema_name": "fastwam-weights-checkpoint-complete-metadata-no-hash",
+            "schema_version": 1,
+            "integrity_mode": "metadata_no_hash",
+            "manifest_filename": manifest_path.name,
+            "manifest_file": manifest_metadata,
+            "checkpoint_filename": destination.name,
+            "checkpoint_file": checkpoint_metadata,
+        }
+        if complete != expected_complete:
+            raise RuntimeError(
+                f"metadata_no_hash COMPLETE marker mismatch: {complete_path}"
+            )
+        if (
+            manifest.get("schema_name")
+            != "fastwam-weights-checkpoint-metadata-no-hash"
+            or manifest.get("integrity_mode") != "metadata_no_hash"
+            or manifest.get("filename") != destination.name
+            or manifest.get("file") != checkpoint_metadata
+            or manifest.get("global_step") != int(self.global_step)
+            or manifest.get("checkpoint_state_kind") != self.checkpoint_state_kind
+        ):
+            raise RuntimeError(
+                f"metadata_no_hash checkpoint manifest mismatch: {manifest_path}"
+            )
+
     @staticmethod
     def _publish_exclusive_bytes(path: Path, payload: bytes) -> None:
         with path.open("xb") as handle:
@@ -2330,15 +4013,32 @@ class Wan22Trainer:
             "run_contract": self._training_state_contract(),
         }
         if self._uses_agent_count_batch_sampler:
-            payload["data_schedule"] = {
-                "fingerprint": self.train_sampler.schedule_fingerprint(self.epoch),
-                "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
-                "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
-                "num_processes": self.train_sampler.num_processes,
-                "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
-                "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
+            payload["data_schedule"] = self._data_schedule_contract(self.epoch)
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            nohash_publish_exclusive_json(state_file, payload)
+        else:
+            publish_exclusive_json(state_file, payload)
+
+    def _data_schedule_contract(self, epoch: int) -> dict:
+        common = {
+            "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
+            "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
+            "num_processes": self.train_sampler.num_processes,
+            "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
+            "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
+        }
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            return {
+                "integrity_mode": "metadata_no_hash",
+                "epoch": int(epoch),
+                "seed": int(self.train_sampler.seed),
+                "batches": self.train_sampler.global_epoch_batches(int(epoch)),
+                **common,
             }
-        publish_exclusive_json(state_file, payload)
+        return {
+            "fingerprint": self.train_sampler.schedule_fingerprint(int(epoch)),
+            **common,
+        }
 
     @staticmethod
     def _seal_training_state_tree(state_path: str) -> dict:
@@ -2399,6 +4099,8 @@ class Wan22Trainer:
                 weights_complete,
                 label="weights checkpoint COMPLETE marker",
             )
+        if self.artifact_integrity_mode == "metadata_no_hash":
+            self._validate_weights_checkpoint_metadata_no_hash(step_tag)
         self.accelerator.wait_for_everyone()
 
         state_path = None
@@ -2433,17 +4135,49 @@ class Wan22Trainer:
         """Return whether the terminal step still needs a checkpoint write."""
         return self.save_final_checkpoint_enabled and not checkpoint_saved_this_step
 
+    def _should_pause_after_recovery_gate_checkpoint(
+        self, *, checkpoint_saved_this_step: bool
+    ) -> bool:
+        """Return whether this completed checkpoint is the recovery-gate pause."""
+        stop_step = getattr(
+            self, "recovery_gate_stop_after_checkpoint_step", None
+        )
+        return (
+            checkpoint_saved_this_step
+            and stop_step is not None
+            and self.global_step == stop_step
+        )
+
     def load_training_state(self, state_dir: str):
+        recovery_receipt_target = self._recovery_load_receipt_target()
+        state_directory = Path(state_dir).expanduser()
+        if recovery_receipt_target is not None:
+            if state_directory.is_symlink() or not state_directory.is_dir():
+                raise RuntimeError(
+                    "metadata_no_hash recovery receipt requires a non-linked "
+                    f"state directory: {state_directory}"
+                )
+            state_directory = state_directory.resolve(strict=True)
         state_file = Path(state_dir) / "trainer_state.json"
         payload = None
+        state_file_metadata = None
         restored_last_step_metrics: dict[str, object] = {}
         restored_evaluation_records: list[dict[str, object]] = []
-        if state_file.exists():
-            with open(state_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
+        try:
+            if self.artifact_integrity_mode == "metadata_no_hash":
+                payload, state_file_metadata = nohash_read_json(state_file)
+            else:
+                payload, _, _ = read_canonical_json(state_file)
+        except FileNotFoundError:
+            payload = None
+        if payload is not None:
             if not isinstance(payload, dict):
                 raise TypeError(f"Trainer state metadata must be a mapping: {state_file}")
             self._validate_training_state_contract(payload, state_file=state_file)
+            if self.artifact_integrity_mode == "metadata_no_hash":
+                self._validate_data_schedule_before_resume(
+                    payload, state_file=state_file
+                )
             (
                 restored_last_step_metrics,
                 restored_evaluation_records,
@@ -2477,14 +4211,7 @@ class Wan22Trainer:
                             "resume compatibility cannot be verified."
                         )
                     else:
-                        current_schedule = {
-                            "fingerprint": self.train_sampler.schedule_fingerprint(self.epoch),
-                            "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
-                            "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
-                            "num_processes": self.train_sampler.num_processes,
-                            "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
-                            "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
-                        }
+                        current_schedule = self._data_schedule_contract(self.epoch)
                         mismatches = {
                             key: (saved_schedule.get(key), current_value)
                             for key, current_value in current_schedule.items()
@@ -2520,6 +4247,16 @@ class Wan22Trainer:
                     "State file does not contain `epoch`/`batch_in_epoch`; "
                     "optimizer/scheduler were restored, but dataloader progress resume is skipped."
                 )
+            if recovery_receipt_target is not None:
+                if state_file_metadata is None:
+                    raise RuntimeError(
+                        "metadata_no_hash recovery receipt lacks source-state metadata"
+                    )
+                self._publish_recovery_load_receipt(
+                    target=recovery_receipt_target,
+                    source_state_dir=state_directory,
+                    source_trainer_state_file=state_file_metadata,
+                )
             self.accelerator.wait_for_everyone()
             return
 
@@ -2538,6 +4275,95 @@ class Wan22Trainer:
             "State file `%s` is missing; dataloader progress resume is skipped.",
             state_file,
         )
+
+    def _recovery_load_receipt_target(self):
+        configured = os.environ.get("FASTWAM_RECOVERY_LOAD_RECEIPT", "").strip()
+        if not configured:
+            return None
+        if self.artifact_integrity_mode != "metadata_no_hash":
+            raise RuntimeError(
+                "FASTWAM_RECOVERY_LOAD_RECEIPT is restricted to metadata_no_hash"
+            )
+        target = Path(configured).expanduser()
+        if not target.is_absolute():
+            raise ValueError("FASTWAM_RECOVERY_LOAD_RECEIPT must be an absolute path")
+        output = Path(self.output_dir).expanduser().resolve(strict=True)
+        expected = output / "recovery_load_receipt.json"
+        target = target.resolve(strict=False)
+        if target != expected:
+            raise ValueError(
+                "FASTWAM_RECOVERY_LOAD_RECEIPT must be the direct output receipt: "
+                f"expected={expected} configured={target}"
+            )
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(
+                f"Refusing pre-existing recovery load receipt: {target}"
+            )
+        return target
+
+    def _publish_recovery_load_receipt(
+        self,
+        *,
+        target: Path,
+        source_state_dir: Path,
+        source_trainer_state_file: dict,
+    ) -> None:
+        """Collectively attest that Accelerate returned from a full-state load.
+
+        This receipt is intentionally native to the trainer.  The external Gate2
+        validator can therefore distinguish a real ``accelerator.load_state``
+        return from rendered log text or a checkpoint directory that merely
+        contains ``trainer_state.json``.
+        """
+
+        payload = {
+            "schema_name": "fastwam-recovery-load-receipt",
+            "schema_version": 1,
+            "integrity_mode": "metadata_no_hash",
+            "accelerator_load_state_returned": True,
+            "source_state_dir": str(source_state_dir.resolve(strict=True)),
+            "source_trainer_state_file": source_trainer_state_file,
+            "output_dir": str(Path(self.output_dir).expanduser().resolve(strict=True)),
+            "restored_global_step": int(self.global_step),
+            "restored_epoch": int(self.epoch),
+            "restored_batch_in_epoch": int(self.batch_in_epoch),
+            "world_size": int(self.accelerator.num_processes),
+        }
+        if self.accelerator.is_main_process:
+            nohash_publish_exclusive_json(target, payload)
+        self.accelerator.wait_for_everyone()
+        observed, _ = nohash_read_json(target)
+        if observed != payload:
+            raise RuntimeError(
+                f"recovery load receipt differs across ranks: {target}"
+            )
+
+    def _validate_data_schedule_before_resume(
+        self, payload: dict, *, state_file: Path
+    ) -> None:
+        if not self._uses_agent_count_batch_sampler:
+            if payload.get("data_schedule") is not None:
+                raise RuntimeError(
+                    "Saved state has a dynamic data schedule but the current "
+                    f"loader does not: {state_file}"
+                )
+            return
+        if "epoch" not in payload:
+            raise RuntimeError(
+                f"metadata_no_hash state lacks epoch for schedule validation: {state_file}"
+            )
+        saved_schedule = payload.get("data_schedule")
+        if not isinstance(saved_schedule, dict):
+            raise RuntimeError(
+                f"metadata_no_hash state lacks exact data schedule: {state_file}"
+            )
+        current_schedule = self._data_schedule_contract(int(payload["epoch"]))
+        mismatches = self._contract_mismatches(saved_schedule, current_schedule)
+        if mismatches:
+            raise RuntimeError(
+                "Cannot resume with a different deterministic data schedule "
+                f"before accelerator.load_state: {mismatches}"
+            )
 
     def train(self):
         self._set_dit_only_train_mode()
@@ -2771,6 +4597,19 @@ class Wan22Trainer:
                                 ckpt_info["weights_path"],
                                 ckpt_info["state_path"],
                             )
+
+                    if self._should_pause_after_recovery_gate_checkpoint(
+                        checkpoint_saved_this_step=checkpoint_saved_this_step
+                    ):
+                        self.accelerator.wait_for_everyone()
+                        logger.info(
+                            "[recovery-gate] rank=%d paused after checkpoint "
+                            "step=%d; restart from the saved state to continue",
+                            self.accelerator.process_index,
+                            self.global_step,
+                        )
+                        self.accelerator.wait_for_everyone()
+                        return
 
                     if self.global_step >= self.max_steps:
                         if self._should_save_final_checkpoint(

@@ -7,6 +7,9 @@ train:
   # Native variable-length agent axis. When declared, this is the exact
   # cardinality scope: missing or unexpected counts both fail closed.
   required_agent_counts: [2, 3, 4]
+  # Optional exact task scope for specialized fine-tuning. Null keeps the full
+  # task inventory while preserving the original source/cache identity.
+  required_tasks: null
   agent_geometry_dim: 7
   load_future_video: true
   action_dim: 8
@@ -46,6 +49,7 @@ val:
   action_video_freq_ratio: 4
   video_size: [224, 320]
   required_agent_counts: [2, 3, 4]
+  required_tasks: null
   agent_geometry_dim: 7
   load_future_video: true
   action_dim: 8
