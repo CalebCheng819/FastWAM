@@ -23,11 +23,14 @@ LAUNCHER = HERE / "submit_gate2.py"
 R3_LAUNCHER = HERE / "submit_gate2_r3.py"
 R4_LAUNCHER = HERE / "submit_gate2_r4.py"
 R5_LAUNCHER = HERE / "submit_gate2_r5.py"
+R6_LAUNCHER = HERE / "submit_gate2_r6.py"
+READONLY_MONITOR = HERE / "monitor_gate2_readonly.py"
 RUNTIME = HERE / "runtime.sh"
 PUBLISHER = HERE / "publish_gate2.py"
 R3_WRAPPER = HERE / "submit_from_ssh970_r3.sh"
 R4_WRAPPER = HERE / "submit_from_ssh970_r4.sh"
 R5_WRAPPER = HERE / "submit_from_ssh970_r5.sh"
+R6_WRAPPER = HERE / "submit_from_ssh970_r6.sh"
 
 
 def load_launcher():
@@ -71,6 +74,19 @@ def load_r5_controller():
     sys.path.insert(0, str(HERE))
     try:
         namespace = runpy.run_path(str(R5_LAUNCHER))
+        return namespace["controller"]
+    finally:
+        sys.path.remove(str(HERE))
+        sys.modules.pop("submit_gate2", None)
+        if previous is not None:
+            sys.modules["submit_gate2"] = previous
+
+
+def load_r6_controller():
+    previous = sys.modules.pop("submit_gate2", None)
+    sys.path.insert(0, str(HERE))
+    try:
+        namespace = runpy.run_path(str(R6_LAUNCHER))
         return namespace["controller"]
     finally:
         sys.path.remove(str(HERE))
@@ -256,7 +272,6 @@ class ControllerStateTest(unittest.TestCase):
         self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r5-s42")
         self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r5-s42")
         self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r5.sh")
-        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
         self.assertIn(".gate2-nohash-r5-submit.lock", wrapper)
         self.assertIn(
             'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/submit_gate2_r5.py" "$@"',
@@ -313,6 +328,117 @@ class ControllerStateTest(unittest.TestCase):
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("usage:", completed.stdout.lower())
+
+    def test_r6_has_new_identity_source_and_no_r5_reuse(self) -> None:
+        module = load_r6_controller()
+        expected = (
+            "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-"
+            "R6-S42-20260811"
+        )
+        retired_attempt = "6f33975b-e52c-4625-9edd-1f8bbf5b281e"
+        retired_job = "dlcenr216elrf64o"
+        wrapper = R6_WRAPPER.read_text(encoding="utf-8")
+        launcher = R6_LAUNCHER.read_text(encoding="utf-8")
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        self.assertEqual(module.EXPERIMENT_ID, expected)
+        self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r6-s42")
+        self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r6-s42")
+        self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r6.sh")
+        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
+        self.assertIn(".gate2-nohash-r6-submit.lock", wrapper)
+        self.assertIn("export PYTHONDONTWRITEBYTECODE=1", wrapper)
+        self.assertIn(
+            'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/submit_gate2_r6.py" "$@"',
+            wrapper,
+        )
+        expected_source = Path(
+            "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
+            "fastwam-action-n234-formal-20260811-r5"
+        )
+        self.assertEqual(module.APPROVED_SOURCE_ROOT, expected_source)
+        for retired in (retired_attempt, retired_job):
+            self.assertNotIn(retired, wrapper)
+            self.assertNotIn(retired, launcher)
+            self.assertNotIn(retired, runtime)
+
+        body = module.build_request(
+            expected_source,
+            Path("/oss-chengjuntao/artifacts/r6-controller-test-stats.json"),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r6-controller-test-primary"
+            ),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r6-controller-test-fallback"
+            ),
+            "22334455-6677-4889-8aab-ccddeeff0011",
+            trusted_runtime_bytes=b"r6-controller-test-runtime\n",
+        )
+        module.validate_request(body, validate_live_inputs=False)
+        self.assertEqual(body["Envs"]["FASTWAM_EXPERIMENT_ID"], expected)
+        self.assertIn(
+            "fastwam-gate2-nohash-r6-s42-",
+            body["Envs"]["FASTWAM_SUBMISSION_TAG"],
+        )
+        self.assertNotIn("r5", body["Envs"]["FASTWAM_OSS_OUTPUT_ROOT"].lower())
+
+        body["Envs"]["FASTWAM_SOURCE_ROOT"] = str(
+            expected_source.with_name("retired-r4")
+        )
+        with self.assertRaisesRegex(RuntimeError, "exact approved snapshot"):
+            module.validate_request(body, validate_live_inputs=False)
+
+    def test_r6_launcher_and_readonly_monitor_are_isolated(self) -> None:
+        launcher = R6_LAUNCHER.read_text(encoding="utf-8")
+        monitor = READONLY_MONITOR.read_text(encoding="utf-8")
+        monitor_tree = ast.parse(monitor, filename=str(READONLY_MONITOR))
+        client_methods = {
+            node.func.attr
+            for node in ast.walk(monitor_tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "client"
+        }
+        self.assertIn('Path(__file__).resolve(strict=True).parent', launcher)
+        self.assertIn('_HERE / "submit_gate2.py"', launcher)
+        self.assertIn("spec_from_file_location", launcher)
+        self.assertNotIn("import submit_gate2 as controller", launcher)
+        self.assertNotIn("importlib", monitor)
+        self.assertNotIn("submit_gate2", monitor)
+        self.assertNotIn("create_job", monitor.lower())
+        self.assertNotIn("stop_job", monitor.lower())
+        self.assertEqual(
+            client_methods,
+            {"get_job_with_options", "get_pod_logs_with_options"},
+        )
+        self.assertIn("sys.flags.isolated", monitor)
+        self.assertIn("sys.flags.dont_write_bytecode", monitor)
+        with tempfile.TemporaryDirectory(prefix="gate2-r6-isolated-cwd-") as cwd:
+            for command in (
+                [sys.executable, "-B", "-I", str(R6_LAUNCHER), "--help"],
+                [
+                    sys.executable,
+                    "-B",
+                    "-I",
+                    str(READONLY_MONITOR),
+                    "--help",
+                ],
+            ):
+                completed = subprocess.run(
+                    command,
+                    cwd=cwd,
+                    env={
+                        "PATH": os.environ.get("PATH", ""),
+                        "PYTHONDONTWRITEBYTECODE": "1",
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertIn("usage:", completed.stdout.lower())
 
     def test_durable_record_is_immutable_and_exact(self) -> None:
         path = self.module.prepared_binding_path()
