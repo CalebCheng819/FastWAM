@@ -14,6 +14,9 @@ import subprocess
 import sys
 import tempfile
 import stat
+import time
+import zlib
+from contextlib import ExitStack
 from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
@@ -37,7 +40,10 @@ def load_controller():
 def build_test_request(module, member: str) -> dict:
     return module.build_request(
         member,
-        source_root=module.SOURCE_PREFIX / "source-20260811",
+        source_root=(
+            module.SOURCE_PREFIX
+            / "fastwam-action-n234-formal-r3-20260812-r1"
+        ),
         source_commit="a" * 40,
         dataset_root=module.OSS_ROOT / "dataset",
         stats_source=module.OSS_ROOT / "stats.json",
@@ -115,7 +121,7 @@ def assert_request(module, member: str) -> None:
 
 
 def suite_record(module) -> dict:
-    timestamp = "2026-08-11T06:00:00Z"
+    timestamp = "2026-08-12T00:00:00Z"
     return {
         "schema": "fastwam-action-native-agents-suite-storage-reservation-v1",
         "suite_id": module.SUITE_ID,
@@ -159,9 +165,9 @@ def test_controller_structure(module) -> None:
     assert "autoretry=False" in text and "max_attempts=1" in text
     assert str(module.SOURCE_PREFIX).endswith("fastwam-nohash-source-snapshots")
     assert module.SOURCE_INVENTORY_SCHEMA == "fastwam-formal-source-content-binding-v1"
-    assert module.INPUTS_SCHEMA == "fastwam-formal-portable-input-binding-v1"
+    assert module.INPUTS_SCHEMA == "fastwam-formal-portable-input-binding-v2"
     assert module.MEMBER_RESERVATION_SCHEMA == (
-        "fastwam-action-native-agents-reservation-v2"
+        "fastwam-action-native-agents-reservation-v3"
     )
     assert module.MEMBER_RESERVATION_KEYS == {
         "schema",
@@ -188,14 +194,17 @@ def test_controller_structure(module) -> None:
         "external generic reservation; trainer terminal contract fields remain null; "
         "terminal success is granted only by the runtime receipt"
     )
-    assert module.SUITE_ID == "FASTWAM-MR-ACTION-N234-FORMAL-R2-20260811"
+    assert module.SUITE_ID == "FASTWAM-MR-ACTION-N234-FORMAL-R3-20260812"
     assert str(module.OUTPUT_PREFIX).endswith(
-        "/fastwam-action-n234-formal-r2-20260811"
+        "/fastwam-action-n234-formal-r3-20260812"
+    )
+    assert module.CONTROL_LOCK_PATH == (
+        module.LOCAL_CONTROL_ROOT / "action-n234-formal-r3-controller.lock"
     )
     for spec in module.MEMBERS.values():
-        assert "-R2-20260811" in spec["experiment_id"]
-        assert "-r2-20260811" in spec["run_id"]
-        assert spec["display_name"].endswith("-r2")
+        assert "-R3-20260812" in spec["experiment_id"]
+        assert "-r3-20260812" in spec["run_id"]
+        assert spec["display_name"].endswith("-r3")
     assert module.SUITE_OSS_BUDGET_BYTES == 190 * 1024**3
     assert module.PER_RUN_OSS_BUDGET_BYTES == 62 * 1024**3
     assert str(module.PINNED_PYTHON).endswith(
@@ -218,12 +227,21 @@ def test_controller_structure(module) -> None:
     prepare_start = text.index("def prepare(args:")
     prepare_end = text.index("\ndef load_sdk", prepare_start)
     prepare_text = text[prepare_start:prepare_end]
-    assert prepare_text.index("outcomes = [") < prepare_text.index(
-        "exclusive_write(SUITE_STORAGE_RESERVATION_PATH, suite_reservation)"
+    assert prepare_text.index("planned_reservations = {") < prepare_text.index(
+        "os.mkdir(OUTPUT_PREFIX, 0o700)"
+    )
+    assert prepare_text.index("validate_existing_member_state(") < prepare_text.index(
+        "os.mkdir(OUTPUT_PREFIX, 0o700)"
     )
     assert prepare_text.index("os.mkdir(OUTPUT_PREFIX, 0o700)") < prepare_text.index(
         "outcomes = ["
     )
+    assert prepare_text.index("outcomes = [") < prepare_text.index(
+        "exclusive_write(SUITE_STORAGE_RESERVATION_PATH, suite_reservation)"
+    )
+    assert prepare_text.index(
+        "exclusive_write(SUITE_STORAGE_RESERVATION_PATH, suite_reservation)"
+    ) < prepare_text.index("write_prepared_local_state(member)")
     live_start = text.index("def validate_reservation_live(")
     live_end = text.index("\ndef reconcile_member", live_start)
     assert "validate_complete_suite_members(suite_reservation)" in text[live_start:live_end]
@@ -246,10 +264,30 @@ def test_controller_structure(module) -> None:
     assert text[reconcile_start:reconcile_end].count(
         "validate_formal_terminal_output(member)"
     ) == 2
+    submit_start = reconcile_end + 1
+    submit_end = text.index("\ndef reconcile(", submit_start)
+    submit_text = text[submit_start:submit_end]
+    assert submit_text.index("validate_reservation_live(") < submit_text.index(
+        "require_n2_scientific_completion_for_downstream_submit("
+    )
+    assert submit_text.index(
+        "require_n2_scientific_completion_for_downstream_submit("
+    ) < submit_text.index("load_sdk()")
+    assert submit_text.index("load_sdk()") < submit_text.index(
+        "exclusive_write(latch_path(member), latch)"
+    )
+    prerequisite_start = text.index(
+        "def require_n2_scientific_completion_for_downstream_submit("
+    )
+    prerequisite_end = text.index("\ndef reconcile_member(", prerequisite_start)
+    prerequisite_text = text[prerequisite_start:prerequisite_end]
+    assert 'if member == "n2":\n        return None' in prerequisite_text
+    assert 'validate_formal_terminal_output("n2")' in prerequisite_text
+    assert '"SCIENTIFIC_COMPLETE"' in prerequisite_text
     for forbidden in ("hashlib", "sha256sum", "md5sum", "blake2", "checksum"):
         assert forbidden not in text.lower()
-    assert "R1-20260811" not in text
-    assert "-r1-20260811" not in text
+    for retired in ("R1-20260811", "R2-20260811", "-r1-20260811", "-r2-20260811"):
+        assert retired not in text
 
     record = suite_record(module)
     module.validate_suite_storage_reservation(record)
@@ -321,6 +359,7 @@ def test_controller_structure(module) -> None:
     changed["DataSources"].reverse()
     assert not module.exact_job(changed, request)
 
+
     custom_mutations = []
     changed = copy.deepcopy(observed)
     changed["CustomEnvs"].pop()
@@ -383,6 +422,507 @@ def test_controller_structure(module) -> None:
     assert not module.exact_job(strict_scalar_observed, strict_scalar_request)
 
 
+def test_r3_controller_lock_binds_fd_to_exact_path(module) -> None:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-controller-lock-") as name:
+        root = Path(name)
+        r3_lock = root / "action-n234-formal-r3-controller.lock"
+        old_lock = root / "action-n234-formal-r2-controller.lock"
+        r3_lock.write_bytes(b"")
+        old_lock.write_bytes(b"")
+        r3_metadata = os.lstat(r3_lock)
+        old_metadata = os.lstat(old_lock)
+        environment = {
+            "FASTWAM_CONTROL_NODE": module.CONTROL_NODE,
+            "FASTWAM_LOCK_FD": "9",
+        }
+
+        with (
+            mock.patch.dict(os.environ, environment, clear=False),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r3_lock),
+            mock.patch.object(module.os, "fstat", return_value=r3_metadata),
+            mock.patch.object(module.fcntl, "flock") as lock,
+        ):
+            module.require_controller_lock()
+        lock.assert_called_once_with(
+            9, module.fcntl.LOCK_EX | module.fcntl.LOCK_NB
+        )
+
+        with (
+            mock.patch.dict(os.environ, environment, clear=False),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r3_lock),
+            mock.patch.object(module.os, "fstat", return_value=old_metadata),
+            mock.patch.object(module.fcntl, "flock") as lock,
+        ):
+            _assert_runtime_rejected(
+                module.require_controller_lock,
+                "descriptor inherited from retired lock path",
+            )
+        lock.assert_not_called()
+
+        bound_metadata = os.lstat(r3_lock)
+        replacement = root / "replacement.lock"
+        replacement.write_bytes(b"")
+        os.replace(replacement, r3_lock)
+        assert (bound_metadata.st_dev, bound_metadata.st_ino) != (
+            os.lstat(r3_lock).st_dev,
+            os.lstat(r3_lock).st_ino,
+        )
+        with (
+            mock.patch.dict(os.environ, environment, clear=False),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r3_lock),
+            mock.patch.object(module.os, "fstat", return_value=bound_metadata),
+            mock.patch.object(module.fcntl, "flock") as lock,
+        ):
+            _assert_runtime_rejected(
+                module.require_controller_lock,
+                "R3 lock path replaced after descriptor open",
+            )
+        lock.assert_not_called()
+
+        target = root / "symlink-target.lock"
+        target.write_bytes(b"")
+        symlink = root / "symlink.lock"
+        symlink.symlink_to(target)
+        with (
+            mock.patch.dict(os.environ, environment, clear=False),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", symlink),
+            mock.patch.object(module.os, "fstat", return_value=os.stat(target)),
+            mock.patch.object(module.fcntl, "flock") as lock,
+        ):
+            _assert_runtime_rejected(
+                module.require_controller_lock,
+                "symlink controller lock path",
+            )
+        lock.assert_not_called()
+
+
+def test_controller_exclusive_writer_fails_closed(module) -> None:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-exclusive-writer-") as name:
+        root = Path(name)
+
+        collision = root / "collision.json"
+        collision.write_bytes(b"pre-existing immutable record\n")
+        try:
+            module.exclusive_write(collision, {"new": "record"})
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("O_EXCL collision must reject an existing record")
+        assert collision.read_bytes() == b"pre-existing immutable record\n"
+
+        zero_write = root / "zero-write.json"
+        with mock.patch.object(module.os, "write", return_value=0):
+            try:
+                module.exclusive_write(zero_write, {"record": "cannot-complete"})
+            except OSError as error:
+                assert "zero-byte write" in str(error)
+            else:
+                raise AssertionError("zero-byte durable write must fail closed")
+        assert zero_write.is_file()
+        assert zero_write.read_bytes() == b""
+        try:
+            module.exclusive_write(zero_write, {"record": "retry-is-forbidden"})
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("partial immutable record must poison the R3 identity")
+
+        local_state = root / "local-state.json"
+        local_state.write_bytes(b"old-local-state\n")
+        with (
+            mock.patch.object(module.os, "write", return_value=0),
+            mock.patch.object(module.os, "replace") as replace,
+        ):
+            try:
+                module.atomic_write(local_state, {"phase": "new-state"})
+            except OSError as error:
+                assert "zero-byte write" in str(error)
+            else:
+                raise AssertionError("zero-byte local-state write must fail closed")
+        replace.assert_not_called()
+        assert local_state.read_bytes() == b"old-local-state\n"
+
+        unenforced = root / "unenforced-exclusive.json"
+        real_open = module.os.open
+        exclusive_opens = 0
+        duplicate_descriptor = None
+
+        def simulate_unenforced_exclusive(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal exclusive_opens, duplicate_descriptor
+            if Path(path) == unenforced and flags & os.O_EXCL:
+                exclusive_opens += 1
+                if exclusive_opens == 2:
+                    duplicate_descriptor = real_open(os.devnull, os.O_WRONLY)
+                    return duplicate_descriptor
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with mock.patch.object(
+            module.os, "open", side_effect=simulate_unenforced_exclusive
+        ):
+            _assert_runtime_rejected(
+                lambda: module.exclusive_write(unenforced, {"record": "written"}),
+                "durable storage that does not enforce O_EXCL",
+            )
+        assert exclusive_opens == 2
+        assert duplicate_descriptor is not None
+        try:
+            os.fstat(duplicate_descriptor)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("unexpected duplicate descriptor was not closed")
+
+
+def _submit_with_n2_evidence(
+    module,
+    member: str,
+    formal_result,
+    *,
+    fixture_mutation: str | None = None,
+):
+    requests = {name: build_test_request(module, name) for name in module.MEMBERS}
+    shared_source = {
+        "root": str(module.SOURCE_PREFIX / "fastwam-action-n234-formal-r3-20260812-r1"),
+        "git_commit": "a" * 40,
+        "inventory": {
+            "schema": module.SOURCE_INVENTORY_SCHEMA,
+            "entries": [{"path": ".", "kind": "directory"}],
+        },
+    }
+    reservations = {
+        name: {
+            "member": name,
+            "source": copy.deepcopy(shared_source),
+            "request": requests[name],
+        }
+        for name in module.MEMBERS
+    }
+    selected_reservation = reservations[member]
+    alternate_source = str(
+        module.SOURCE_PREFIX
+        / f"fastwam-action-n234-formal-r3-20260812-{member}-alternate"
+    )
+    if fixture_mutation == "suite_path":
+        selected_reservation["request"]["Envs"][
+            "FASTWAM_SUITE_STORAGE_RESERVATION_PATH"
+        ] = str(module.OSS_ROOT / "different-suite/reservation.json")
+    elif fixture_mutation == "source_root":
+        selected_reservation["source"]["root"] = alternate_source
+        selected_reservation["request"]["Envs"][
+            "FASTWAM_SOURCE_ROOT"
+        ] = alternate_source
+    elif fixture_mutation == "source_commit":
+        selected_reservation["source"]["git_commit"] = "b" * 40
+        selected_reservation["request"]["Envs"]["FASTWAM_CODE_COMMIT"] = "b" * 40
+    elif fixture_mutation == "shared_request_env":
+        selected_reservation["request"]["Envs"][
+            "FASTWAM_DATASET_ROOT"
+        ] = str(module.OSS_ROOT / "different-valid-dataset")
+    elif fixture_mutation not in {None, "selected_vs_suite", "n2_reread_vs_suite"}:
+        raise AssertionError(f"unknown scientific-gate fixture mutation: {fixture_mutation}")
+
+    # These request changes are individually schema-valid; the gate must reject
+    # them because they disagree with N2, not because of malformed values.
+    if fixture_mutation in {"source_root", "source_commit", "shared_request_env"}:
+        module.validate_request(member, selected_reservation["request"])
+
+    selected_readback = copy.deepcopy(selected_reservation)
+    n2_readback = copy.deepcopy(reservations["n2"])
+    if fixture_mutation == "selected_vs_suite":
+        selected_readback["source"]["root"] = alternate_source
+        selected_readback["request"]["Envs"]["FASTWAM_SOURCE_ROOT"] = alternate_source
+        module.validate_request(member, selected_readback["request"])
+    elif fixture_mutation == "n2_reread_vs_suite":
+        alternate_n2_source = str(
+            module.SOURCE_PREFIX
+            / "fastwam-action-n234-formal-r3-20260812-n2-reread"
+        )
+        n2_readback["source"]["root"] = alternate_n2_source
+        n2_readback["request"]["Envs"]["FASTWAM_SOURCE_ROOT"] = alternate_n2_source
+        module.validate_request("n2", n2_readback["request"])
+    events: list[str] = []
+
+    class Client:
+        def create_job_with_options(self, request, headers, runtime_options):
+            events.append("CreateJob")
+            assert request == "validated-sdk-request"
+            assert headers == {}
+            assert runtime_options == {"autoretry": False}
+            return SimpleNamespace(
+                body=SimpleNamespace(to_map=lambda: {"JobId": "dlc-r3-test"})
+            )
+
+    def read_records(_path):
+        index = read_records.calls
+        read_records.calls += 1
+        if index == 0:
+            return copy.deepcopy(selected_readback), {}
+        if member == "n2":
+            raise AssertionError("N2 submit read an unexpected prerequisite record")
+        if index == 1:
+            return {"suite": "fixture"}, {}
+        if index == 2:
+            return copy.deepcopy(n2_readback), {}
+        raise AssertionError("submit read an unexpected extra durable record")
+
+    read_records.calls = 0
+
+    def validate_live(selected, reservation, *, require_output_absent=True):
+        events.append(f"live:{selected}")
+        if selected == member:
+            assert require_output_absent
+        if selected == "n2" and member != "n2":
+            assert not require_output_absent
+        assert reservation["member"] == selected
+        return copy.deepcopy(reservation["request"])
+
+    def validate_structure(selected, reservation):
+        assert reservation["member"] == selected
+        return copy.deepcopy(reservation["request"])
+
+    def terminal(selected):
+        assert selected == "n2"
+        events.append("n2-terminal")
+        if isinstance(formal_result, BaseException):
+            raise formal_result
+        return copy.deepcopy(formal_result)
+
+    def load_sdk():
+        events.append("load-sdk")
+        return Client(), SimpleNamespace(), SimpleNamespace()
+
+    def list_jobs(*_args):
+        events.append("list-jobs")
+        return []
+
+    def publish_latch(_path, _value):
+        events.append("latch")
+
+    def publish_local_state(_path, _value):
+        events.append("local-state")
+
+    with tempfile.TemporaryDirectory(prefix=f"formal-r3-submit-gate-{member}-") as name:
+        root = Path(name)
+        with ExitStack() as stack:
+            read_json = stack.enter_context(
+                mock.patch.object(module, "read_json", side_effect=read_records)
+            )
+            suite_validator = stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "validate_complete_suite_members",
+                    return_value=reservations,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module, "validate_reservation_live", side_effect=validate_live
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "validate_member_reservation_structure",
+                    side_effect=validate_structure,
+                )
+            )
+            terminal_validator = stack.enter_context(
+                mock.patch.object(
+                    module, "validate_formal_terminal_output", side_effect=terminal
+                )
+            )
+            sdk_loader = stack.enter_context(
+                mock.patch.object(module, "load_sdk", side_effect=load_sdk)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "validate_request",
+                    return_value="validated-sdk-request",
+                )
+            )
+            jobs = stack.enter_context(
+                mock.patch.object(module, "list_jobs", side_effect=list_jobs)
+            )
+            latch = stack.enter_context(
+                mock.patch.object(module, "exclusive_write", side_effect=publish_latch)
+            )
+            local_state = stack.enter_context(
+                mock.patch.object(
+                    module, "atomic_write", side_effect=publish_local_state
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "runtime_options",
+                    return_value={"autoretry": False},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "get_job",
+                    return_value={"JobId": "dlc-r3-test", "Status": "Running"},
+                )
+            )
+            stack.enter_context(mock.patch.object(module, "exact_job", return_value=True))
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "publish_acknowledgement",
+                    return_value={"job_id": "dlc-r3-test", "job_status": "Running"},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "acknowledgement_path",
+                    return_value=root / "acknowledgement.json",
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module, "latch_path", return_value=root / "latch.json"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module, "local_state_path", return_value=root / "state.json"
+                )
+            )
+            stack.enter_context(mock.patch("builtins.print"))
+            error = None
+            try:
+                module.submit(
+                    SimpleNamespace(
+                        member=member,
+                        confirm_experiment_id=module.MEMBERS[member]["experiment_id"],
+                    )
+                )
+            except (FileNotFoundError, RuntimeError) as caught:
+                error = caught
+
+    return SimpleNamespace(
+        error=error,
+        events=events,
+        read_json=read_json,
+        suite_validator=suite_validator,
+        terminal_validator=terminal_validator,
+        sdk_loader=sdk_loader,
+        jobs=jobs,
+        latch=latch,
+        local_state=local_state,
+    )
+
+
+def test_downstream_submit_requires_n2_scientific_completion(module) -> None:
+    invalid_evidence = (
+        ("absent", FileNotFoundError("N2 COMPLETE is absent")),
+        ("malformed", ["not", "a", "structured", "completion"]),
+        ("incomplete", {"status": "NOT_COMPLETE"}),
+    )
+    for member in ("n3", "n4"):
+        for label, evidence in invalid_evidence:
+            result = _submit_with_n2_evidence(module, member, evidence)
+            assert result.error is not None, f"{member} accepted {label} N2 evidence"
+            assert result.events[:2] == [f"live:{member}", "live:n2"]
+            assert result.events[2:] == ["n2-terminal"]
+            result.terminal_validator.assert_called_once_with("n2")
+            result.sdk_loader.assert_not_called()
+            result.jobs.assert_not_called()
+            result.latch.assert_not_called()
+            result.local_state.assert_not_called()
+
+        scientific = {
+            "status": "SCIENTIFIC_COMPLETE",
+            "output_root": str(module.output_root("n2")),
+            "published_bytes": 123,
+            "artifact_files": 9,
+        }
+        accepted = _submit_with_n2_evidence(module, member, scientific)
+        assert accepted.error is None
+        assert accepted.events.index("n2-terminal") < accepted.events.index("load-sdk")
+        assert accepted.events.index("load-sdk") < accepted.events.index("latch")
+        assert accepted.events.index("latch") < accepted.events.index("CreateJob")
+        accepted.terminal_validator.assert_called_once_with("n2")
+        accepted.latch.assert_called_once()
+        assert accepted.local_state.call_count == 2
+
+
+def test_downstream_gate_rejects_cross_record_drift_before_submission(module) -> None:
+    scientific = {
+        "status": "SCIENTIFIC_COMPLETE",
+        "output_root": str(module.output_root("n2")),
+        "published_bytes": 123,
+        "artifact_files": 9,
+    }
+    mismatches = (
+        (
+            "suite_path",
+            "N2 and downstream requests do not share one frozen basis",
+        ),
+        (
+            "source_root",
+            "N2 and downstream members do not bind the same source",
+        ),
+        (
+            "source_commit",
+            "N2 and downstream members do not bind the same source",
+        ),
+        (
+            "shared_request_env",
+            "N2 and downstream requests do not share one frozen basis",
+        ),
+        (
+            "selected_vs_suite",
+            "downstream reservation differs from this immutable suite member",
+        ),
+        (
+            "n2_reread_vs_suite",
+            "N2 reservation changed during prerequisite validation",
+        ),
+    )
+    for member in ("n3", "n4"):
+        for mutation, expected_error in mismatches:
+            result = _submit_with_n2_evidence(
+                module,
+                member,
+                scientific,
+                fixture_mutation=mutation,
+            )
+            assert isinstance(result.error, RuntimeError), (
+                f"{member} accepted scientific-gate drift: {mutation}"
+            )
+            assert expected_error in str(result.error)
+            assert "load-sdk" not in result.events
+            assert "list-jobs" not in result.events
+            assert "latch" not in result.events
+            assert "local-state" not in result.events
+            assert "CreateJob" not in result.events
+            result.terminal_validator.assert_not_called()
+            result.sdk_loader.assert_not_called()
+            result.jobs.assert_not_called()
+            result.latch.assert_not_called()
+            result.local_state.assert_not_called()
+
+
+def test_n2_submit_has_no_scientific_prerequisite(module) -> None:
+    result = _submit_with_n2_evidence(
+        module,
+        "n2",
+        AssertionError("N2 must not inspect predecessor terminal evidence"),
+    )
+    assert result.error is None
+    assert result.events[0] == "live:n2"
+    assert "n2-terminal" not in result.events
+    assert result.events.index("load-sdk") < result.events.index("latch")
+    assert result.events.index("latch") < result.events.index("CreateJob")
+    result.suite_validator.assert_not_called()
+    result.terminal_validator.assert_not_called()
+    result.latch.assert_called_once()
+
+
 def _write_portable_fixture(root: Path, payload: bytes = b"portable-source") -> None:
     nested = root / "nested"
     nested.mkdir()
@@ -393,9 +933,9 @@ def _write_portable_fixture(root: Path, payload: bytes = b"portable-source") -> 
 def test_source_inventory_cross_mount_portability(module) -> None:
     shared_memory = Path("/dev/shm")
     assert shared_memory.is_dir(), "/dev/shm is required for the cross-mount test"
-    with tempfile.TemporaryDirectory(prefix="formal-r2-posix-", dir="/tmp") as left_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-posix-", dir="/tmp") as left_name:
         with tempfile.TemporaryDirectory(
-            prefix="formal-r2-shm-", dir=shared_memory
+            prefix="formal-r3-shm-", dir=shared_memory
         ) as right_name:
             left = Path(left_name)
             right = Path(right_name)
@@ -418,7 +958,7 @@ def test_source_inventory_cross_mount_portability(module) -> None:
 
 
 def test_source_inventory_ignores_mode_and_mtime(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r2-metadata-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-metadata-") as temporary:
         root = Path(temporary)
         _write_portable_fixture(root)
         first = module.source_inventory(root)
@@ -434,7 +974,7 @@ def test_source_inventory_ignores_mode_and_mtime(module) -> None:
 
 
 def test_source_inventory_content_difference_is_path_only(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r2-content-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-content-") as temporary:
         root = Path(temporary)
         _write_portable_fixture(root, b"first-content")
         expected = module.source_inventory(root)
@@ -506,7 +1046,7 @@ def test_source_inventory_schema_rejects_float_bool_and_noncanonical(module) -> 
 
 
 def test_source_inventory_rejects_symlink_and_path_race(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r2-link-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-link-") as temporary:
         root = Path(temporary)
         (root / "payload.bin").write_bytes(b"payload")
         (root / "payload-link").symlink_to("payload.bin")
@@ -517,7 +1057,7 @@ def test_source_inventory_rejects_symlink_and_path_race(module) -> None:
         else:
             raise AssertionError("source symlink must fail closed")
 
-    with tempfile.TemporaryDirectory(prefix="formal-r2-race-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-race-") as temporary:
         root = Path(temporary)
         child = root / "nested"
         moved = root / "nested-moved"
@@ -651,26 +1191,49 @@ def _content_descriptor(path: str, payload: bytes) -> dict:
     }
 
 
-def _gaussian_manifest(cache_kind: str, *, generation: str = "aa") -> bytes:
+def _compressed_content_descriptor(path: str, payload: bytes) -> dict:
+    compressed = zlib.compress(payload, level=6)
+    return {
+        "path": path,
+        "kind": "file",
+        "bytes": len(payload),
+        "content_encoding": "zlib-level6-base64-v1",
+        "compressed_bytes": len(compressed),
+        "compressed_b64": base64.b64encode(compressed).decode("ascii"),
+    }
+
+
+def _decode_compressed_descriptor(module, descriptor: dict, *, label: str) -> bytes:
+    return module.validate_compressed_content_file_descriptor(
+        descriptor,
+        expected_path=descriptor["path"],
+        label=label,
+    )
+
+
+def _gaussian_manifest(
+    cache_kind: str, *, generation: str = "aa", padding_bytes: int = 0
+) -> bytes:
     if cache_kind == "compact":
         height, width, selection_mode = 28, 40, "index"
     else:
         height, width, selection_mode = 56, 80, "all"
-    return _json_payload(
-        {
-            "generation": generation,
-            "manifest_version": 1,
-            "shards": [{}],
-            "total_frames": 2,
-            "schema": {
-                "cache_kind": cache_kind,
-                "channel_count": 13,
-                "height": height,
-                "width": width,
-            },
-            "selection": {"mode": selection_mode},
-        }
-    )
+    value = {
+        "generation": generation,
+        "manifest_version": 1,
+        "shards": [{}],
+        "total_frames": 2,
+        "schema": {
+            "cache_kind": cache_kind,
+            "channel_count": 13,
+            "height": height,
+            "width": width,
+        },
+        "selection": {"mode": selection_mode},
+    }
+    if padding_bytes:
+        value["padding"] = "x" * padding_bytes
+    return _json_payload(value)
 
 
 def _gaussian_complete(
@@ -699,7 +1262,9 @@ def _gaussian_binding(root: str, cache_kind: str) -> dict:
     return {
         "path": root,
         "kind": "directory",
-        "manifest": _content_descriptor(f"{root}/manifest.json", manifest),
+        "manifest": _compressed_content_descriptor(
+            f"{root}/manifest.json", manifest
+        ),
         "completion_marker": _content_descriptor(f"{root}/COMPLETE", marker),
         "cache_kind": cache_kind,
         "dimensions": dimensions,
@@ -752,8 +1317,8 @@ def test_gaussian_completion_marker_semantics(module) -> None:
     member = "n3"
     request, valid = _valid_inputs_binding(module, member)
     primary = valid["gaussian_primary"]
-    manifest_payload = base64.b64decode(
-        primary["manifest"]["content_b64"], validate=True
+    manifest_payload = _decode_compressed_descriptor(
+        module, primary["manifest"], label="test Gaussian manifest"
     )
     complete_payload = base64.b64decode(
         primary["completion_marker"]["content_b64"], validate=True
@@ -823,7 +1388,7 @@ def test_gaussian_completion_marker_semantics(module) -> None:
         changed_complete = copy.deepcopy(complete)
         changed_complete["manifest_bytes"] = len(changed_manifest_payload)
         changed_binding = copy.deepcopy(valid)
-        changed_binding["gaussian_primary"]["manifest"] = _content_descriptor(
+        changed_binding["gaussian_primary"]["manifest"] = _compressed_content_descriptor(
             primary["manifest"]["path"], changed_manifest_payload
         )
         changed_binding["gaussian_primary"]["completion_marker"] = (
@@ -863,7 +1428,7 @@ def test_portable_inputs_schema_rejects_legacy_fields_paths_and_tasks(module) ->
     mutations: list[tuple[str, dict, dict]] = []
 
     changed = copy.deepcopy(valid)
-    changed["schema"] = "fastwam-formal-portable-input-binding-v0"
+    changed["schema"] = "fastwam-formal-portable-input-binding-v1"
     mutations.append(("old input schema", request, changed))
     changed = copy.deepcopy(valid)
     changed["unexpected"] = True
@@ -924,7 +1489,7 @@ def test_portable_inputs_schema_rejects_legacy_fields_paths_and_tasks(module) ->
         (
             "Gaussian fallback manifest",
             ("gaussian_fallback", "manifest"),
-            "content_b64",
+            "compressed_b64",
         ),
         (
             "Gaussian fallback completion marker",
@@ -1000,11 +1565,160 @@ def test_portable_inputs_reject_bool_float_negative_size_and_base64(module) -> N
         "non-canonical base64 with identical decoded bytes",
     )
     changed = copy.deepcopy(valid)
-    changed["gaussian_primary"]["manifest"]["content_b64"] = "not base64"
+    changed["gaussian_primary"]["manifest"]["compressed_b64"] = "not base64"
     _assert_runtime_rejected(
         lambda: module.validate_inputs_binding(member, request, changed),
         "invalid Gaussian base64",
     )
+
+
+def test_gaussian_manifest_reversible_descriptor_contract(module) -> None:
+    assert module.MAX_CONTROL_FILE_BYTES == 16 * 1024**2
+    assert module.MAX_GAUSSIAN_MANIFEST_RAW_BYTES == 64 * 1024**2
+    assert module.MAX_COMPRESSED_CONTENT_BYTES == 16 * 1024**2
+    assert module.GAUSSIAN_MANIFEST_CONTENT_ENCODING == "zlib-level6-base64-v1"
+
+    path = "/oss-chengjuntao/cache/manifest.json"
+    payload = _gaussian_manifest("compact")
+    descriptor = module.compressed_content_file_metadata(Path(path), payload)
+    assert set(descriptor) == {
+        "path",
+        "kind",
+        "bytes",
+        "content_encoding",
+        "compressed_bytes",
+        "compressed_b64",
+    }
+    assert descriptor == _compressed_content_descriptor(path, payload)
+    assert _decode_compressed_descriptor(
+        module, descriptor, label="valid reversible descriptor"
+    ) == payload
+
+    mutations: list[tuple[str, dict]] = []
+    for key in sorted(descriptor):
+        changed = copy.deepcopy(descriptor)
+        changed.pop(key)
+        mutations.append((f"missing compressed descriptor field {key}", changed))
+    changed = copy.deepcopy(descriptor)
+    changed["unexpected"] = True
+    mutations.append(("extra compressed descriptor field", changed))
+    for key, value in (
+        ("path", f"{path}.changed"),
+        ("kind", "directory"),
+        ("content_encoding", "zlib-base64"),
+        ("content_encoding", 1),
+        ("bytes", True),
+        ("bytes", 1.0),
+        ("bytes", -1),
+        ("bytes", module.MAX_GAUSSIAN_MANIFEST_RAW_BYTES + 1),
+        ("compressed_bytes", True),
+        ("compressed_bytes", 1.0),
+        ("compressed_bytes", -1),
+        ("compressed_bytes", module.MAX_COMPRESSED_CONTENT_BYTES + 1),
+        ("compressed_b64", 1),
+        ("compressed_b64", "not base64"),
+    ):
+        changed = copy.deepcopy(descriptor)
+        changed[key] = value
+        mutations.append((f"invalid compressed descriptor {key}", changed))
+
+    changed = copy.deepcopy(descriptor)
+    changed["compressed_bytes"] += 1
+    mutations.append(("declared compressed length mismatch", changed))
+    changed = copy.deepcopy(descriptor)
+    changed["bytes"] += 1
+    mutations.append(("declared decompressed length mismatch", changed))
+
+    padded_descriptor = None
+    for suffix_size in range(1, 8):
+        candidate = module.compressed_content_file_metadata(
+            Path(path), payload + b"x" * suffix_size
+        )
+        if candidate["compressed_b64"].endswith("="):
+            padded_descriptor = candidate
+            break
+    assert padded_descriptor is not None
+    changed = copy.deepcopy(padded_descriptor)
+    changed["compressed_b64"] = _noncanonical_base64_for_same_payload(
+        changed["compressed_b64"]
+    )
+    mutations.append(("non-canonical compressed Base64", changed))
+
+    compressed = base64.b64decode(descriptor["compressed_b64"], validate=True)
+
+    def descriptor_for_stream(stream: bytes, *, raw_bytes: int = len(payload)) -> dict:
+        changed = copy.deepcopy(descriptor)
+        changed["bytes"] = raw_bytes
+        changed["compressed_bytes"] = len(stream)
+        changed["compressed_b64"] = base64.b64encode(stream).decode("ascii")
+        return changed
+
+    mutations.extend(
+        (
+            ("truncated compressed stream", descriptor_for_stream(compressed[:-1])),
+            ("non-EOF compressed stream", descriptor_for_stream(compressed[:2])),
+            (
+                "concatenated compressed streams",
+                descriptor_for_stream(compressed + zlib.compress(b"second", level=6)),
+            ),
+            ("trailing compressed bytes", descriptor_for_stream(compressed + b"tail")),
+            (
+                "bounded decompression overrun with unconsumed input",
+                descriptor_for_stream(zlib.compress(b"x" * 4096, level=6), raw_bytes=1),
+            ),
+        )
+    )
+    for label, candidate in mutations:
+        _assert_runtime_rejected(
+            lambda candidate=candidate: module.validate_compressed_content_file_descriptor(
+                candidate, expected_path=path, label=label
+            ),
+            label,
+        )
+
+    with mock.patch.object(
+        module.zlib,
+        "compress",
+        return_value=b"x" * (module.MAX_COMPRESSED_CONTENT_BYTES + 1),
+    ) as compress:
+        _assert_runtime_rejected(
+            lambda: module.compressed_content_file_metadata(Path(path), payload),
+            "compressed Gaussian manifest over 16 MiB",
+        )
+        compress.assert_called_once_with(payload, level=6)
+
+
+def test_gaussian_manifest_large_raw_bounds(module) -> None:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-large-manifest-") as name:
+        prefix = Path(name)
+        cache = prefix / "large"
+        cache.mkdir()
+        manifest = _gaussian_manifest(
+            "compact", padding_bytes=module.MAX_CONTROL_FILE_BYTES + 1
+        )
+        assert module.MAX_CONTROL_FILE_BYTES < len(manifest)
+        assert len(manifest) <= module.MAX_GAUSSIAN_MANIFEST_RAW_BYTES
+        (cache / "manifest.json").write_bytes(manifest)
+        (cache / "COMPLETE").write_bytes(_gaussian_complete(manifest))
+        with mock.patch.object(module, "GAUSSIAN_PREFIX", prefix):
+            binding = module.validate_gaussian_root(cache, expected_kind="compact")
+        assert binding["manifest"]["bytes"] == len(manifest)
+        assert _decode_compressed_descriptor(
+            module, binding["manifest"], label="large reversible manifest"
+        ) == manifest
+
+        oversized = prefix / "oversized"
+        oversized.mkdir()
+        with (oversized / "manifest.json").open("wb") as stream:
+            stream.truncate(module.MAX_GAUSSIAN_MANIFEST_RAW_BYTES + 1)
+        (oversized / "COMPLETE").write_bytes(b"{}")
+        with mock.patch.object(module, "GAUSSIAN_PREFIX", prefix):
+            _assert_runtime_rejected(
+                lambda: module.validate_gaussian_root(
+                    oversized, expected_kind="compact"
+                ),
+                "Gaussian manifest over 64 MiB raw bound",
+            )
 
 
 def _write_member_input_fixture(
@@ -1061,6 +1775,8 @@ def _write_member_input_fixture(
         "gaussian_root": gaussian_root,
         "primary_manifest": primary / "manifest.json",
         "primary_complete": primary / "COMPLETE",
+        "fallback_manifest": fallback / "manifest.json",
+        "fallback_complete": fallback / "COMPLETE",
     }
 
 
@@ -1106,12 +1822,12 @@ def test_member_inputs_cross_mount_mode_and_mtime_portability(module) -> None:
     member = "n3"
     shared_memory = Path("/dev/shm")
     assert shared_memory.is_dir(), "/dev/shm is required for the cross-mount test"
-    with tempfile.TemporaryDirectory(prefix="formal-r2-input-left-", dir="/tmp") as left_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-input-left-", dir="/tmp") as left_name:
         with tempfile.TemporaryDirectory(
-            prefix="formal-r2-input-right-", dir=shared_memory
+            prefix="formal-r3-input-right-", dir=shared_memory
         ) as right_name:
             with tempfile.TemporaryDirectory(
-                prefix="formal-r2-input-alias-", dir="/tmp"
+                prefix="formal-r3-input-alias-", dir="/tmp"
             ) as alias_name:
                 left = Path(left_name)
                 right = Path(right_name)
@@ -1129,6 +1845,8 @@ def test_member_inputs_cross_mount_mode_and_mtime_portability(module) -> None:
                     left_paths["vae"],
                     left_paths["primary_manifest"],
                     left_paths["primary_complete"],
+                    left_paths["fallback_manifest"],
+                    left_paths["fallback_complete"],
                 ):
                     os.chmod(path, 0o600)
                     os.utime(path, ns=(1_600_000_000_000_000_000,) * 2)
@@ -1138,6 +1856,8 @@ def test_member_inputs_cross_mount_mode_and_mtime_portability(module) -> None:
                     right_paths["vae"],
                     right_paths["primary_manifest"],
                     right_paths["primary_complete"],
+                    right_paths["fallback_manifest"],
+                    right_paths["fallback_complete"],
                 ):
                     os.chmod(path, 0o644)
                     os.utime(path, ns=(1_700_000_000_000_000_000,) * 2)
@@ -1167,7 +1887,7 @@ def _same_size_replace(path: Path, payload: bytes) -> None:
 
 def test_same_size_stats_and_gaussian_control_replacements_are_detected(module) -> None:
     member = "n2"
-    with tempfile.TemporaryDirectory(prefix="formal-r2-control-content-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-control-content-") as name:
         root = Path(name)
         request, paths = _write_member_input_fixture(
             module, root, member=member, declared_dataset_root=root / "dataset"
@@ -1197,34 +1917,53 @@ def test_same_size_stats_and_gaussian_control_replacements_are_detected(module) 
         )
         assert restored == baseline
 
-        changed_manifest = _gaussian_manifest("compact", generation="bb")
-        _same_size_replace(paths["primary_manifest"], changed_manifest)
-        after_manifest = _collect_fixture_inputs(
-            module, member, request, paths["gaussian_root"]
-        )
-        assert baseline["gaussian_primary"]["manifest"]["bytes"] == after_manifest[
-            "gaussian_primary"
-        ]["manifest"]["bytes"]
-        assert baseline["gaussian_primary"] != after_manifest["gaussian_primary"]
+        for binding_key, cache_kind, manifest_key, complete_key in (
+            (
+                "gaussian_primary",
+                "compact",
+                "primary_manifest",
+                "primary_complete",
+            ),
+            (
+                "gaussian_fallback",
+                "canonical",
+                "fallback_manifest",
+                "fallback_complete",
+            ),
+        ):
+            original_manifest = _gaussian_manifest(cache_kind, generation="aa")
+            changed_manifest = _gaussian_manifest(cache_kind, generation="bb")
+            _same_size_replace(paths[manifest_key], changed_manifest)
+            after_manifest = _collect_fixture_inputs(
+                module, member, request, paths["gaussian_root"]
+            )
+            assert baseline[binding_key]["manifest"]["bytes"] == after_manifest[
+                binding_key
+            ]["manifest"]["bytes"]
+            assert baseline[binding_key] != after_manifest[binding_key]
 
-        _same_size_replace(
-            paths["primary_manifest"], _gaussian_manifest("compact", generation="aa")
-        )
-        restored = _collect_fixture_inputs(
-            module, member, request, paths["gaussian_root"]
-        )
-        changed_complete = _gaussian_complete(
-            _gaussian_manifest("compact"), legacy_manifest_field="b" * 64
-        )
-        assert len(changed_complete) == paths["primary_complete"].stat().st_size
-        _same_size_replace(paths["primary_complete"], changed_complete)
-        after_complete = _collect_fixture_inputs(
-            module, member, request, paths["gaussian_root"]
-        )
-        assert restored["gaussian_primary"]["completion_marker"]["bytes"] == (
-            after_complete["gaussian_primary"]["completion_marker"]["bytes"]
-        )
-        assert restored["gaussian_primary"] != after_complete["gaussian_primary"]
+            _same_size_replace(paths[manifest_key], original_manifest)
+            restored = _collect_fixture_inputs(
+                module, member, request, paths["gaussian_root"]
+            )
+            assert restored == baseline
+
+            original_complete = _gaussian_complete(original_manifest)
+            changed_complete = _gaussian_complete(
+                original_manifest, legacy_manifest_field="b" * 64
+            )
+            _same_size_replace(paths[complete_key], changed_complete)
+            after_complete = _collect_fixture_inputs(
+                module, member, request, paths["gaussian_root"]
+            )
+            assert restored[binding_key]["completion_marker"]["bytes"] == (
+                after_complete[binding_key]["completion_marker"]["bytes"]
+            )
+            assert restored[binding_key] != after_complete[binding_key]
+            _same_size_replace(paths[complete_key], original_complete)
+            assert _collect_fixture_inputs(
+                module, member, request, paths["gaussian_root"]
+            ) == baseline
 
 
 def _valid_member_reservation(module, member: str, request: dict, inputs: dict) -> dict:
@@ -1282,12 +2021,18 @@ def test_old_reservation_and_prepare_live_collector_contract(module) -> None:
     reservation = _valid_member_reservation(module, member, request, inputs)
     with mock.patch.object(module, "validate_request", return_value=None):
         assert module.validate_member_reservation_structure(member, reservation) is request
-        old = copy.deepcopy(reservation)
-        old["schema"] = "fastwam-action-native-agents-reservation-v1"
-        _assert_runtime_rejected(
-            lambda: module.validate_member_reservation_structure(member, old),
-            "old reservation v1",
-        )
+        for old_schema in (
+            "fastwam-action-native-agents-reservation-v1",
+            "fastwam-action-native-agents-reservation-v2",
+        ):
+            old = copy.deepcopy(reservation)
+            old["schema"] = old_schema
+            _assert_runtime_rejected(
+                lambda old=old: module.validate_member_reservation_structure(
+                    member, old
+                ),
+                f"old reservation schema {old_schema}",
+            )
         unexpected = copy.deepcopy(reservation)
         unexpected["unexpected"] = True
         _assert_runtime_rejected(
@@ -1393,42 +2138,37 @@ def test_old_reservation_and_prepare_live_collector_contract(module) -> None:
         ]
 
 
-def test_prepare_one_persists_shared_collector_result(module) -> None:
+def test_prepare_one_is_pure_and_publish_is_explicit(module) -> None:
     member = "n2"
     request, inputs = _valid_inputs_binding(module, member)
     source_entries = {
         "schema": module.SOURCE_INVENTORY_SCHEMA,
         "entries": [{"path": ".", "kind": "directory"}],
     }
-    with tempfile.TemporaryDirectory(prefix="formal-r2-prepare-behavior-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-prepare-behavior-") as name:
         root = Path(name)
         reservation_destination = root / "prepared-reservation.json"
-        local_state_destination = root / "state.json"
         output_destination = root / "output"
         with (
             mock.patch.object(module, "build_request", return_value=request),
-            mock.patch.object(module, "validate_request", return_value=None) as validate,
             mock.patch.object(
                 module, "collect_member_inputs", return_value=inputs
             ) as collect,
             mock.patch.object(module, "output_root", return_value=output_destination),
             mock.patch.object(
-                module, "reservation_path", return_value=reservation_destination
-            ),
-            mock.patch.object(module, "latch_path", return_value=root / "latch.json"),
-            mock.patch.object(
-                module,
-                "acknowledgement_path",
-                return_value=root / "acknowledgement.json",
-            ),
-            mock.patch.object(
-                module, "local_state_path", return_value=local_state_destination
-            ),
+                module, "validate_member_reservation_structure", return_value=request
+            ) as validate_reservation,
             mock.patch.object(module, "exclusive_write") as write_reservation,
             mock.patch.object(module, "atomic_write") as write_state,
+            mock.patch.object(
+                module, "publish_member_reservation"
+            ) as publish_reservation,
+            mock.patch.object(
+                module, "write_prepared_local_state"
+            ) as write_local_state,
             mock.patch.object(module, "utc_now", return_value="2026-08-12T00:00:00Z"),
         ):
-            result = module.prepare_one(
+            reservation = module.prepare_one(
                 member,
                 source=Path(request["Envs"]["FASTWAM_SOURCE_ROOT"]),
                 source_commit=request["Envs"]["FASTWAM_CODE_COMMIT"],
@@ -1447,27 +2187,369 @@ def test_prepare_one_persists_shared_collector_result(module) -> None:
                 trusted_runtime=b"runtime-bytes",
             )
 
-        validate.assert_called_once_with(member, request, live=True)
         collect.assert_called_once_with(member, request)
-        write_reservation.assert_called_once()
-        destination, written = write_reservation.call_args.args
-        assert destination == reservation_destination
-        assert set(written) == module.MEMBER_RESERVATION_KEYS
-        assert written["schema"] == module.MEMBER_RESERVATION_SCHEMA
-        assert written["request"] is request
-        assert written["inputs"] is inputs
-        assert written["source"]["inventory"] is source_entries
-        assert written["prepared_at"] == "2026-08-12T00:00:00Z"
-        assert written["semantics"] == module.MEMBER_RESERVATION_SEMANTICS
-        assert result == {
+        validate_reservation.assert_called_once_with(member, reservation)
+        assert set(reservation) == module.MEMBER_RESERVATION_KEYS
+        assert reservation["schema"] == module.MEMBER_RESERVATION_SCHEMA
+        assert reservation["request"] is request
+        assert reservation["inputs"] is inputs
+        assert reservation["source"]["inventory"] is source_entries
+        assert reservation["prepared_at"] == "2026-08-12T00:00:00Z"
+        assert reservation["semantics"] == module.MEMBER_RESERVATION_SEMANTICS
+        assert not output_destination.exists()
+        write_reservation.assert_not_called()
+        write_state.assert_not_called()
+        publish_reservation.assert_not_called()
+        write_local_state.assert_not_called()
+
+        with (
+            mock.patch.object(
+                module, "reservation_path", return_value=reservation_destination
+            ),
+            mock.patch.object(module, "latch_path", return_value=root / "latch.json"),
+            mock.patch.object(
+                module,
+                "acknowledgement_path",
+                return_value=root / "acknowledgement.json",
+            ),
+            mock.patch.object(
+                module, "validate_member_reservation_structure", return_value=request
+            ),
+        ):
+            result = module.publish_member_reservation(member, reservation)
+            assert result == {
+                "member": member,
+                "status": "PREPARED",
+                "path": str(reservation_destination),
+            }
+            persisted, _ = module.read_json(reservation_destination)
+            assert persisted == reservation
+            repeated = module.publish_member_reservation(member, reservation)
+        assert repeated == {
             "member": member,
-            "status": "PREPARED",
+            "status": "ALREADY_PREPARED",
             "path": str(reservation_destination),
         }
-        write_state.assert_called_once()
 
 
-def test_live_validation_recollects_and_rejects_same_size_control_change(module) -> None:
+def _prepare_test_args(root: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        member=None,
+        source_root=str(root / "source"),
+        source_commit="a" * 40,
+        dataset_root=str(root / "dataset"),
+        stats_source=str(root / "stats.json"),
+        initial_checkpoint=str(root / "initial.pt"),
+        vae_source=str(root / "vae.safetensors"),
+        gaussian_cache=str(root / "gaussian/primary"),
+        gaussian_fallback_cache=str(root / "gaussian/fallback"),
+        platform_oss_quota_bytes=500 * 1024**3,
+        platform_oss_free_bytes=242 * 1024**3,
+        platform_oss_quota_evidence="PAI console quota observation 2026-08-12",
+        platform_oss_observed_at="2026-08-12T00:00:00Z",
+        text_cache_placefood=str(root / "text/placefood.pt"),
+        text_cache_three_shoes=str(root / "text/three-shoes.pt"),
+        text_cache_three_stack=str(root / "text/three-stack.pt"),
+        text_cache_four_stack=str(root / "text/four-stack.pt"),
+    )
+
+
+def _prepare_read_only_patches(module, root: Path):
+    source = root / "source"
+    return (
+        mock.patch.object(module, "canonical_direct_child", return_value=source),
+        mock.patch.object(
+            module,
+            "validate_source",
+            return_value={
+                "schema": module.SOURCE_INVENTORY_SCHEMA,
+                "entries": [{"path": ".", "kind": "directory"}],
+            },
+        ),
+        mock.patch.object(
+            module, "stable_read", return_value=(b"runtime", {"bytes": 7})
+        ),
+        mock.patch.object(
+            module,
+            "canonical_oss_path",
+            side_effect=lambda value, **_kwargs: Path(value),
+        ),
+        mock.patch.object(
+            module,
+            "expected_text_map",
+            return_value={
+                task: str(root / f"text/{index}.pt")
+                for index, task in enumerate(
+                    {
+                        task
+                        for spec in module.MEMBERS.values()
+                        for task in spec["tasks"]
+                    }
+                )
+            },
+        ),
+        mock.patch.object(
+            module, "validate_suite_storage_reservation", return_value=None
+        ),
+    )
+
+
+def test_prepare_member_failures_leave_no_durable_or_local_state(module) -> None:
+    for failure_stage in ("collect", "validate"):
+        for failing_member in module.MEMBERS:
+            with tempfile.TemporaryDirectory(
+                prefix=f"formal-r3-atomic-{failure_stage}-{failing_member}-"
+            ) as name:
+                root = Path(name)
+                python_target = root / "python-target"
+                python_target.write_bytes(b"runtime")
+                python_target.chmod(0o700)
+                python_link = root / "python"
+                python_link.symlink_to(python_target)
+                output_prefix = root / "durable-output-parent"
+                suite_path = root / "suite-reservation.json"
+                member_paths = {
+                    member: root / f"{member}-reservation.json"
+                    for member in module.MEMBERS
+                }
+                local_paths = {
+                    member: root / f"{member}-state.json"
+                    for member in module.MEMBERS
+                }
+                prepared: list[str] = []
+
+                def build_request(member: str, **_kwargs):
+                    prepared.append(member)
+                    return {"member": member}
+
+                def collect_inputs(member: str, request: dict):
+                    assert request == {"member": member}
+                    if failure_stage == "collect" and member == failing_member:
+                        raise RuntimeError(f"collection failed for {member}")
+                    return {"member": member}
+
+                def validate_reservation(member: str, reservation: dict):
+                    assert reservation["member"] == member
+                    if failure_stage == "validate" and member == failing_member:
+                        raise RuntimeError(f"reservation validation failed for {member}")
+                    return reservation["request"]
+
+                patches = _prepare_read_only_patches(module, root)
+                with ExitStack() as stack:
+                    for patcher in patches:
+                        stack.enter_context(patcher)
+                    stack.enter_context(
+                        mock.patch.object(module, "PINNED_PYTHON", python_link)
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "PINNED_PYTHON_TARGET", python_target
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(module, "OUTPUT_PREFIX", output_prefix)
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "SUITE_STORAGE_RESERVATION_PATH", suite_path
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "reservation_path",
+                            side_effect=lambda member: member_paths[member],
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "local_state_path",
+                            side_effect=lambda member: local_paths[member],
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "output_root",
+                            side_effect=lambda member: output_prefix / member,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module, "build_request", side_effect=build_request
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "collect_member_inputs",
+                            side_effect=collect_inputs,
+                        )
+                    )
+                    stack.enter_context(
+                        mock.patch.object(
+                            module,
+                            "validate_member_reservation_structure",
+                            side_effect=validate_reservation,
+                        )
+                    )
+                    make_output = stack.enter_context(
+                        mock.patch.object(module.os, "mkdir")
+                    )
+                    validate_existing = stack.enter_context(
+                        mock.patch.object(module, "validate_existing_member_state")
+                    )
+                    publish_member = stack.enter_context(
+                        mock.patch.object(module, "publish_member_reservation")
+                    )
+                    publish_suite = stack.enter_context(
+                        mock.patch.object(module, "exclusive_write")
+                    )
+                    atomic_write = stack.enter_context(
+                        mock.patch.object(module, "atomic_write")
+                    )
+                    write_local_state = stack.enter_context(
+                        mock.patch.object(module, "write_prepared_local_state")
+                    )
+                    _assert_runtime_rejected(
+                        lambda: module.prepare(_prepare_test_args(root)),
+                        f"suite {failure_stage} failure at {failing_member}",
+                    )
+
+                expected_prefix = list(module.MEMBERS)
+                assert prepared == expected_prefix[
+                    : expected_prefix.index(failing_member) + 1
+                ]
+                make_output.assert_not_called()
+                validate_existing.assert_not_called()
+                publish_member.assert_not_called()
+                publish_suite.assert_not_called()
+                atomic_write.assert_not_called()
+                write_local_state.assert_not_called()
+                assert not output_prefix.exists()
+                assert not suite_path.exists()
+                assert all(not path.exists() for path in member_paths.values())
+                assert all(not path.exists() for path in local_paths.values())
+
+
+def test_prepare_phase_two_follows_all_pure_results(module) -> None:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-phase-two-") as name:
+        root = Path(name)
+        python_target = root / "python-target"
+        python_target.write_bytes(b"runtime")
+        python_target.chmod(0o700)
+        python_link = root / "python"
+        python_link.symlink_to(python_target)
+        output_prefix = root / "durable-output-parent"
+        suite_path = root / "suite-reservation.json"
+        events: list[str] = []
+        published_suite: dict[str, dict] = {}
+        planned = {
+            member: {"member": member, "pure": True} for member in module.MEMBERS
+        }
+        real_mkdir = os.mkdir
+
+        def prepare_member(member: str, **_kwargs):
+            events.append(f"pure:{member}")
+            return planned[member]
+
+        def inspect_member(member: str, reservation: dict):
+            assert reservation is planned[member]
+            events.append(f"inspect:{member}")
+            return None
+
+        def create_output(path: Path, mode: int):
+            events.append("mkdir:output")
+            real_mkdir(path, mode)
+
+        def publish_member(member: str, reservation: dict):
+            assert reservation is planned[member]
+            events.append(f"publish:{member}")
+            return {"member": member, "status": "PREPARED", "path": str(root / member)}
+
+        def validate_suite(_suite: dict):
+            events.append("validate:suite-members")
+            return planned
+
+        def publish_suite(path: Path, suite: dict):
+            assert path == suite_path
+            events.append("publish:suite")
+            published_suite["value"] = copy.deepcopy(suite)
+
+        def read_suite(path: Path):
+            assert path == suite_path
+            events.append("read:suite")
+            return copy.deepcopy(published_suite["value"]), {}
+
+        def write_local(member: str):
+            events.append(f"local:{member}")
+
+        patches = _prepare_read_only_patches(module, root)
+        with ExitStack() as stack:
+            for patcher in patches:
+                stack.enter_context(patcher)
+            stack.enter_context(
+                mock.patch.object(module, "PINNED_PYTHON", python_link)
+            )
+            stack.enter_context(
+                mock.patch.object(module, "PINNED_PYTHON_TARGET", python_target)
+            )
+            stack.enter_context(mock.patch.object(module, "OUTPUT_PREFIX", output_prefix))
+            stack.enter_context(
+                mock.patch.object(module, "SUITE_STORAGE_RESERVATION_PATH", suite_path)
+            )
+            stack.enter_context(
+                mock.patch.object(module, "prepare_one", side_effect=prepare_member)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "validate_existing_member_state",
+                    side_effect=inspect_member,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(module.os, "mkdir", side_effect=create_output)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module, "publish_member_reservation", side_effect=publish_member
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "validate_complete_suite_members",
+                    side_effect=validate_suite,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(module, "exclusive_write", side_effect=publish_suite)
+            )
+            stack.enter_context(
+                mock.patch.object(module, "read_json", side_effect=read_suite)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module, "write_prepared_local_state", side_effect=write_local
+                )
+            )
+            stack.enter_context(mock.patch("builtins.print"))
+            module.prepare(_prepare_test_args(root))
+
+        assert output_prefix.is_dir()
+        assert events[:3] == ["pure:n2", "pure:n3", "pure:n4"]
+        assert events[3:6] == ["inspect:n2", "inspect:n3", "inspect:n4"]
+        assert events.index("mkdir:output") > events.index("inspect:n4")
+        assert events.index("publish:n2") > events.index("mkdir:output")
+        assert events.index("publish:suite") > events.index("publish:n4")
+        assert events.index("read:suite") > events.index("publish:suite")
+        for member in module.MEMBERS:
+            assert events.index(f"local:{member}") > events.index("read:suite")
+
+
+def test_live_validation_rejects_all_same_size_control_changes(module) -> None:
     member = "n2"
     request, inputs = _valid_inputs_binding(module, member)
     reservation = _valid_member_reservation(module, member, request, inputs)
@@ -1477,55 +2559,97 @@ def test_live_validation_recollects_and_rejects_same_size_control_change(module)
     )
     changed_payload = stats_payload.replace(b'"aa"', b'"bb"')
     assert changed_payload != stats_payload and len(changed_payload) == len(stats_payload)
-    changed_inputs = copy.deepcopy(inputs)
-    changed_inputs["normalization_stats"]["content_b64"] = base64.b64encode(
+    changed_stats = copy.deepcopy(inputs)
+    changed_stats["normalization_stats"]["content_b64"] = base64.b64encode(
         changed_payload
     ).decode("ascii")
-    module.validate_inputs_binding(member, request, changed_inputs)
+    module.validate_inputs_binding(member, request, changed_stats)
 
-    common_patches = (
-        mock.patch.object(module, "read_json", return_value=(suite_record(module), {})),
-        mock.patch.object(
-            module, "validate_complete_suite_members", return_value={member: reservation}
-        ),
-        mock.patch.object(
-            module, "validate_member_reservation_structure", return_value=request
-        ),
-        mock.patch.object(module, "canonical_oss_path", return_value=Path("/tmp/output")),
-        mock.patch.object(module, "canonical_direct_child", return_value=Path("/tmp/source")),
-        mock.patch.object(module, "source_inventory", return_value=source["inventory"]),
-    )
-    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], common_patches[4], common_patches[5]:
-        with mock.patch.object(
-            module, "collect_member_inputs", return_value=inputs
-        ) as collect:
-            assert module.validate_reservation_live(
-                member, reservation, require_output_absent=False
-            ) is request
-            collect.assert_called_once_with(member, request)
-
-    common_patches = (
-        mock.patch.object(module, "read_json", return_value=(suite_record(module), {})),
-        mock.patch.object(
-            module, "validate_complete_suite_members", return_value={member: reservation}
-        ),
-        mock.patch.object(
-            module, "validate_member_reservation_structure", return_value=request
-        ),
-        mock.patch.object(module, "canonical_oss_path", return_value=Path("/tmp/output")),
-        mock.patch.object(module, "canonical_direct_child", return_value=Path("/tmp/source")),
-        mock.patch.object(module, "source_inventory", return_value=source["inventory"]),
-    )
-    with common_patches[0], common_patches[1], common_patches[2], common_patches[3], common_patches[4], common_patches[5], mock.patch.object(
-        module, "collect_member_inputs", return_value=changed_inputs
-    ) as collect:
-        _assert_runtime_rejected(
-            lambda: module.validate_reservation_live(
-                member, reservation, require_output_absent=False
-            ),
+    changed_bindings = [
+        (
             "same-size stats replacement between prepare and live validation",
+            changed_stats,
         )
-        collect.assert_called_once_with(member, request)
+    ]
+    for binding_key in ("gaussian_primary", "gaussian_fallback"):
+        manifest_descriptor = inputs[binding_key]["manifest"]
+        manifest_payload = _decode_compressed_descriptor(
+            module, manifest_descriptor, label=f"{binding_key} baseline manifest"
+        )
+        replacement_manifest = manifest_payload.replace(b'"aa"', b'"bb"', 1)
+        assert replacement_manifest != manifest_payload
+        assert len(replacement_manifest) == len(manifest_payload)
+        changed_manifest = copy.deepcopy(inputs)
+        changed_manifest[binding_key]["manifest"] = _compressed_content_descriptor(
+            manifest_descriptor["path"], replacement_manifest
+        )
+        module.validate_inputs_binding(member, request, changed_manifest)
+        changed_bindings.append(
+            (f"same-size {binding_key} manifest replacement", changed_manifest)
+        )
+
+        marker_descriptor = inputs[binding_key]["completion_marker"]
+        marker_payload = base64.b64decode(
+            marker_descriptor["content_b64"], validate=True
+        )
+        replacement_marker = marker_payload.replace(b"a" * 64, b"b" * 64, 1)
+        assert replacement_marker != marker_payload
+        assert len(replacement_marker) == len(marker_payload)
+        changed_marker = copy.deepcopy(inputs)
+        changed_marker[binding_key]["completion_marker"] = _content_descriptor(
+            marker_descriptor["path"], replacement_marker
+        )
+        module.validate_inputs_binding(member, request, changed_marker)
+        changed_bindings.append(
+            (f"same-size {binding_key} COMPLETE replacement", changed_marker)
+        )
+
+    def live_validate(observed_inputs: dict):
+        common_patches = (
+            mock.patch.object(
+                module, "read_json", return_value=(suite_record(module), {})
+            ),
+            mock.patch.object(
+                module,
+                "validate_complete_suite_members",
+                return_value={member: reservation},
+            ),
+            mock.patch.object(
+                module, "validate_member_reservation_structure", return_value=request
+            ),
+            mock.patch.object(
+                module, "canonical_oss_path", return_value=Path("/tmp/output")
+            ),
+            mock.patch.object(
+                module, "canonical_direct_child", return_value=Path("/tmp/source")
+            ),
+            mock.patch.object(
+                module, "source_inventory", return_value=source["inventory"]
+            ),
+        )
+        with (
+            common_patches[0],
+            common_patches[1],
+            common_patches[2],
+            common_patches[3],
+            common_patches[4],
+            common_patches[5],
+            mock.patch.object(
+                module, "collect_member_inputs", return_value=observed_inputs
+            ) as collect,
+        ):
+            result = module.validate_reservation_live(
+                member, reservation, require_output_absent=False
+            )
+            collect.assert_called_once_with(member, request)
+            return result
+
+    assert live_validate(inputs) is request
+    for label, changed_inputs in changed_bindings:
+        _assert_runtime_rejected(
+            lambda changed_inputs=changed_inputs: live_validate(changed_inputs),
+            label,
+        )
 
 
 def test_suite_rejects_common_input_mismatch(module) -> None:
@@ -1567,7 +2691,7 @@ def test_suite_rejects_common_input_mismatch(module) -> None:
 
 
 def test_first_frozen_controller_import_does_not_mutate_source() -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r2-import-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-import-") as temporary:
         source = Path(temporary) / "source"
         controller = source / CONTROLLER.name
         source.mkdir()
@@ -1614,6 +2738,17 @@ if Path(module.__file__).resolve(strict=True) != controller_path.resolve(strict=
 def test_runtime_structure() -> None:
     text = RUNTIME.read_text(encoding="utf-8")
     assert text.count("launch_training \"") == 3
+    for identity in (
+        "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812/",
+        "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r3-20260812-r1",
+        "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R3-20260812",
+        "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R3-20260812",
+        "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R3-20260812",
+        "fastwam-act-n2-placefood-1k-s42-r3-20260812",
+        "fastwam-act-n3-pool-1k-s42-r3-20260812",
+        "fastwam-act-n4-stackcube-1k-s42-r3-20260812",
+    ):
+        assert identity in text
     for required in (
         "+artifact_integrity_mode=metadata_no_hash",
         "+model.checkpoint_integrity_mode=metadata_no_hash",
@@ -1718,8 +2853,8 @@ def test_runtime_structure() -> None:
         assert forbidden not in text.lower()
     assert "sparse_delta" not in text
     assert "new pod" not in text.lower()
-    assert "R1-20260811" not in text
-    assert "-r1-20260811" not in text
+    for retired in ("R1-20260811", "R2-20260811", "-r1-20260811", "-r2-20260811"):
+        assert retired not in text
     source_copy_validation = text.split(
         'cp -a -- "${FASTWAM_SOURCE_ROOT}/." "${LOCAL_SOURCE}/"', 1
     )[1].split("PY\n", 1)[0]
@@ -1759,6 +2894,52 @@ def test_runtime_structure() -> None:
     assert "spec_from_file_location(\"formal_worker_controller\", controller_path)" in text
 
 
+def test_runtime_durable_writers_fail_closed() -> None:
+    text = RUNTIME.read_text(encoding="utf-8")
+    writers = text.split("def write_all(fd, payload):\n", 1)[1].split(
+        "\n# This is intentionally the first mutation beneath the unique durable output.",
+        1,
+    )[0]
+    namespace = {"os": os}
+    exec("def write_all(fd, payload):\n" + writers, namespace)
+    create_bytes = namespace["create_bytes"]
+
+    with tempfile.TemporaryDirectory(prefix="formal-r3-runtime-writer-") as name:
+        root = Path(name)
+        collision = root / "COMPLETE"
+        collision.write_bytes(b"immutable-existing-marker\n")
+        try:
+            create_bytes(collision, b"replacement\n")
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("runtime O_EXCL collision was overwritten")
+        assert collision.read_bytes() == b"immutable-existing-marker\n"
+
+        zero_write = root / "zero-write.json"
+        with mock.patch.object(os, "write", return_value=0):
+            try:
+                create_bytes(zero_write, b"must-not-complete")
+            except OSError as error:
+                assert "zero-byte write" in str(error)
+            else:
+                raise AssertionError("runtime accepted a zero-byte durable write")
+        assert zero_write.is_file()
+        assert zero_write.read_bytes() == b""
+
+        target = root / "symlink-target"
+        target.write_bytes(b"do-not-truncate\n")
+        linked_destination = root / "linked-destination"
+        linked_destination.symlink_to(target)
+        try:
+            create_bytes(linked_destination, b"replacement\n")
+        except OSError:
+            pass
+        else:
+            raise AssertionError("runtime durable writer followed a destination symlink")
+        assert target.read_bytes() == b"do-not-truncate\n"
+
+
 def test_runtime_staged_copy_uses_prepared_inventory_counterexample() -> None:
     text = RUNTIME.read_text(encoding="utf-8")
     marker = (
@@ -1769,7 +2950,7 @@ def test_runtime_staged_copy_uses_prepared_inventory_counterexample() -> None:
     assert text.count(marker) == 1
     stage_script = text.split(marker, 1)[1].split("\nPY\n", 1)[0]
 
-    with tempfile.TemporaryDirectory(prefix="formal-r2-stage-binding-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r3-stage-binding-") as name:
         root = Path(name)
         controller = root / "controller.py"
         source = root / "source"
@@ -1864,12 +3045,247 @@ def assert_source_inventory_matches(expected, observed, *, label):
         assert accepted.returncode == 0, accepted.stderr
 
 
+def _make_wrapper_fixture(
+    case_root: Path, lock_root: Path, *, pause_before_revalidation: bool = False
+) -> tuple[Path, Path, Path, dict[str, str]]:
+    case_root.mkdir(mode=0o700)
+    os.chmod(case_root, 0o700)
+    interpreter_target = Path(sys.executable).resolve(strict=True)
+    interpreter_link = case_root / "control-python"
+    interpreter_link.symlink_to(interpreter_target)
+    marker = case_root / "controller-ran"
+    controller = case_root / "controller.py"
+    controller.write_text(
+        """import fcntl
+import os
+import stat
+
+lock_path = os.environ["FASTWAM_WRAPPER_EXPECTED_LOCK"]
+marker_path = os.environ["FASTWAM_WRAPPER_CONTROLLER_MARKER"]
+opened = os.fstat(9)
+named = os.lstat(lock_path)
+if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+    raise RuntimeError("descriptor 9 is not a single-link regular lock")
+if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+    raise RuntimeError("descriptor 9 is not the named R3 lock")
+if os.get_inheritable(9) is not True:
+    raise RuntimeError("descriptor 9 did not survive exec")
+if os.environ.get("FASTWAM_CONTROL_NODE") != "ssh970":
+    raise RuntimeError("missing control-node binding")
+if os.environ.get("FASTWAM_LOCK_FD") != "9":
+    raise RuntimeError("missing descriptor binding")
+fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+with open(marker_path, "xb") as handle:
+    handle.write(b"controller-ran\\n")
+""",
+        encoding="utf-8",
+    )
+
+    wrapper_text = WRAPPER.read_text(encoding="utf-8")
+    preflight_start = wrapper_text.index('"${CONTROL_PYTHON}" -I -c')
+    lock_assignment = wrapper_text.index('LOCK_ROOT="', preflight_start)
+    wrapper_text = (
+        wrapper_text[:preflight_start]
+        + '"${CONTROL_PYTHON}" -B -I -S -c \'pass\'\n'
+        + wrapper_text[lock_assignment:]
+    )
+    substitutions = {
+        "CONTROL_PYTHON=/mnt/workspace/tools/pai-control-py312/20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python": (
+            f"CONTROL_PYTHON={json.dumps(str(interpreter_link))}"
+        ),
+        "CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12": (
+            f"CONTROL_PYTHON_TARGET={json.dumps(str(interpreter_target))}"
+        ),
+        'LOCK_ROOT="/tmp/fastwam-dlc-submit-state/workspace-270969"': (
+            f"LOCK_ROOT={json.dumps(str(lock_root))}"
+        ),
+    }
+    for old, new in substitutions.items():
+        assert wrapper_text.count(old) == 1
+        wrapper_text = wrapper_text.replace(old, new)
+
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "SSH_CONNECTION": "127.0.0.1 12345 127.0.0.1 970",
+            "FASTWAM_WRAPPER_EXPECTED_LOCK": str(
+                lock_root / "action-n234-formal-r3-controller.lock"
+            ),
+            "FASTWAM_WRAPPER_CONTROLLER_MARKER": str(marker),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    if pause_before_revalidation:
+        ready = case_root / "lock-bootstrap-ready"
+        release = case_root / "lock-bootstrap-release"
+        wrapper_text = wrapper_text.replace("import sys\n", "import sys\nimport time\n", 1)
+        injection = """        ready_path = os.environ["FASTWAM_LOCK_TEST_READY"]
+        release_path = os.environ["FASTWAM_LOCK_TEST_RELEASE"]
+        ready_fd = os.open(
+            ready_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+        )
+        os.close(ready_fd)
+        while True:
+            try:
+                release_fd = os.open(release_path, os.O_RDONLY | os.O_NOFOLLOW)
+            except FileNotFoundError:
+                time.sleep(0.01)
+                continue
+            os.close(release_fd)
+            break
+"""
+        assert wrapper_text.count("        # LOCK_TEST_REVALIDATION_POINT") == 1
+        wrapper_text = wrapper_text.replace(
+            "        # LOCK_TEST_REVALIDATION_POINT", injection.rstrip("\n")
+        )
+        environment["FASTWAM_LOCK_TEST_READY"] = str(ready)
+        environment["FASTWAM_LOCK_TEST_RELEASE"] = str(release)
+
+    wrapper = case_root / "submit_from_ssh970.sh"
+    wrapper.write_text(wrapper_text, encoding="utf-8")
+    wrapper.chmod(0o700)
+    return wrapper, marker, interpreter_target, environment
+
+
+def test_wrapper_uses_pinned_nofollow_lock_bootstrap() -> None:
+    wrapper_text = WRAPPER.read_text(encoding="utf-8")
+    assert '[[ -n "${SSH_CONNECTION:-}" ]]' in wrapper_text
+    control_python = (
+        "/mnt/workspace/tools/pai-control-py312/"
+        "20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python"
+    )
+    assert f"CONTROL_PYTHON={control_python}" in wrapper_text
+    assert "CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12" in wrapper_text
+    assert '[[ -L "${CONTROL_PYTHON}" && -x "${CONTROL_PYTHON}" ]]' in wrapper_text
+    assert 'realpath -e -- "${CONTROL_PYTHON}"' in wrapper_text
+    assert '== "${CONTROL_PYTHON_TARGET}"' in wrapper_text
+    assert '-L "${CONTROL_PYTHON_TARGET}"' in wrapper_text
+    assert "import alibabacloud_credentials,alibabacloud_pai_dlc20201203" in wrapper_text
+    assert 'environment["FASTWAM_CONTROL_NODE"] = "ssh970"' in wrapper_text
+    assert 'environment["FASTWAM_LOCK_FD"] = str(expected_lock_fd)' in wrapper_text
+    assert 'environment["PYTHONDONTWRITEBYTECODE"] = "1"' in wrapper_text
+    assert "action-n234-formal-r3-controller.lock" in wrapper_text
+    assert "action-n234-formal-controller.lock" not in wrapper_text
+    assert "exec 9>" not in wrapper_text
+    assert "flock -n 9" not in wrapper_text
+    assert "os.O_NOFOLLOW" in wrapper_text
+    assert "dir_fd=parent_fd" in wrapper_text
+    assert "validate_private_directory(*edge)" in wrapper_text
+    assert "validate_lock(parent_fd, lock_fd)" in wrapper_text
+    assert "fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)" in wrapper_text
+    assert "os.dup2(lock_fd, expected_lock_fd, inheritable=True)" in wrapper_text
+    assert "os.execve(" in wrapper_text
+    assert '[control_python, "-B", "-I", controller, *controller_args]' in wrapper_text
+    assert "/usr/bin/python3" not in wrapper_text
+
+    with tempfile.TemporaryDirectory(
+        prefix="formal-r3-real-wrapper-", dir="/tmp"
+    ) as base_name:
+        base = Path(base_name)
+        os.chmod(base, 0o700)
+
+        positive_case = base / "positive"
+        positive_root = positive_case / "state" / "workspace"
+        positive_wrapper, positive_marker, _target, positive_env = (
+            _make_wrapper_fixture(positive_case, positive_root)
+        )
+        positive = subprocess.run(
+            ["/bin/bash", str(positive_wrapper)],
+            env=positive_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert positive.returncode == 0, positive.stderr
+        assert positive_marker.read_bytes() == b"controller-ran\n"
+        lock_metadata = os.lstat(
+            positive_root / "action-n234-formal-r3-controller.lock"
+        )
+        assert stat.S_ISREG(lock_metadata.st_mode)
+        assert stat.S_IMODE(lock_metadata.st_mode) == 0o600
+        assert lock_metadata.st_nlink == 1
+
+        symlink_case = base / "symlink"
+        symlink_root = symlink_case / "state" / "workspace"
+        symlink_wrapper, symlink_marker, _target, symlink_env = (
+            _make_wrapper_fixture(symlink_case, symlink_root)
+        )
+        state = symlink_case / "state"
+        state.mkdir(mode=0o700)
+        symlink_root.mkdir(mode=0o700)
+        lock_target = symlink_case / "lock-target"
+        lock_target.write_bytes(b"must-not-be-truncated\n")
+        lock_link = symlink_root / "action-n234-formal-r3-controller.lock"
+        lock_link.symlink_to(lock_target)
+        rejected_link = subprocess.run(
+            ["/bin/bash", str(symlink_wrapper)],
+            env=symlink_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert rejected_link.returncode != 0
+        assert lock_target.read_bytes() == b"must-not-be-truncated\n"
+        assert not symlink_marker.exists()
+
+        replacement_case = base / "ancestor-replacement"
+        replacement_root = replacement_case / "state" / "workspace"
+        replacement_wrapper, replacement_marker, _target, replacement_env = (
+            _make_wrapper_fixture(
+                replacement_case,
+                replacement_root,
+                pause_before_revalidation=True,
+            )
+        )
+        process = subprocess.Popen(
+            ["/bin/bash", str(replacement_wrapper)],
+            env=replacement_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        ready = Path(replacement_env["FASTWAM_LOCK_TEST_READY"])
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(
+                    f"lock bootstrap exited before race injection: {stdout} {stderr}"
+                )
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.communicate()
+                raise AssertionError("lock bootstrap did not reach revalidation point")
+            time.sleep(0.01)
+
+        opened_state = replacement_case / "state-opened-by-wrapper"
+        (replacement_case / "state").rename(opened_state)
+        new_state = replacement_case / "state"
+        new_state.mkdir(mode=0o700)
+        (new_state / "workspace").mkdir(mode=0o700)
+        Path(replacement_env["FASTWAM_LOCK_TEST_RELEASE"]).write_bytes(b"release\n")
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise AssertionError("lock bootstrap hung after ancestor replacement")
+        assert process.returncode != 0, stdout
+        assert "unsafe controller lock directory component" in stderr
+        assert not replacement_marker.exists()
+
+
 def main() -> None:
     module = load_controller()
     assert list(module.MEMBERS) == ["n2", "n3", "n4"]
     for member in module.MEMBERS:
         assert_request(module, member)
     test_controller_structure(module)
+    test_r3_controller_lock_binds_fd_to_exact_path(module)
+    test_controller_exclusive_writer_fails_closed(module)
+    test_downstream_submit_requires_n2_scientific_completion(module)
+    test_downstream_gate_rejects_cross_record_drift_before_submission(module)
+    test_n2_submit_has_no_scientific_prerequisite(module)
     test_source_inventory_cross_mount_portability(module)
     test_source_inventory_ignores_mode_and_mtime(module)
     test_source_inventory_content_difference_is_path_only(module)
@@ -1878,36 +3294,22 @@ def main() -> None:
     test_request_schema_scalar_types_and_trusted_runtime_base64(module)
     test_portable_inputs_schema_rejects_legacy_fields_paths_and_tasks(module)
     test_portable_inputs_reject_bool_float_negative_size_and_base64(module)
+    test_gaussian_manifest_reversible_descriptor_contract(module)
+    test_gaussian_manifest_large_raw_bounds(module)
     test_gaussian_completion_marker_semantics(module)
     test_member_inputs_cross_mount_mode_and_mtime_portability(module)
     test_same_size_stats_and_gaussian_control_replacements_are_detected(module)
     test_old_reservation_and_prepare_live_collector_contract(module)
-    test_prepare_one_persists_shared_collector_result(module)
-    test_live_validation_recollects_and_rejects_same_size_control_change(module)
+    test_prepare_one_is_pure_and_publish_is_explicit(module)
+    test_prepare_member_failures_leave_no_durable_or_local_state(module)
+    test_prepare_phase_two_follows_all_pure_results(module)
+    test_live_validation_rejects_all_same_size_control_changes(module)
     test_suite_rejects_common_input_mismatch(module)
     test_first_frozen_controller_import_does_not_mutate_source()
     test_runtime_structure()
+    test_runtime_durable_writers_fail_closed()
     test_runtime_staged_copy_uses_prepared_inventory_counterexample()
-    wrapper = WRAPPER.read_text(encoding="utf-8")
-    assert "FASTWAM_CONTROL_NODE=ssh970" in wrapper
-    assert "FASTWAM_LOCK_FD=9" in wrapper
-    assert '[[ -n "${SSH_CONNECTION:-}" ]]' in wrapper
-    control_python = (
-        "/mnt/workspace/tools/pai-control-py312/"
-        "20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python"
-    )
-    assert f"CONTROL_PYTHON={control_python}" in wrapper
-    assert "CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12" in wrapper
-    assert '[[ -L "${CONTROL_PYTHON}" && -x "${CONTROL_PYTHON}" ]]' in wrapper
-    assert 'realpath -e -- "${CONTROL_PYTHON}"' in wrapper
-    assert '== "${CONTROL_PYTHON_TARGET}"' in wrapper
-    assert '-L "${CONTROL_PYTHON_TARGET}"' in wrapper
-    assert "import alibabacloud_credentials,alibabacloud_pai_dlc20201203" in wrapper
-    assert "export PYTHONDONTWRITEBYTECODE=1" in wrapper
-    assert 'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/controller.py" "$@"' in wrapper
-    assert "action-n234-formal-r2-controller.lock" in wrapper
-    assert "action-n234-formal-controller.lock" not in wrapper
-    assert "/usr/bin/python3" not in wrapper
+    test_wrapper_uses_pinned_nofollow_lock_bootstrap()
     print("PASS: formal N=2/3/4 full-weight three-world launcher contract")
 
 

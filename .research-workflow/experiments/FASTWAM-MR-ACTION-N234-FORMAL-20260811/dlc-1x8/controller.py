@@ -19,6 +19,7 @@ import re
 import stat
 import sys
 import uuid
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -28,7 +29,7 @@ CONTRACT = "action_only_native_agents_1x8_v1"
 PER_RUN_OSS_BUDGET_BYTES = 62 * 1024**3
 SUITE_OSS_BUDGET_BYTES = 190 * 1024**3
 PLATFORM_QUOTA_MAX_AGE = timedelta(hours=6)
-SUITE_ID = "FASTWAM-MR-ACTION-N234-FORMAL-R2-20260811"
+SUITE_ID = "FASTWAM-MR-ACTION-N234-FORMAL-R3-20260812"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
 REGION = "cn-beijing"
@@ -37,6 +38,7 @@ CONTROL_ENTRYPOINT = "submit_from_ssh970.sh"
 CONTROL_NODE = "ssh970"
 
 LOCAL_CONTROL_ROOT = Path("/tmp/fastwam-dlc-submit-state/workspace-270969")
+CONTROL_LOCK_PATH = LOCAL_CONTROL_ROOT / "action-n234-formal-r3-controller.lock"
 DURABLE_CONTROL_ROOT = Path(
     "/oss-chengjuntao/artifacts/fastwam-dlc-submit-ledger/workspace-270969"
 )
@@ -45,7 +47,7 @@ SUITE_STORAGE_RESERVATION_PATH = (
 )
 SOURCE_PREFIX = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots")
 OUTPUT_PREFIX = Path(
-    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r2-20260811"
+    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812"
 )
 OSS_ROOT = Path("/oss-chengjuntao")
 GAUSSIAN_PREFIX = Path(
@@ -88,9 +90,12 @@ TERMINAL_STATUSES = {
 }
 
 SOURCE_INVENTORY_SCHEMA = "fastwam-formal-source-content-binding-v1"
-INPUTS_SCHEMA = "fastwam-formal-portable-input-binding-v1"
-MEMBER_RESERVATION_SCHEMA = "fastwam-action-native-agents-reservation-v2"
+INPUTS_SCHEMA = "fastwam-formal-portable-input-binding-v2"
+MEMBER_RESERVATION_SCHEMA = "fastwam-action-native-agents-reservation-v3"
 MAX_CONTROL_FILE_BYTES = 16 * 1024**2
+MAX_GAUSSIAN_MANIFEST_RAW_BYTES = 64 * 1024**2
+MAX_COMPRESSED_CONTENT_BYTES = 16 * 1024**2
+GAUSSIAN_MANIFEST_CONTENT_ENCODING = "zlib-level6-base64-v1"
 MEMBER_RESERVATION_SEMANTICS = (
     "external generic reservation; trainer terminal contract fields remain null; "
     "terminal success is granted only by the runtime receipt"
@@ -134,27 +139,27 @@ MEMBER_RESERVATION_KEYS = {
 
 MEMBERS: dict[str, dict[str, Any]] = {
     "n2": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R2-20260811",
-        "run_id": "fastwam-act-n2-placefood-1k-s42-r2-20260811",
-        "display_name": "fw-act-n2-placefood-1k-s42-r2",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R3-20260812",
+        "run_id": "fastwam-act-n2-placefood-1k-s42-r3-20260812",
+        "display_name": "fw-act-n2-placefood-1k-s42-r3",
         "config": "robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 2,
         "tasks": ["PlaceFood-rf"],
     },
     "n3": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R2-20260811",
-        "run_id": "fastwam-act-n3-pool-1k-s42-r2-20260811",
-        "display_name": "fw-act-n3-pool-1k-s42-r2",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R3-20260812",
+        "run_id": "fastwam-act-n3-pool-1k-s42-r3-20260812",
+        "display_name": "fw-act-n3-pool-1k-s42-r3",
         "config": "robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 3,
         "tasks": ["ThreeRobotsPlaceShoes-rf", "ThreeRobotsStackCube-rf"],
     },
     "n4": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R2-20260811",
-        "run_id": "fastwam-act-n4-stackcube-1k-s42-r2-20260811",
-        "display_name": "fw-act-n4-stackcube-1k-s42-r2",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R3-20260812",
+        "run_id": "fastwam-act-n4-stackcube-1k-s42-r3-20260812",
+        "display_name": "fw-act-n4-stackcube-1k-s42-r3",
         "config": "robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 4,
@@ -272,10 +277,22 @@ def stable_read(
                 f"control file exceeds the {max_bytes}-byte binding limit: {path}"
             )
         chunks: list[bytes] = []
+        bytes_read = 0
         while True:
-            chunk = os.read(descriptor, 1024 * 1024)
+            read_size = 1024 * 1024
+            if max_bytes is not None:
+                # Permit at most one byte beyond the declared cap so a file
+                # that grows after the first fstat is rejected without an
+                # unbounded allocation.
+                read_size = min(read_size, max_bytes + 1 - bytes_read)
+            chunk = os.read(descriptor, read_size)
             if not chunk:
                 break
+            bytes_read += len(chunk)
+            if max_bytes is not None and bytes_read > max_bytes:
+                raise RuntimeError(
+                    f"control file exceeds the {max_bytes}-byte binding limit: {path}"
+                )
             chunks.append(chunk)
         after = os.fstat(descriptor)
     finally:
@@ -369,9 +386,27 @@ def require_controller_lock() -> None:
         )
     if os.environ.get("FASTWAM_LOCK_FD") != "9":
         raise RuntimeError("controller wrapper did not declare file descriptor 9")
-    metadata = os.fstat(9)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+    descriptor_metadata = os.fstat(9)
+    try:
+        path_metadata = os.lstat(CONTROL_LOCK_PATH)
+    except OSError as error:
+        raise RuntimeError(
+            f"R3 controller lock path is unavailable: {CONTROL_LOCK_PATH}"
+        ) from error
+    if (
+        not stat.S_ISREG(descriptor_metadata.st_mode)
+        or descriptor_metadata.st_nlink != 1
+        or not stat.S_ISREG(path_metadata.st_mode)
+        or path_metadata.st_nlink != 1
+    ):
         raise RuntimeError("controller lock must be a single-link regular file")
+    if (
+        descriptor_metadata.st_dev,
+        descriptor_metadata.st_ino,
+    ) != (path_metadata.st_dev, path_metadata.st_ino):
+        raise RuntimeError(
+            f"file descriptor 9 is not the R3 controller lock: {CONTROL_LOCK_PATH}"
+        )
     fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
@@ -473,6 +508,32 @@ def content_bound_file_metadata(path: Path) -> dict[str, Any]:
     }
 
 
+def compressed_content_file_metadata(
+    path: Path, payload: bytes
+) -> dict[str, Any]:
+    """Bind large control content reversibly without persisting local stat data."""
+
+    if len(payload) > MAX_GAUSSIAN_MANIFEST_RAW_BYTES:
+        raise RuntimeError(
+            "Gaussian manifest exceeds the raw-byte binding limit: "
+            f"{path}"
+        )
+    compressed = zlib.compress(payload, level=6)
+    if len(compressed) > MAX_COMPRESSED_CONTENT_BYTES:
+        raise RuntimeError(
+            "Gaussian manifest exceeds the compressed-byte binding limit: "
+            f"{path}"
+        )
+    return {
+        "path": str(path),
+        "kind": "file",
+        "bytes": len(payload),
+        "content_encoding": GAUSSIAN_MANIFEST_CONTENT_ENCODING,
+        "compressed_bytes": len(compressed),
+        "compressed_b64": base64.b64encode(compressed).decode("ascii"),
+    }
+
+
 def decode_canonical_base64(value: Any, *, label: str) -> bytes:
     if type(value) is not str:
         raise RuntimeError(f"{label} content must be a base64 string")
@@ -482,6 +543,63 @@ def decode_canonical_base64(value: Any, *, label: str) -> bytes:
         raise RuntimeError(f"{label} content is not valid base64") from error
     if base64.b64encode(payload).decode("ascii") != value:
         raise RuntimeError(f"{label} content is not canonical base64")
+    return payload
+
+
+def validate_compressed_content_file_descriptor(
+    value: Any, *, expected_path: str, label: str
+) -> bytes:
+    """Decode one bounded, single-stream, byte-exact compressed descriptor."""
+
+    descriptor = require_exact_object(
+        value,
+        {
+            "path",
+            "kind",
+            "bytes",
+            "content_encoding",
+            "compressed_bytes",
+            "compressed_b64",
+        },
+        label=label,
+    )
+    raw_size = descriptor.get("bytes")
+    compressed_size = descriptor.get("compressed_bytes")
+    encoded = descriptor.get("compressed_b64")
+    max_encoded_size = 4 * ((MAX_COMPRESSED_CONTENT_BYTES + 2) // 3)
+    if (
+        descriptor.get("path") != expected_path
+        or descriptor.get("kind") != "file"
+        or descriptor.get("content_encoding")
+        != GAUSSIAN_MANIFEST_CONTENT_ENCODING
+        or type(raw_size) is not int
+        or raw_size < 0
+        or raw_size > MAX_GAUSSIAN_MANIFEST_RAW_BYTES
+        or type(compressed_size) is not int
+        or compressed_size < 0
+        or compressed_size > MAX_COMPRESSED_CONTENT_BYTES
+        or type(encoded) is not str
+        or len(encoded) > max_encoded_size
+    ):
+        raise RuntimeError(f"{label} descriptor mismatch")
+    compressed = decode_canonical_base64(encoded, label=label)
+    if len(compressed) != compressed_size:
+        raise RuntimeError(f"{label} compressed content length mismatch")
+    decoder = zlib.decompressobj()
+    try:
+        payload = decoder.decompress(compressed, raw_size + 1)
+    except zlib.error as error:
+        raise RuntimeError(f"{label} compressed content is invalid") from error
+    if len(payload) > raw_size:
+        raise RuntimeError(f"{label} decompressed content exceeds declared length")
+    if decoder.unconsumed_tail:
+        raise RuntimeError(f"{label} compressed content exceeds the decode bound")
+    if not decoder.eof:
+        raise RuntimeError(f"{label} compressed content ended before stream completion")
+    if decoder.unused_data:
+        raise RuntimeError(f"{label} compressed content has trailing or concatenated data")
+    if len(payload) != raw_size:
+        raise RuntimeError(f"{label} decompressed content length mismatch")
     return payload
 
 
@@ -799,17 +917,14 @@ def validate_gaussian_root(path: Path, *, expected_kind: str) -> dict[str, Any]:
     manifest_path = path / "manifest.json"
     complete_path = path / "COMPLETE"
     manifest_payload, _ = stable_read(
-        manifest_path, max_bytes=MAX_CONTROL_FILE_BYTES
+        manifest_path, max_bytes=MAX_GAUSSIAN_MANIFEST_RAW_BYTES
     )
     manifest = decode_bound_json_object(
         manifest_payload, label=f"Gaussian cache manifest: {path}"
     )
-    manifest_metadata = {
-        "path": str(manifest_path),
-        "kind": "file",
-        "bytes": len(manifest_payload),
-        "content_b64": base64.b64encode(manifest_payload).decode("ascii"),
-    }
+    manifest_metadata = compressed_content_file_metadata(
+        manifest_path, manifest_payload
+    )
     complete_payload, complete_stat = stable_read(
         complete_path, max_bytes=MAX_CONTROL_FILE_BYTES
     )
@@ -1002,7 +1117,7 @@ def validate_gaussian_input_descriptor(
     expected_path: str,
     expected_kind: str,
     label: str,
-) -> None:
+) -> bytes:
     descriptor = require_exact_object(
         value,
         {
@@ -1018,7 +1133,7 @@ def validate_gaussian_input_descriptor(
     )
     if descriptor.get("path") != expected_path or descriptor.get("kind") != "directory":
         raise RuntimeError(f"{label} root descriptor mismatch")
-    manifest_payload = validate_content_file_descriptor(
+    manifest_payload = validate_compressed_content_file_descriptor(
         descriptor.get("manifest"),
         expected_path=str(Path(expected_path) / "manifest.json"),
         label=f"{label} manifest",
@@ -1074,11 +1189,12 @@ def validate_gaussian_input_descriptor(
         or descriptor.get("selection_mode") != selection_mode
     ):
         raise RuntimeError(f"{label} derived semantics mismatch")
+    return manifest_payload
 
 
 def validate_inputs_binding(
     member: str, request: dict[str, Any], inputs: Any
-) -> None:
+) -> dict[str, bytes]:
     """Validate the complete portable input binding without reading the filesystem."""
 
     if member not in MEMBERS:
@@ -1157,13 +1273,13 @@ def validate_inputs_binding(
         expected_path=envs["FASTWAM_VAE_SOURCE"],
         label="VAE",
     )
-    validate_gaussian_input_descriptor(
+    primary_manifest_payload = validate_gaussian_input_descriptor(
         binding.get("gaussian_primary"),
         expected_path=envs["FASTWAM_GAUSSIAN_CACHE_DIR"],
         expected_kind="compact",
         label="Gaussian primary",
     )
-    validate_gaussian_input_descriptor(
+    fallback_manifest_payload = validate_gaussian_input_descriptor(
         binding.get("gaussian_fallback"),
         expected_path=envs["FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR"],
         expected_kind="canonical",
@@ -1192,6 +1308,10 @@ def validate_inputs_binding(
             expected_path=text_map[task],
             label=f"text cache for {task}",
         )
+    return {
+        "gaussian_primary": primary_manifest_payload,
+        "gaussian_fallback": fallback_manifest_payload,
+    }
 
 
 def collect_member_inputs(member: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -1860,6 +1980,8 @@ def prepare_one(
     text_paths: dict[str, str],
     trusted_runtime: bytes,
 ) -> dict[str, Any]:
+    """Purely build and validate one member intent without persisting state."""
+
     request = build_request(
         member,
         source_root=source,
@@ -1873,7 +1995,6 @@ def prepare_one(
         text_caches=text_paths,
         trusted_runtime=trusted_runtime,
     )
-    validate_request(member, request, live=True)
     inputs = collect_member_inputs(member, request)
     if output_root(member).exists() or output_root(member).is_symlink():
         raise RuntimeError(f"unique output root already exists: {output_root(member)}")
@@ -1926,8 +2047,17 @@ def prepare_one(
         "prepared_at": utc_now(),
         "semantics": MEMBER_RESERVATION_SEMANTICS,
     }
+    validate_member_reservation_structure(member, reservation)
+    return reservation
+
+
+def validate_existing_member_state(
+    member: str, reservation: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Read-only preflight for an idempotent or partially published prepare."""
+
     destination = reservation_path(member)
-    if destination.exists():
+    if destination.exists() or destination.is_symlink():
         observed, _ = read_json(destination)
         validate_member_reservation_structure(member, observed)
         if not strict_value_equal(
@@ -1935,10 +2065,42 @@ def prepare_one(
             canonical_reservation_intent(reservation),
         ):
             raise RuntimeError(f"existing immutable reservation differs: {destination}")
-        return {"member": member, "status": "ALREADY_PREPARED", "path": str(destination)}
-    if latch_path(member).exists() or acknowledgement_path(member).exists():
+        return observed
+    if (
+        latch_path(member).exists()
+        or latch_path(member).is_symlink()
+        or acknowledgement_path(member).exists()
+        or acknowledgement_path(member).is_symlink()
+    ):
         raise RuntimeError(f"member has submission state without a reservation: {member}")
+    return None
+
+
+def publish_member_reservation(
+    member: str, reservation: dict[str, Any]
+) -> dict[str, Any]:
+    """Publish one prevalidated intent with exclusive-create and exact readback."""
+
+    destination = reservation_path(member)
+    observed = validate_existing_member_state(member, reservation)
+    if observed is not None:
+        return {
+            "member": member,
+            "status": "ALREADY_PREPARED",
+            "path": str(destination),
+        }
     exclusive_write(destination, reservation)
+    observed, _ = read_json(destination)
+    validate_member_reservation_structure(member, observed)
+    if not strict_value_equal(observed, reservation):
+        raise RuntimeError(f"durable reservation readback differs: {destination}")
+    return {"member": member, "status": "PREPARED", "path": str(destination)}
+
+
+def write_prepared_local_state(member: str) -> None:
+    """Record volatile convenience state only after the suite commit exists."""
+
+    destination = reservation_path(member)
     state = {
         "schema": "fastwam-dlc-local-controller-state-v1",
         "phase": "PREPARED",
@@ -1950,7 +2112,6 @@ def prepare_one(
         "updated_at": utc_now(),
     }
     atomic_write(local_state_path(member), state)
-    return {"member": member, "status": "PREPARED", "path": str(destination)}
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -2040,39 +2201,12 @@ def prepare(args: argparse.Namespace) -> None:
         ),
     }
     validate_suite_storage_reservation(suite_reservation)
-    # Prepare owns the shared, otherwise empty parent prefix.  Member output
-    # roots remain absent until their worker has completed all three worlds.
-    try:
-        os.mkdir(OUTPUT_PREFIX, 0o700)
-    except FileExistsError:
-        pass
-    if canonical_oss_path(
-        str(OUTPUT_PREFIX), kind="directory", label="formal output prefix"
-    ) != OUTPUT_PREFIX:
-        raise RuntimeError("formal output prefix canonicalization mismatch")
-    # All three unique destinations are checked before the first suite record
-    # is created, so preparation cannot reserve shared capacity for a member
-    # whose durable output already exists.
-    for member in names:
-        destination = output_root(member)
-        if destination.exists() or destination.is_symlink():
-            raise RuntimeError(f"unique output root already exists: {destination}")
-        if not reservation_path(member).exists() and (
-            latch_path(member).exists() or acknowledgement_path(member).exists()
-        ):
-            raise RuntimeError(
-                f"member has submission state without a reservation: {member}"
-            )
-    suite_already_published = SUITE_STORAGE_RESERVATION_PATH.exists()
-    if suite_already_published:
-        observed_suite, _ = read_json(SUITE_STORAGE_RESERVATION_PATH)
-        validate_suite_storage_reservation(observed_suite)
-        if canonical_reservation_intent(observed_suite) != canonical_reservation_intent(
-            suite_reservation
-        ):
-            raise RuntimeError("existing immutable suite storage reservation differs")
-    outcomes = [
-        prepare_one(
+    # Phase one is read-only: every member input and complete reservation is
+    # built and validated before preparation creates even the shared output
+    # parent.  An input failure at n2, n3, or n4 therefore leaves no prepared
+    # member, suite marker, local state, or newly created output prefix.
+    planned_reservations = {
+        member: prepare_one(
             member,
             source=source,
             source_commit=source_commit,
@@ -2087,16 +2221,49 @@ def prepare(args: argparse.Namespace) -> None:
             trusted_runtime=trusted_runtime,
         )
         for member in names
+    }
+    for member, reservation in planned_reservations.items():
+        validate_existing_member_state(member, reservation)
+    suite_already_published = (
+        SUITE_STORAGE_RESERVATION_PATH.exists()
+        or SUITE_STORAGE_RESERVATION_PATH.is_symlink()
+    )
+    if suite_already_published:
+        observed_suite, _ = read_json(SUITE_STORAGE_RESERVATION_PATH)
+        validate_complete_suite_members(observed_suite)
+        if not strict_value_equal(
+            canonical_reservation_intent(observed_suite),
+            canonical_reservation_intent(suite_reservation),
+        ):
+            raise RuntimeError("existing immutable suite storage reservation differs")
+
+    # Phase two publishes only prevalidated values.  The suite marker is the
+    # commit record: partial member records are fail-closed and cannot
+    # authorize submission without this final marker.
+    try:
+        os.mkdir(OUTPUT_PREFIX, 0o700)
+    except FileExistsError:
+        pass
+    if canonical_oss_path(
+        str(OUTPUT_PREFIX), kind="directory", label="formal output prefix"
+    ) != OUTPUT_PREFIX:
+        raise RuntimeError("formal output prefix canonicalization mismatch")
+    outcomes = [
+        publish_member_reservation(member, planned_reservations[member])
+        for member in names
     ]
-    # The suite marker is the commit record.  Publish it only after every
-    # member reservation exists and all three have been read back as one
-    # coherent 186-GiB intent.  A crash before this point cannot authorize a
-    # partial suite for submission.
     validate_complete_suite_members(suite_reservation)
     if not suite_already_published:
         exclusive_write(SUITE_STORAGE_RESERVATION_PATH, suite_reservation)
     observed_suite, _ = read_json(SUITE_STORAGE_RESERVATION_PATH)
     validate_complete_suite_members(observed_suite)
+    if not strict_value_equal(
+        canonical_reservation_intent(observed_suite),
+        canonical_reservation_intent(suite_reservation),
+    ):
+        raise RuntimeError("durable suite reservation readback differs")
+    for member in names:
+        write_prepared_local_state(member)
     print(json.dumps({"action": "prepare", "cloud_mutations": 0, "members": outcomes}, indent=2))
 
 
@@ -2484,8 +2651,19 @@ def validate_reservation_live(
         label="source snapshot portable content mismatch",
     )
     inputs = reservation.get("inputs")
-    validate_inputs_binding(member, request, inputs)
+    persisted_manifests = validate_inputs_binding(member, request, inputs)
     observed_inputs = collect_member_inputs(member, request)
+    observed_manifests = validate_inputs_binding(member, request, observed_inputs)
+    changed_manifests = sorted(
+        name
+        for name in persisted_manifests
+        if observed_manifests[name] != persisted_manifests[name]
+    )
+    if changed_manifests:
+        raise RuntimeError(
+            "Gaussian manifest raw bytes changed after preparation: "
+            + json.dumps(changed_manifests, separators=(",", ":"))
+        )
     if observed_inputs != inputs:
         changed = sorted(
             key
@@ -2499,6 +2677,83 @@ def validate_reservation_live(
     if require_output_absent and (output_root(member).exists() or output_root(member).is_symlink()):
         raise RuntimeError("unique output root exists before the DLC worker starts")
     return request
+
+
+def require_n2_scientific_completion_for_downstream_submit(
+    member: str, reservation: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Fail closed unless this suite's N2 run is scientifically complete."""
+
+    if member == "n2":
+        return None
+    if member not in {"n3", "n4"}:
+        raise RuntimeError("unknown downstream formal suite member")
+
+    suite_reservation, _ = read_json(SUITE_STORAGE_RESERVATION_PATH)
+    suite_members = validate_complete_suite_members(suite_reservation)
+    selected_reservation = suite_members[member]
+    if not strict_value_equal(selected_reservation, reservation):
+        raise RuntimeError(
+            "downstream reservation differs from this immutable suite member"
+        )
+
+    # Read N2 again and require byte-decoded JSON equality with the copy that
+    # validate_complete_suite_members just accepted.  The N2 terminal receipt
+    # binds this unique prepared-reservation path and suite-reservation path.
+    n2_reservation, _ = read_json(reservation_path("n2"))
+    if not strict_value_equal(n2_reservation, suite_members["n2"]):
+        raise RuntimeError("N2 reservation changed during prerequisite validation")
+    if not strict_value_equal(
+        n2_reservation.get("source"), selected_reservation.get("source")
+    ):
+        raise RuntimeError("N2 and downstream members do not bind the same source")
+
+    selected_request = validate_member_reservation_structure(
+        member, selected_reservation
+    )
+    n2_request = validate_reservation_live(
+        "n2", n2_reservation, require_output_absent=False
+    )
+    if not strict_value_equal(
+        selected_request, selected_reservation.get("request")
+    ) or not strict_value_equal(n2_request, n2_reservation.get("request")):
+        raise RuntimeError("suite member request binding changed during validation")
+
+    # Member identity, task scope, and output paths are expected to differ.
+    # Every remaining request environment field -- including suite path,
+    # source root, Git commit, runtime payload, and common inputs -- must match.
+    member_scoped_envs = {
+        "FASTWAM_AGENT_COUNT",
+        "FASTWAM_EXPERIMENT_ID",
+        "FASTWAM_MEMBER",
+        "FASTWAM_OSS_OUTPUT_ROOT",
+        "FASTWAM_PREPARED_RESERVATION_PATH",
+        "FASTWAM_RUN_ID",
+        "FASTWAM_TASK_CONFIG",
+        "FASTWAM_TASKS_JSON",
+        "FASTWAM_TEXT_CACHE_MAP_JSON",
+    }
+    selected_envs = selected_request.get("Envs")
+    n2_envs = n2_request.get("Envs")
+    if type(selected_envs) is not dict or type(n2_envs) is not dict:
+        raise RuntimeError("suite member request environment is missing")
+    selected_shared_envs = {
+        name: value
+        for name, value in selected_envs.items()
+        if name not in member_scoped_envs
+    }
+    n2_shared_envs = {
+        name: value for name, value in n2_envs.items() if name not in member_scoped_envs
+    }
+    if not strict_value_equal(selected_shared_envs, n2_shared_envs):
+        raise RuntimeError("N2 and downstream requests do not share one frozen basis")
+
+    formal = validate_formal_terminal_output("n2")
+    if type(formal) is not dict or not strict_value_equal(
+        formal.get("status"), "SCIENTIFIC_COMPLETE"
+    ):
+        raise RuntimeError("N2 formal scientific completion is absent")
+    return formal
 
 
 def reconcile_member(
@@ -2566,6 +2821,7 @@ def submit(args: argparse.Namespace) -> None:
     request_body = validate_reservation_live(
         member, reservation, require_output_absent=not already_latched
     )
+    require_n2_scientific_completion_for_downstream_submit(member, reservation)
     client, models, runtime_cls = load_sdk()
     request = validate_request(member, request_body, sdk_models=models, live=True)
     if already_latched:

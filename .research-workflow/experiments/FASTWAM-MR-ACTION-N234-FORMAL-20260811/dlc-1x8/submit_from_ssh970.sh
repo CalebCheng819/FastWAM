@@ -32,10 +32,153 @@ CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12
   'import alibabacloud_credentials,alibabacloud_pai_dlc20201203,alibabacloud_tea_openapi,alibabacloud_tea_util' \
   || { echo "Error: pinned PAI SDK environment is incomplete" >&2; exit 1; }
 LOCK_ROOT="/tmp/fastwam-dlc-submit-state/workspace-270969"
-mkdir -p -m 0700 "${LOCK_ROOT}"
-exec 9>"${LOCK_ROOT}/action-n234-formal-r2-controller.lock"
-flock -n 9 || { echo "Error: another formal controller is active" >&2; exit 1; }
-export FASTWAM_CONTROL_NODE=ssh970
-export FASTWAM_LOCK_FD=9
-export PYTHONDONTWRITEBYTECODE=1
-exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/controller.py" "$@"
+LOCK_NAME="action-n234-formal-r3-controller.lock"
+
+# The pinned interpreter opens each component relative to an already validated
+# directory descriptor.  In particular, the lock is never opened by shell
+# redirection: no symlink is followed and no existing file is truncated before
+# its identity has been checked.  Descriptor 9 retains the flock across exec.
+exec "${CONTROL_PYTHON}" -B -I -S - \
+  "${LOCK_ROOT}" "${LOCK_NAME}" "${SCRIPT_DIR}/controller.py" \
+  "${CONTROL_PYTHON}" "$@" <<'PY'
+import errno
+import fcntl
+import os
+import stat
+import sys
+
+
+lock_root, lock_name, controller, control_python, *controller_args = sys.argv[1:]
+tmp_root = "/tmp"
+expected_lock_fd = 9
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def identity(metadata):
+    return metadata.st_dev, metadata.st_ino
+
+
+def validate_tmp(fd):
+    opened = os.fstat(fd)
+    named = os.lstat(tmp_root)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or identity(opened) != identity(named)
+        or not (named.st_mode & stat.S_ISVTX)
+    ):
+        fail("/tmp is not the pinned sticky directory used for the controller lock")
+
+
+def validate_private_directory(parent_fd, name, fd):
+    opened = os.fstat(fd)
+    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or identity(opened) != identity(named)
+        or opened.st_uid != os.geteuid()
+        or stat.S_IMODE(opened.st_mode) != 0o700
+    ):
+        fail(f"unsafe controller lock directory component: {name}")
+
+
+def validate_lock(parent_fd, fd):
+    opened = os.fstat(fd)
+    named = os.stat(lock_name, dir_fd=parent_fd, follow_symlinks=False)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or not stat.S_ISREG(named.st_mode)
+        or identity(opened) != identity(named)
+        or opened.st_nlink != 1
+        or opened.st_uid != os.geteuid()
+        or stat.S_IMODE(opened.st_mode) != 0o600
+    ):
+        fail("unsafe R3 controller lock file")
+
+
+normal_root = os.path.normpath(lock_root)
+if (
+    not os.path.isabs(lock_root)
+    or normal_root != lock_root
+    or os.path.commonpath((tmp_root, lock_root)) != tmp_root
+    or lock_root == tmp_root
+    or "/../" in f"{lock_root}/"
+):
+    fail("controller lock root must be a canonical child of /tmp")
+components = os.path.relpath(lock_root, tmp_root).split(os.sep)
+if not components or any(part in ("", ".", "..") for part in components):
+    fail("controller lock root contains an invalid component")
+if not lock_name or os.sep in lock_name or lock_name in (".", ".."):
+    fail("controller lock name is invalid")
+
+directory_flags = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | os.O_NOFOLLOW
+    | os.O_CLOEXEC
+)
+tmp_fd = os.open(tmp_root, directory_flags)
+directory_fds = [tmp_fd]
+directory_edges = []
+try:
+    validate_tmp(tmp_fd)
+    parent_fd = tmp_fd
+    for component in components:
+        try:
+            os.mkdir(component, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        child_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+        directory_fds.append(child_fd)
+        directory_edges.append((parent_fd, component, child_fd))
+        validate_private_directory(parent_fd, component, child_fd)
+        parent_fd = child_fd
+
+    lock_flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_NOFOLLOW
+        | os.O_CLOEXEC
+    )
+    lock_fd = os.open(lock_name, lock_flags, 0o600, dir_fd=parent_fd)
+    try:
+        validate_lock(parent_fd, lock_fd)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN):
+                fail("another formal R3 controller is active")
+            raise
+
+        # LOCK_TEST_REVALIDATION_POINT
+        validate_tmp(tmp_fd)
+        for edge in directory_edges:
+            validate_private_directory(*edge)
+        validate_lock(parent_fd, lock_fd)
+    except BaseException:
+        os.close(lock_fd)
+        raise
+finally:
+    for directory_fd in reversed(directory_fds):
+        os.close(directory_fd)
+
+if lock_fd != expected_lock_fd:
+    os.dup2(lock_fd, expected_lock_fd, inheritable=True)
+    os.close(lock_fd)
+else:
+    os.set_inheritable(expected_lock_fd, True)
+
+environment = os.environ.copy()
+environment["FASTWAM_CONTROL_NODE"] = "ssh970"
+environment["FASTWAM_LOCK_FD"] = str(expected_lock_fd)
+environment["PYTHONDONTWRITEBYTECODE"] = "1"
+os.execve(
+    control_python,
+    [control_python, "-B", "-I", controller, *controller_args],
+    environment,
+)
+PY

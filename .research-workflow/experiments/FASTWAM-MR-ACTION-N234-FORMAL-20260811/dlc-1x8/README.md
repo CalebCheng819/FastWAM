@@ -1,10 +1,23 @@
-# FASTWAM native-agent N=2/3/4 formal DLC launcher R2
+# FASTWAM native-agent N=2/3/4 formal DLC launcher R3
 
 This directory contains a prepare-first, fail-closed 1 Worker x 8 GPU launcher
-for three independent action-only runs.  Nothing in this directory has been
-submitted by creating or testing these files.  R2 uses new experiment IDs, run
-IDs, output roots, suite/member ledger paths, and a distinct controller lock;
-the submitted R1 identities and durable records are never reused.
+for three action-only runs under a canary promotion policy.  N=2 is submitted
+first; N=3 and N=4 are eligible only after the same suite's N=2 run has durable,
+structured scientific-completion evidence.  Nothing in this directory has
+been submitted by creating or testing these files.  R3 uses new experiment
+IDs, run IDs, output roots, suite/member ledger paths, and a distinct controller
+lock; the submitted R1 identities and durable records are never reused.
+
+The frozen R3 suite ID is
+`FASTWAM-MR-ACTION-N234-FORMAL-R3-20260812`; its immutable source is
+`/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r3-20260812-r1`,
+its output prefix is
+`/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r3-20260812`, and its
+control lock is
+`/tmp/fastwam-dlc-submit-state/workspace-270969/action-n234-formal-r3-controller.lock`.
+The three experiment IDs end in `N2-PLACEFOOD-1K-S42-R3-20260812`,
+`N3-POOL-1K-S42-R3-20260812`, and `N4-STACKCUBE-1K-S42-R3-20260812`;
+their run IDs use the corresponding `-r3-20260812` suffix.
 
 The frozen experiment matrix is N=2 PlaceFood-rf, N=3
 ThreeRobotsPlaceShoes-rf plus ThreeRobotsStackCube-rf, and N=4
@@ -22,15 +35,32 @@ transient race checks and are not persisted.  Preparation and the worker use
 the same fd-rooted, `O_NOFOLLOW` validator, so an immutable OSS source can be
 copied to local `/tmp` even when the two mounts assign different metadata.
 
-Member reservations use `fastwam-action-native-agents-reservation-v2` and a
-single shared `fastwam-formal-portable-input-binding-v1` collector during both
+Member reservations use `fastwam-action-native-agents-reservation-v3` and a
+single shared `fastwam-formal-portable-input-binding-v2` collector during both
 prepare and worker live validation.  Dataset directories persist only their
 canonical path and kind.  The initial checkpoint, VAE, and task text-cache
 files persist canonical path, kind, and byte size.  Small control files -- the
-normalization statistics, Gaussian manifests, and Gaussian completion markers
--- additionally persist their exact raw Base64 content and validated semantic
-fields.  Mount-local mode, timestamp, device, inode, and link metadata are used
-only for same-open race checks and are never compared across mounts.
+normalization statistics and Gaussian completion markers -- additionally
+persist their exact raw Base64 content.  Each Gaussian manifest binds every
+original byte reversibly as one canonical Base64-encoded zlib level-6 stream;
+the raw input is bounded at 64 MiB and the compressed representation at 16
+MiB, and validation accepts exactly one complete stream with no trailing or
+concatenated bytes.  This is an exact byte binding, not a hash and not a
+semantic-only summary.  The decompressed JSON and completion marker must also
+satisfy the frozen Gaussian semantics.  Mount-local mode, timestamp, device,
+inode, and link metadata are used only for same-open race checks and are never
+compared across mounts.
+
+Preparation is two-phase across the whole N=2/3/4 suite.  It first builds and
+validates every member request, source/input binding, and reservation entirely
+in memory.  If any member fails, it creates no output parent, member or suite
+reservation, and no local `PREPARED` state.  Only after all three pure results
+pass does it create the new output parent, publish and read back all member
+reservations, publish the suite marker, and finally record local prepared
+state.  The suite marker is the atomic authorization boundary, not a rollback
+mechanism: if phase two stops after publishing only some member records, those
+records cannot authorize submission and the R3 identity must not be reused.
+A failed R2 identity is never resumed or reused.
 
 This no-hash contract deliberately does not claim content identity for a
 dataset directory or for a same-size replacement of a large checkpoint, VAE,
@@ -79,9 +109,24 @@ Run the local, network-free checks with:
 Invoke the controller only on ssh970 through `submit_from_ssh970.sh`; the
 wrapper pins and preflights the known PAI-SDK Python under `/mnt/workspace`.
 With no explicit command it defaults to `prepare`; preparation validates paths and
-writes the immutable reservation but makes no DLC API mutation.  `submit`
-requires a single member plus its exact experiment ID and writes a permanent
-latch before the controller's sole non-retrying CreateJob call.
+then applies the suite-wide two-phase protocol above but makes no DLC API
+mutation.  `submit` requires a single member plus its exact experiment ID and
+writes a permanent latch before the controller's sole non-retrying CreateJob
+call.
+
+Formal submission is deliberately staged.  Submit N=2 as the canary; N=2 has
+no predecessor-completion requirement.  Do not submit N=3 or N=4 merely because
+N=2 is running, has stopped, or the platform reports `Succeeded`.  Before any
+SDK load, job listing, submission latch, local submission state, or CreateJob
+for N=3/N=4, the controller re-reads the exact suite and N=2 reservations,
+checks their shared source and request basis, validates the live N=2 reservation
+without requiring its output to remain absent, and validates N=2's `COMPLETE`
+plus structured terminal evidence.  Promotion requires the resulting status
+to be exactly `SCIENTIFIC_COMPLETE`; absent, malformed, incomplete, stale, or
+inconsistent evidence fails closed before a downstream submission can become
+durable.  Once that gate passes, N=3 and N=4 may be submitted independently,
+including in parallel.  This ordering is a launch-safety policy, not a claim
+that the three tasks are scientifically interchangeable.
 
 Reconciliation reports platform state separately and only reports
 `SCIENTIFIC_COMPLETE` after re-reading the exact durable allowlist, COMPLETE
