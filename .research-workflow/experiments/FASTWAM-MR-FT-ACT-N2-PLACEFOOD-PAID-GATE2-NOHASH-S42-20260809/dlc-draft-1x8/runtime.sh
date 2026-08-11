@@ -25,7 +25,7 @@ umask 077
 : "${FASTWAM_MIN_TMP_FREE_BYTES:?}"
 : "${NPROC_PER_NODE:?}"
 
-EXPECTED_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R4-S42-20260811"
+EXPECTED_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R5-S42-20260811"
 SOURCE_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-S42-20260809"
 EXPECTED_TASK="robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5_nohash_gate"
 EXPECTED_DATASET_ROOT="/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
@@ -176,26 +176,52 @@ experiment_id = sys.argv[3]
 submission_tag = sys.argv[4]
 entrypoint = sys.argv[5]
 
-if binding_path.is_symlink() or not binding_path.is_file():
-    raise RuntimeError("prepared binding is missing or linked")
-with binding_path.open("rb") as handle:
-    before = os.fstat(handle.fileno())
+binding_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(
+    os, "O_CLOEXEC", 0
+)
+try:
+    binding_fd = os.open(binding_path, binding_flags)
+except OSError as error:
+    raise RuntimeError("prepared binding is missing, linked, or unreadable") from error
+try:
+    before = os.fstat(binding_fd)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise RuntimeError("prepared binding is not a single-link regular file")
-    raw = handle.read()
-    after = os.fstat(handle.fileno())
-if (
-    before.st_mode,
-    before.st_size,
-    before.st_mtime_ns,
-    before.st_ino,
-) != (
-    after.st_mode,
-    after.st_size,
-    after.st_mtime_ns,
-    after.st_ino,
-):
+    chunks = []
+    while True:
+        chunk = os.read(binding_fd, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    after = os.fstat(binding_fd)
+    try:
+        binding_path_after = binding_path.lstat()
+    except FileNotFoundError as error:
+        raise RuntimeError("prepared binding path disappeared while reading") from error
+finally:
+    os.close(binding_fd)
+
+binding_descriptor = lambda value: (
+    value.st_dev,
+    value.st_ino,
+    value.st_mode,
+    value.st_nlink,
+    value.st_size,
+    value.st_mtime_ns,
+    value.st_ctime_ns,
+)
+if binding_descriptor(before) != binding_descriptor(after):
     raise RuntimeError("prepared binding changed while reading")
+if (
+    not stat.S_ISREG(binding_path_after.st_mode)
+    or binding_path_after.st_nlink != 1
+    or binding_path_after.st_dev != after.st_dev
+    or binding_path_after.st_ino != after.st_ino
+):
+    raise RuntimeError("prepared binding path was replaced while reading")
+raw = b"".join(chunks)
+if len(raw) != after.st_size:
+    raise RuntimeError("prepared binding byte count disagrees with file metadata")
 binding = json.loads(raw)
 request = binding.get("request") or {}
 envs = request.get("Envs") or {}
@@ -230,68 +256,203 @@ if len(trusted_runtime) != int(envs["FASTWAM_GATE2_TRUSTED_RUNTIME_BYTES"]):
 source_root = Path(source_root_literal)
 if source_root.is_symlink() or not source_root.is_dir():
     raise RuntimeError("approved source root is missing or linked")
-entries = []
-for path in sorted([source_root, *source_root.rglob("*")], key=lambda item: str(item)):
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode):
-        raise RuntimeError(f"approved source contains a symlink: {path}")
-    if stat.S_ISDIR(metadata.st_mode):
-        kind = "directory"
-    elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
-        kind = "file"
+
+expected = binding.get("approved_source_metadata")
+if not isinstance(expected, dict) or set(expected) != {
+    "schema", "approved_source_root", "entries"
+}:
+    raise RuntimeError("prepared source binding has unexpected top-level fields")
+if expected["schema"] != "fastwam-nohash-source-content-binding-v3":
+    raise RuntimeError("prepared source binding schema mismatch")
+if expected["approved_source_root"] != source_root_literal:
+    raise RuntimeError("prepared source binding root mismatch")
+expected_entries = expected["entries"]
+if not isinstance(expected_entries, list) or not expected_entries:
+    raise RuntimeError("prepared source binding entries are missing")
+expected_paths = []
+for entry in expected_entries:
+    if not isinstance(entry, dict):
+        raise RuntimeError("prepared source binding entry is not an object")
+    relative_path = entry.get("path")
+    kind = entry.get("kind")
+    if not isinstance(relative_path, str) or not isinstance(kind, str):
+        raise RuntimeError("prepared source binding path or kind is invalid")
+    expected_paths.append(relative_path)
+    if relative_path == ".":
+        if kind != "directory":
+            raise RuntimeError("prepared source root entry must be a directory")
     else:
-        raise RuntimeError(f"approved source contains an unsupported entry: {path}")
-    entry = {
-        "path": "." if path == source_root else str(path.relative_to(source_root)),
-        "kind": kind,
-        "mode": stat.S_IMODE(metadata.st_mode),
-        "size": metadata.st_size if kind == "file" else 0,
-        "mtime_ns": metadata.st_mtime_ns,
-    }
-    if kind == "file":
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        relative = Path(relative_path)
+        if (
+            not relative_path
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != relative_path
+        ):
+            raise RuntimeError("prepared source binding path is non-canonical")
+    if kind == "directory":
+        if set(entry) != {"path", "kind"}:
+            raise RuntimeError("prepared source directory has non-portable fields")
+    elif kind == "file":
+        if set(entry) != {"path", "kind", "size", "content_b64"}:
+            raise RuntimeError("prepared source file has non-portable fields")
+        size = entry["size"]
+        encoded = entry["content_b64"]
+        if type(size) is not int or size < 0 or not isinstance(encoded, str):
+            raise RuntimeError("prepared source file size or content is invalid")
         try:
-            before = os.fstat(fd)
+            payload = base64.b64decode(encoded.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError) as error:
+            raise RuntimeError("prepared source content is not canonical base64") from error
+        if len(payload) != size or base64.b64encode(payload).decode("ascii") != encoded:
+            raise RuntimeError("prepared source content length or encoding mismatch")
+    else:
+        raise RuntimeError("prepared source binding kind is unsupported")
+if (
+    expected_paths != sorted(expected_paths)
+    or len(expected_paths) != len(set(expected_paths))
+    or expected_paths[0] != "."
+):
+    raise RuntimeError("prepared source paths are incomplete, duplicated, or unsorted")
+
+if not source_root.is_absolute() or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+    raise RuntimeError("approved source cannot be opened with the no-follow contract")
+source_descriptor = lambda value: (
+    value.st_dev,
+    value.st_ino,
+    value.st_mode,
+    value.st_nlink,
+    value.st_size,
+    value.st_mtime_ns,
+    value.st_ctime_ns,
+)
+directory_flags = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+)
+file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+def open_absolute_directory_nofollow(path):
+    current_fd = os.open("/", directory_flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+def collect_directory(directory_fd, relative_path, result):
+    directory_before = os.fstat(directory_fd)
+    if not stat.S_ISDIR(directory_before.st_mode):
+        raise RuntimeError(f"approved source entry is not a directory: {relative_path}")
+    result.append({"path": relative_path, "kind": "directory"})
+    names_before = sorted(os.listdir(directory_fd))
+    for name in names_before:
+        if not name or name in {".", ".."} or "/" in name:
+            raise RuntimeError(f"approved source returned an invalid name: {name!r}")
+        child_relative = name if relative_path == "." else f"{relative_path}/{name}"
+        initial = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(initial.st_mode):
+            raise RuntimeError(f"approved source contains a symlink: {child_relative}")
+        if stat.S_ISDIR(initial.st_mode):
+            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_dev != initial.st_dev
+                    or opened.st_ino != initial.st_ino
+                ):
+                    raise RuntimeError(
+                        f"approved source directory was replaced while opening: {child_relative}"
+                    )
+                collect_directory(child_fd, child_relative, result)
+                path_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(path_after.st_mode)
+                    or path_after.st_dev != opened.st_dev
+                    or path_after.st_ino != opened.st_ino
+                ):
+                    raise RuntimeError(
+                        f"approved source directory path was replaced: {child_relative}"
+                    )
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
+            raise RuntimeError(f"approved source contains an unsupported entry: {child_relative}")
+        child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+        try:
+            before = os.fstat(child_fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_dev != initial.st_dev
+                or before.st_ino != initial.st_ino
+            ):
+                raise RuntimeError(
+                    f"approved source file was replaced while opening: {child_relative}"
+                )
             chunks = []
             while True:
-                chunk = os.read(fd, 1024 * 1024)
+                chunk = os.read(child_fd, 1024 * 1024)
                 if not chunk:
                     break
                 chunks.append(chunk)
-            after = os.fstat(fd)
+            after = os.fstat(child_fd)
+            path_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         finally:
-            os.close(fd)
-        descriptor = lambda value: (
-            value.st_dev,
-            value.st_ino,
-            value.st_mode,
-            value.st_size,
-            value.st_mtime_ns,
-        )
+            os.close(child_fd)
+        payload = b"".join(chunks)
         if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or descriptor(before) != descriptor(after)
+            source_descriptor(before) != source_descriptor(after)
+            or not stat.S_ISREG(path_after.st_mode)
+            or path_after.st_nlink != 1
+            or path_after.st_dev != after.st_dev
+            or path_after.st_ino != after.st_ino
+            or len(payload) != after.st_size
         ):
-            raise RuntimeError(f"approved source file changed while reading: {path}")
-        entry.update(
-            {
-                "mode": stat.S_IMODE(after.st_mode),
-                "size": after.st_size,
-                "mtime_ns": after.st_mtime_ns,
-                "content_b64": base64.b64encode(b"".join(chunks)).decode("ascii"),
-            }
-        )
-    entries.append(entry)
+            raise RuntimeError(f"approved source file changed while reading: {child_relative}")
+        result.append({
+            "path": child_relative,
+            "kind": "file",
+            "size": len(payload),
+            "content_b64": base64.b64encode(payload).decode("ascii"),
+        })
+    names_after = sorted(os.listdir(directory_fd))
+    directory_after = os.fstat(directory_fd)
+    if names_before != names_after or source_descriptor(directory_before) != source_descriptor(directory_after):
+        raise RuntimeError(f"approved source directory changed while scanning: {relative_path}")
+
+source_fd = open_absolute_directory_nofollow(source_root)
+try:
+    source_root_before = os.fstat(source_fd)
+    entries = []
+    collect_directory(source_fd, ".", entries)
+finally:
+    os.close(source_fd)
+source_fd_after = open_absolute_directory_nofollow(source_root)
+try:
+    source_root_after = os.fstat(source_fd_after)
+finally:
+    os.close(source_fd_after)
+if (
+    source_root_before.st_dev != source_root_after.st_dev
+    or source_root_before.st_ino != source_root_after.st_ino
+    or not stat.S_ISDIR(source_root_after.st_mode)
+):
+    raise RuntimeError("approved source root path was replaced while scanning")
+entries.sort(key=lambda entry: entry["path"])
 observed = {
-    "schema": "fastwam-nohash-source-content-binding-v2",
+    "schema": "fastwam-nohash-source-content-binding-v3",
     "approved_source_root": source_root_literal,
     "entries": entries,
 }
 if binding.get("approved_source_root") != source_root_literal:
     raise RuntimeError("prepared approved source root mismatch")
-if binding.get("approved_source_metadata") != observed:
+if expected != observed:
     raise RuntimeError("approved source metadata drifted after prepare")
 PY
 }

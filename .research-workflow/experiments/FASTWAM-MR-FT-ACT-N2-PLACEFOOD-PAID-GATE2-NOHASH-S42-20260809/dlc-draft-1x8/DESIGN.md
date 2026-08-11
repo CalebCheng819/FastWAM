@@ -66,7 +66,7 @@ PAI, create a DLC job, stop E38, or touch E38 artifacts.
 
 ## Single-submit protocol
 
-`submit_from_ssh970_r4.sh` is the only R4 entrypoint.  It must be run inside the
+`submit_from_ssh970_r5.sh` is the only R5 entrypoint.  It must be run inside the
 SSH session reached through `ssh root@123.57.187.96 -p 970`, and holds local
 `flock` file descriptor 9 for the whole controller process.  This local lock
 serializes one SSH970 instance but is not the cross-node safety boundary.  The
@@ -74,7 +74,7 @@ mutable POSIX state and lock live on the SSH970 node-local ext4 filesystem:
 
 ```text
 /tmp/fastwam-dlc-submit-state/workspace-270969/
-  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R4-S42-20260811/
+  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R5-S42-20260811/
     <attempt-uuid>/
       request.json
       state.json
@@ -87,7 +87,7 @@ append-only ledger lives on OSS:
 
 ```text
 /oss-chengjuntao/artifacts/fastwam-dlc-submit-ledger/workspace-270969/
-  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R4-S42-20260811/
+  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R5-S42-20260811/
     prepared-binding.json
     submission-latch.json
     create-response.json       # only if a response was received
@@ -143,7 +143,7 @@ workspace/resource, output, settings, and exactly one 8-GPU worker.  ACK
 requires an exact `GetJob` readback and is then persisted as an immutable OSS
 acknowledgement.
 
-## Retired R3 attempt and R4 sequence
+## Retired R3/R4 attempts and R5 sequence
 
 R3 is permanently retired.  Its one CreateJob call used attempt
 `7bcd3b16-d73d-4538-add9-394276b9f15f` and created job
@@ -154,25 +154,41 @@ from the DLC image.  It never entered the FastWAM runtime or any training
 world, so this is infrastructure-startup evidence rather than a model, data,
 or training failure.  The R3 latch and attempt must never be submitted again.
 
-R4 has a new experiment ID, submission tag, attempt, output root, and durable
-ledger.  Its bootstrap binds the logical CPFS venv Python to the exact final
-regular interpreter target before execution; the runtime repeats that check.
+R4 is also permanently retired.  Its one CreateJob call used attempt
+`4c16eab2-c310-41e9-9d41-367cfc038acd` and created job
+`dlcr9fkau7hrwj0r`.  The worker reached the trusted runtime but stopped before
+FastWAM startup or training with `approved source metadata drifted after
+prepare`.  The prepared binding and a same-mount rescan both contained the
+same 1112 entries and were exactly equal.  R4 persisted OSSFS-projected mode
+and modification time across independent mounts, so this was a portability
+false positive rather than evidence of changed source bytes.  Its latch and
+attempt must never be submitted again.
+
+R5 has a new experiment ID, submission tag, attempt, output root, durable
+ledger, and SSH970 lock.  Its bootstrap binds the logical CPFS venv Python to
+the exact final regular interpreter target before execution; the runtime
+repeats that check.
 ACK reconciliation accepts only the observed PAI GetJob projection: unordered
 public `CustomEnvs` projected exactly from `Envs`, data sources with the same
 order/ID/mount path plus empty `Uri`, server-added JobSpec/Settings fields, and
 omission of `JobMaxRunningTimeMinutes` and `SuccessPolicy`.  All requested
 identity fields and any returned omitted field must still match exactly.
 
-Do not execute R4 until its new source snapshot is frozen and reviewed.
+Do not execute R5 until source snapshot
+`fastwam-action-n234-formal-20260811-r4` is frozen and reviewed.
 
 The source snapshot is an explicitly chosen, unique direct child of
 `/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/`.  Its exact path
 is supplied once to `prepare --source-root` and then frozen in the durable
 prepared binding; R3 does not carry a stale snapshot name in executable code.
-OSS is mounted writable for final result publication, so filesystem mode bits
-are not treated as a source-integrity boundary.  Instead, `prepare` records
-every source entry's path/type/size/mode/timestamp and direct file bytes, and
-`execute` rejects any difference before acquiring submission authority.  The
+OSS is mounted writable for final result publication, so mount-local device,
+inode, mode, and time projections are not persisted across hosts.  Instead,
+the v3 binding records the canonical relative path and type for every entry,
+plus the exact size and direct bytes for every regular file.  Every scan still
+rejects links and special nodes, uses `O_NOFOLLOW`, verifies stable local
+descriptor metadata before and after each read, and checks that the pathname
+still identifies the open file.  `execute` rejects any portable binding
+difference before acquiring submission authority.  The
 exact runtime script bytes are also carried inside the immutable DLC request;
 the fixed request bootstrap creates that script exclusively under `/tmp` and
 executes it without first executing code from OSS.  The worker rereads the
@@ -181,8 +197,8 @@ same direct-content binding, and compares every staged regular file byte for
 byte with the source.
 
 ```bash
-./submit_from_ssh970_r4.sh prepare \
-  --source-root /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/<unique-snapshot-name> \
+./submit_from_ssh970_r5.sh prepare \
+  --source-root /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-20260811-r4 \
   --stats-source /oss-chengjuntao/artifacts/fastwam-nohash-inputs-20260809/fastwam_multi_robot_n234_train_s42_stats_cpfs_nohash_v1.json \
   --gaussian-cache /oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/compact-s42-13x28x40-fp16-meanalpha-v2 \
   --gaussian-fallback-cache /oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/canonical-all-13x240x320-fp16
@@ -192,14 +208,14 @@ byte with the source.
 reviewing its `request.json`, the only submission command is:
 
 ```bash
-./submit_from_ssh970_r4.sh execute --attempt <attempt-uuid>
+./submit_from_ssh970_r5.sh execute --attempt <attempt-uuid>
 ```
 
 If the permanent latch exists, or the recorded phase is anything other than an
 unlatched `PREPARED`, do not run `execute` again.  Use the read-only command:
 
 ```bash
-./submit_from_ssh970_r4.sh reconcile --attempt <attempt-uuid>
+./submit_from_ssh970_r5.sh reconcile --attempt <attempt-uuid>
 ```
 
 No command in this draft stops, deletes, restarts, or otherwise changes E38.

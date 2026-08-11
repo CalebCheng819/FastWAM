@@ -15,16 +15,19 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 HERE = Path(__file__).resolve().parent
 LAUNCHER = HERE / "submit_gate2.py"
 R3_LAUNCHER = HERE / "submit_gate2_r3.py"
 R4_LAUNCHER = HERE / "submit_gate2_r4.py"
+R5_LAUNCHER = HERE / "submit_gate2_r5.py"
 RUNTIME = HERE / "runtime.sh"
 PUBLISHER = HERE / "publish_gate2.py"
 R3_WRAPPER = HERE / "submit_from_ssh970_r3.sh"
 R4_WRAPPER = HERE / "submit_from_ssh970_r4.sh"
+R5_WRAPPER = HERE / "submit_from_ssh970_r5.sh"
 
 
 def load_launcher():
@@ -55,6 +58,19 @@ def load_r4_controller():
     sys.path.insert(0, str(HERE))
     try:
         namespace = runpy.run_path(str(R4_LAUNCHER))
+        return namespace["controller"]
+    finally:
+        sys.path.remove(str(HERE))
+        sys.modules.pop("submit_gate2", None)
+        if previous is not None:
+            sys.modules["submit_gate2"] = previous
+
+
+def load_r5_controller():
+    previous = sys.modules.pop("submit_gate2", None)
+    sys.path.insert(0, str(HERE))
+    try:
+        namespace = runpy.run_path(str(R5_LAUNCHER))
         return namespace["controller"]
     finally:
         sys.path.remove(str(HERE))
@@ -123,7 +139,11 @@ class ControllerStateTest(unittest.TestCase):
             "created_at": "2026-08-09T00:00:00Z",
             "request": self.body,
             "approved_source_root": self.body["Envs"]["FASTWAM_SOURCE_ROOT"],
-            "approved_source_metadata": {"test": "stable-nohash-metadata"},
+            "approved_source_metadata": {
+                "schema": "fastwam-nohash-source-content-binding-v3",
+                "approved_source_root": self.body["Envs"]["FASTWAM_SOURCE_ROOT"],
+                "entries": [{"path": ".", "kind": "directory"}],
+            },
             "semantics": "immutable_request_binding_before_any_CreateJob_call",
         }
 
@@ -153,7 +173,6 @@ class ControllerStateTest(unittest.TestCase):
         self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r4-s42")
         self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r4-s42")
         self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r4.sh")
-        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
         self.assertIn('[[ -z "${SSH_CONNECTION:-}" ]]', wrapper)
         self.assertIn('CONTROL_PYTHON_TARGET="/usr/local/bin/python3.12"', wrapper)
         self.assertIn('[[ ! -L "${CONTROL_PYTHON}"', wrapper)
@@ -222,6 +241,79 @@ class ControllerStateTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("usage:", completed.stdout.lower())
 
+    def test_r5_has_new_identity_portable_binding_and_no_r4_reuse(self) -> None:
+        module = load_r5_controller()
+        expected = (
+            "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-"
+            "R5-S42-20260811"
+        )
+        retired_attempt = "4c16eab2-c310-41e9-9d41-367cfc038acd"
+        retired_job = "dlcr9fkau7hrwj0r"
+        wrapper = R5_WRAPPER.read_text(encoding="utf-8")
+        launcher = R5_LAUNCHER.read_text(encoding="utf-8")
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        self.assertEqual(module.EXPERIMENT_ID, expected)
+        self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r5-s42")
+        self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r5-s42")
+        self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r5.sh")
+        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
+        self.assertIn(".gate2-nohash-r5-submit.lock", wrapper)
+        self.assertIn(
+            'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/submit_gate2_r5.py" "$@"',
+            wrapper,
+        )
+        expected_source = Path(
+            "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
+            "fastwam-action-n234-formal-20260811-r4"
+        )
+        self.assertEqual(module.APPROVED_SOURCE_ROOT, expected_source)
+        self.assertIn("fastwam-nohash-source-content-binding-v3", runtime)
+        for retired in (retired_attempt, retired_job):
+            self.assertNotIn(retired, wrapper)
+            self.assertNotIn(retired, launcher)
+            self.assertNotIn(retired, runtime)
+
+        body = module.build_request(
+            expected_source,
+            Path("/oss-chengjuntao/artifacts/r5-controller-test-stats.json"),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r5-controller-test-primary"
+            ),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r5-controller-test-fallback"
+            ),
+            "11223344-5566-4778-899a-bbccddeeff00",
+            trusted_runtime_bytes=b"r5-controller-test-runtime\n",
+        )
+        module.validate_request(body, validate_live_inputs=False)
+        self.assertEqual(body["Envs"]["FASTWAM_EXPERIMENT_ID"], expected)
+        self.assertIn("fastwam-gate2-nohash-r5-s42-", body["Envs"]["FASTWAM_SUBMISSION_TAG"])
+        self.assertNotIn("r4", body["Envs"]["FASTWAM_OSS_OUTPUT_ROOT"].lower())
+
+        body["Envs"]["FASTWAM_SOURCE_ROOT"] = str(expected_source.with_name("retired-r3"))
+        with self.assertRaisesRegex(RuntimeError, "exact approved snapshot"):
+            module.validate_request(body, validate_live_inputs=False)
+
+    def test_r5_launcher_imports_exact_sibling_under_isolated_python(self) -> None:
+        launcher = R5_LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn('Path(__file__).resolve(strict=True).parent', launcher)
+        self.assertIn('_HERE / "submit_gate2.py"', launcher)
+        self.assertIn("spec_from_file_location", launcher)
+        self.assertNotIn("import submit_gate2 as controller", launcher)
+        with tempfile.TemporaryDirectory(prefix="gate2-r5-isolated-cwd-") as cwd:
+            completed = subprocess.run(
+                [sys.executable, "-B", "-I", str(R5_LAUNCHER), "--help"],
+                cwd=cwd,
+                env={"PATH": os.environ.get("PATH", "")},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("usage:", completed.stdout.lower())
+
     def test_durable_record_is_immutable_and_exact(self) -> None:
         path = self.module.prepared_binding_path()
         self.module.durable_exclusive_write(path, self.binding)
@@ -229,6 +321,55 @@ class ControllerStateTest(unittest.TestCase):
         self.assertEqual(observed, self.binding)
         with self.assertRaises(FileExistsError):
             self.module.durable_exclusive_write(path, self.binding)
+
+    def test_record_writers_reject_zero_progress(self) -> None:
+        root = Path(self.temporary.name)
+        with mock.patch.object(self.module.os, "write", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "made no progress"):
+                self.module.atomic_write(root / "atomic-zero.json", {"value": 1})
+
+        with mock.patch.object(self.module.os, "write", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "made no progress"):
+                self.module.durable_exclusive_write(
+                    root / "durable-zero.json", {"value": 1}
+                )
+
+    def test_stable_read_rejects_short_read_and_symlink(self) -> None:
+        root = Path(self.temporary.name)
+        target = root / "stable-read.json"
+        target.write_bytes(b"abc")
+        with mock.patch.object(self.module.os, "read", return_value=b""):
+            with self.assertRaisesRegex(RuntimeError, "byte count"):
+                self.module.stable_read(target)
+
+        alias = root / "stable-read-link.json"
+        alias.symlink_to(target)
+        with self.assertRaises(OSError):
+            self.module.stable_read(alias)
+
+    def test_require_prepared_binding_rejects_non_integer_v3_size(self) -> None:
+        binding = copy.deepcopy(self.binding)
+        binding["approved_source_metadata"]["entries"].append(
+            {
+                "path": "payload.bin",
+                "kind": "file",
+                "size": 3.0,
+                "content_b64": base64.b64encode(b"abc").decode("ascii"),
+            }
+        )
+        self.module.durable_exclusive_write(
+            self.module.prepared_binding_path(), binding
+        )
+        with (
+            mock.patch.object(self.module, "validate_request", return_value=None),
+            mock.patch.object(
+                self.module,
+                "source_snapshot_literal",
+                return_value=Path(binding["approved_source_root"]),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "size or content"):
+                self.module.require_prepared_binding(self.attempt)
 
     def test_local_state_restores_from_durable_ledger_and_latch(self) -> None:
         self.module.durable_exclusive_write(
@@ -466,12 +607,113 @@ class ControllerStateTest(unittest.TestCase):
 
         first_entry = next(item for item in first["entries"] if item["path"] == "payload.bin")
         second_entry = next(item for item in second["entries"] if item["path"] == "payload.bin")
+        self.assertEqual(first["schema"], "fastwam-nohash-source-content-binding-v3")
         self.assertEqual(first_entry["size"], second_entry["size"])
-        self.assertEqual(first_entry["mtime_ns"], second_entry["mtime_ns"])
         self.assertNotEqual(first_entry["content_b64"], second_entry["content_b64"])
+        self.assertEqual(
+            set(first_entry), {"path", "kind", "size", "content_b64"}
+        )
+        for forbidden in ("mode", "mtime_ns", "device", "inode", "ctime_ns"):
+            self.assertNotIn(forbidden, first_entry)
         self.assertEqual(
             base64.b64decode(first_entry["content_b64"], validate=True), b"first"
         )
+
+    def test_source_binding_is_portable_across_mode_mtime_and_inode_changes(self) -> None:
+        source = Path(self.temporary.name) / "portable-source-binding"
+        source.mkdir()
+        target = source / "payload.bin"
+        target.write_bytes(b"portable")
+        os.chmod(target, 0o600)
+        first = self.module.source_snapshot_metadata(source)
+
+        replacement = source / "replacement.bin"
+        replacement.write_bytes(b"portable")
+        os.chmod(replacement, 0o644)
+        os.utime(replacement, ns=(1_700_000_000_000_000_000,) * 2)
+        os.replace(replacement, target)
+        second = self.module.source_snapshot_metadata(source)
+
+        self.assertEqual(first, second)
+        for entry in second["entries"]:
+            if entry["kind"] == "directory":
+                self.assertEqual(set(entry), {"path", "kind"})
+            else:
+                self.assertEqual(
+                    set(entry), {"path", "kind", "size", "content_b64"}
+                )
+
+    def test_source_binding_rejects_noncanonical_or_malformed_entries(self) -> None:
+        source = Path(self.temporary.name) / "source-binding-validation"
+        source.mkdir()
+        valid = {
+            "schema": "fastwam-nohash-source-content-binding-v3",
+            "approved_source_root": str(source),
+            "entries": [
+                {"path": ".", "kind": "directory"},
+                {
+                    "path": "payload.bin",
+                    "kind": "file",
+                    "size": 3,
+                    "content_b64": base64.b64encode(b"abc").decode("ascii"),
+                },
+            ],
+        }
+        self.module.validate_source_snapshot_metadata(valid, source)
+
+        mutations = []
+        wrong_size = copy.deepcopy(valid)
+        wrong_size["entries"][1]["size"] = 4
+        mutations.append(wrong_size)
+        duplicate = copy.deepcopy(valid)
+        duplicate["entries"].append(copy.deepcopy(duplicate["entries"][1]))
+        mutations.append(duplicate)
+        traversal = copy.deepcopy(valid)
+        traversal["entries"][1]["path"] = "../payload.bin"
+        mutations.append(traversal)
+        metadata_field = copy.deepcopy(valid)
+        metadata_field["entries"][1]["mtime_ns"] = 1
+        mutations.append(metadata_field)
+        bool_size = copy.deepcopy(valid)
+        bool_size["entries"][1]["size"] = True
+        mutations.append(bool_size)
+        float_size = copy.deepcopy(valid)
+        float_size["entries"][1]["size"] = 3.0
+        mutations.append(float_size)
+        invalid_base64 = copy.deepcopy(valid)
+        invalid_base64["entries"][1]["content_b64"] = "not/base64!"
+        mutations.append(invalid_base64)
+        for index, mutation in enumerate(mutations):
+            with self.subTest(mutation=index):
+                with self.assertRaises(RuntimeError):
+                    self.module.validate_source_snapshot_metadata(mutation, source)
+
+    def test_source_binding_rejects_ancestor_directory_replacement(self) -> None:
+        source = Path(self.temporary.name) / "source-directory-race"
+        child = source / "nested"
+        moved = source / "nested-moved"
+        child.mkdir(parents=True)
+        (child / "payload.bin").write_bytes(b"payload")
+
+        real_open = os.open
+        replacement_triggered = False
+
+        def replacing_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal replacement_triggered
+            if dir_fd is None:
+                descriptor = real_open(path, flags, mode)
+            else:
+                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            if path == "nested" and dir_fd is not None and not replacement_triggered:
+                replacement_triggered = True
+                child.rename(moved)
+                child.symlink_to(moved.name, target_is_directory=True)
+            return descriptor
+
+        with mock.patch.object(self.module.os, "open", side_effect=replacing_open):
+            with self.assertRaises(RuntimeError):
+                self.module.source_snapshot_metadata(source)
+        self.assertTrue(replacement_triggered)
 
     def test_launcher_has_one_mutating_sdk_call(self) -> None:
         tree = ast.parse(LAUNCHER.read_text())
@@ -496,8 +738,91 @@ class ControllerStateTest(unittest.TestCase):
         self.assertLess(second_check, copy_position)
         self.assertGreater(third_check, copy_position)
         self.assertIn('"content_b64": base64.b64encode', text)
+        source_validation = text[text.index("expected = binding.get") : text.index("compare_trees()")]
+        self.assertIn("fastwam-nohash-source-content-binding-v3", source_validation)
+        self.assertIn("path_after.st_dev != after.st_dev", source_validation)
+        self.assertIn("path_after.st_ino != after.st_ino", source_validation)
+        self.assertIn("binding_fd = os.open(binding_path", text)
+        self.assertIn("binding_path_after.st_dev != after.st_dev", text)
+        self.assertIn("open_absolute_directory_nofollow", source_validation)
+        self.assertIn("dir_fd=directory_fd", source_validation)
+        self.assertNotIn(".rglob(", source_validation)
+        self.assertNotIn('"mode":', source_validation)
+        self.assertNotIn('"mtime_ns":', source_validation)
         self.assertIn("executing runtime differs from request-carried trusted bytes", text)
         self.assertIn("FASTWAM_PREPARED_BINDING_PATH", text)
+
+    def test_runtime_prepared_binding_reader_rejects_symlink(self) -> None:
+        text = RUNTIME.read_text(encoding="utf-8")
+        function_start = text.index("validate_prepared_source_binding()")
+        heredoc_marker = "<<'PY'\n"
+        script_start = text.index(heredoc_marker, function_start) + len(heredoc_marker)
+        script_end = text.index("\nPY\n}", script_start)
+        script = text[script_start:script_end]
+
+        root = Path(self.temporary.name)
+        source = root / "runtime-source"
+        source.mkdir()
+        target = root / "prepared-binding.json"
+        alias = root / "prepared-binding-link.json"
+        experiment = "runtime-binding-test"
+        tag = "runtime-binding-tag"
+        entrypoint = str(source / "runtime.sh")
+        trusted_runtime = b"runtime-binding-test-bytes\n"
+        encoded_runtime = base64.b64encode(trusted_runtime).decode("ascii")
+        target.write_text(
+            json.dumps(
+                {
+                    "schema": "fastwam-dlc-prepared-binding-v1",
+                    "experiment_id": experiment,
+                    "request": {
+                        "Envs": {
+                            "FASTWAM_EXPERIMENT_ID": experiment,
+                            "FASTWAM_SUBMISSION_TAG": tag,
+                            "FASTWAM_SOURCE_ROOT": str(source),
+                            "FASTWAM_GATE2_ENTRYPOINT": entrypoint,
+                            "FASTWAM_PREPARED_BINDING_PATH": str(alias),
+                            "FASTWAM_GATE2_TRUSTED_RUNTIME_B64": encoded_runtime,
+                            "FASTWAM_GATE2_TRUSTED_RUNTIME_BYTES": str(
+                                len(trusted_runtime)
+                            ),
+                        }
+                    },
+                    "approved_source_metadata": {
+                        "schema": "fastwam-nohash-source-content-binding-v3",
+                        "approved_source_root": str(source),
+                        "entries": [{"path": ".", "kind": "directory"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        alias.symlink_to(target)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-",
+                str(alias),
+                str(source),
+                experiment,
+                tag,
+                entrypoint,
+            ],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+            env={
+                "FASTWAM_GATE2_TRUSTED_RUNTIME_B64": encoded_runtime,
+                "FASTWAM_GATE2_TRUSTED_RUNTIME_BYTES": str(len(trusted_runtime)),
+            },
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "prepared binding is missing, linked, or unreadable",
+            completed.stderr,
+        )
 
     def test_r3_variant_binds_explicit_unique_oss_snapshot_and_mounts_inputs(self) -> None:
         module = load_r3_controller()
@@ -671,7 +996,9 @@ class ControllerStateTest(unittest.TestCase):
         module.get_job = lambda *args: dict(observed)
         module.time.sleep = lambda seconds: None
         module.assert_source_root = lambda value: Path(value)
-        module.source_snapshot_metadata = lambda source: {"test": "stable-nohash-metadata"}
+        module.source_snapshot_metadata = lambda source: copy.deepcopy(
+            self.binding["approved_source_metadata"]
+        )
         real_validate_request = module.validate_request
         module.validate_request = lambda body, models=None, **kwargs: real_validate_request(
             body, models, validate_live_inputs=False

@@ -163,7 +163,10 @@ def atomic_write(path: Path, value: Any) -> None:
     try:
         view = memoryview(json_data(value))
         while view:
-            view = view[os.write(fd, view) :]
+            written = os.write(fd, view)
+            if written <= 0:
+                raise RuntimeError(f"atomic record write made no progress: {temporary}")
+            view = view[written:]
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -183,7 +186,10 @@ def durable_exclusive_write(path: Path, value: Any) -> dict[str, int]:
     try:
         view = memoryview(payload)
         while view:
-            view = view[os.write(fd, view) :]
+            written = os.write(fd, view)
+            if written <= 0:
+                raise RuntimeError(f"durable record write made no progress: {path}")
+            view = view[written:]
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -205,8 +211,10 @@ def descriptor(st: os.stat_result) -> dict[str, int]:
         "device": st.st_dev,
         "inode": st.st_ino,
         "mode": st.st_mode,
+        "links": st.st_nlink,
         "size": st.st_size,
         "mtime_ns": st.st_mtime_ns,
+        "ctime_ns": st.st_ctime_ns,
     }
 
 
@@ -226,14 +234,28 @@ def stable_read(path: Path, expected: dict[str, int] | None = None) -> tuple[byt
                 break
             chunks.append(chunk)
         after = os.fstat(fd)
+        try:
+            path_after = path.lstat()
+        except FileNotFoundError as error:
+            raise RuntimeError(f"file path disappeared while reading: {path}") from error
     finally:
         os.close(fd)
     observed = descriptor(after)
     if descriptor(before) != observed:
         raise RuntimeError(f"file changed while reading: {path}")
+    if (
+        not stat.S_ISREG(path_after.st_mode)
+        or path_after.st_nlink != 1
+        or path_after.st_dev != after.st_dev
+        or path_after.st_ino != after.st_ino
+    ):
+        raise RuntimeError(f"file path was replaced while reading: {path}")
+    payload = b"".join(chunks)
+    if len(payload) != after.st_size:
+        raise RuntimeError(f"file byte count disagrees with metadata: {path}")
     if expected is not None and observed != expected:
         raise RuntimeError(f"prepared file metadata changed: {path}")
-    return b"".join(chunks), observed
+    return payload, observed
 
 
 def read_json(path: Path, expected: dict[str, int] | None = None) -> tuple[Any, dict[str, int]]:
@@ -314,14 +336,34 @@ def attempt_paths(attempt: str) -> tuple[Path, Path]:
 
 def require_prepared_binding(attempt: str) -> dict[str, Any]:
     binding, _ = read_json(prepared_binding_path())
+    required_fields = {
+        "schema",
+        "experiment_id",
+        "attempt",
+        "created_at",
+        "request",
+        "approved_source_root",
+        "approved_source_metadata",
+        "semantics",
+    }
+    if not isinstance(binding, dict) or set(binding) != required_fields:
+        raise RuntimeError("durable prepared binding fields mismatch")
     if (
-        binding.get("schema") != "fastwam-dlc-prepared-binding-v1"
-        or binding.get("experiment_id") != EXPERIMENT_ID
-        or binding.get("attempt") != attempt
-        or not isinstance(binding.get("request"), dict)
+        binding["schema"] != "fastwam-dlc-prepared-binding-v1"
+        or binding["experiment_id"] != EXPERIMENT_ID
+        or binding["attempt"] != attempt
+        or not isinstance(binding["request"], dict)
+        or not isinstance(binding["approved_source_root"], str)
     ):
         raise RuntimeError("durable prepared binding identity mismatch")
     validate_request(binding["request"], validate_live_inputs=False)
+    request_source = (binding["request"].get("Envs") or {}).get(
+        "FASTWAM_SOURCE_ROOT"
+    )
+    if request_source != binding["approved_source_root"]:
+        raise RuntimeError("durable prepared source root disagrees with request")
+    source = source_snapshot_literal(binding["approved_source_root"])
+    validate_source_snapshot_metadata(binding["approved_source_metadata"], source)
     return binding
 
 
@@ -476,43 +518,212 @@ def assert_source_root(value: str) -> Path:
     return resolved
 
 
-def source_snapshot_metadata(source_root: Path) -> dict[str, Any]:
-    """Record cross-node metadata and direct bytes for every source entry."""
+def portable_source_entry(relative_path: str, kind: str, payload: bytes | None) -> dict[str, Any]:
+    """Build one cross-mount source entry without filesystem-local metadata."""
 
-    entries: list[dict[str, Any]] = []
-    for path in sorted([source_root, *source_root.rglob("*")], key=lambda item: str(item)):
-        st = path.lstat()
-        if stat.S_ISLNK(st.st_mode):
-            raise RuntimeError(f"source snapshot contains a symlink: {path}")
-        if stat.S_ISDIR(st.st_mode):
-            kind = "directory"
-        elif stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
-            kind = "file"
-        else:
-            raise RuntimeError(f"source snapshot contains unsupported entry: {path}")
-        entry = {
-            "path": "." if path == source_root else str(path.relative_to(source_root)),
-            "kind": kind,
-            "mode": stat.S_IMODE(st.st_mode),
-            "size": st.st_size if kind == "file" else 0,
-            "mtime_ns": st.st_mtime_ns,
-        }
-        if kind == "file":
-            payload, observed = stable_read(path)
-            entry.update(
-                {
-                    "mode": stat.S_IMODE(observed["mode"]),
-                    "size": observed["size"],
-                    "mtime_ns": observed["mtime_ns"],
-                    "content_b64": base64.b64encode(payload).decode("ascii"),
-                }
-            )
-        entries.append(entry)
+    if relative_path == ".":
+        if kind != "directory":
+            raise RuntimeError("source binding root entry must be a directory")
+    else:
+        relative = Path(relative_path)
+        if (
+            not relative_path
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative_path != relative.as_posix()
+        ):
+            raise RuntimeError(f"non-canonical source binding path: {relative_path!r}")
+    if kind == "directory":
+        if payload is not None:
+            raise RuntimeError("source directory entry cannot carry content")
+        return {"path": relative_path, "kind": kind}
+    if kind != "file" or payload is None:
+        raise RuntimeError(f"unsupported source binding kind: {kind!r}")
     return {
-        "schema": "fastwam-nohash-source-content-binding-v2",
+        "path": relative_path,
+        "kind": kind,
+        "size": len(payload),
+        "content_b64": base64.b64encode(payload).decode("ascii"),
+    }
+
+
+def validate_source_snapshot_metadata(metadata: dict[str, Any], source_root: Path) -> None:
+    """Fail closed on malformed, incomplete, or non-canonical v3 bindings."""
+
+    if set(metadata) != {"schema", "approved_source_root", "entries"}:
+        raise RuntimeError("source binding has unexpected top-level fields")
+    if metadata["schema"] != "fastwam-nohash-source-content-binding-v3":
+        raise RuntimeError("source binding schema mismatch")
+    if metadata["approved_source_root"] != str(source_root):
+        raise RuntimeError("source binding root mismatch")
+    entries = metadata["entries"]
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("source binding entries are missing")
+    paths: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError("source binding entry is not an object")
+        kind = entry.get("kind")
+        path = entry.get("path")
+        if not isinstance(path, str) or not isinstance(kind, str):
+            raise RuntimeError("source binding path or kind is invalid")
+        paths.append(path)
+        if kind == "directory":
+            if set(entry) != {"path", "kind"}:
+                raise RuntimeError("source directory entry has non-portable fields")
+            portable_source_entry(path, kind, None)
+        elif kind == "file":
+            if set(entry) != {"path", "kind", "size", "content_b64"}:
+                raise RuntimeError("source file entry has non-portable fields")
+            size = entry["size"]
+            encoded = entry["content_b64"]
+            if type(size) is not int or size < 0 or not isinstance(encoded, str):
+                raise RuntimeError("source file size or content is invalid")
+            try:
+                payload = base64.b64decode(encoded.encode("ascii"), validate=True)
+            except (UnicodeEncodeError, ValueError) as error:
+                raise RuntimeError("source file content is not canonical base64") from error
+            if len(payload) != size:
+                raise RuntimeError("source file content length mismatch")
+            if portable_source_entry(path, kind, payload) != entry:
+                raise RuntimeError("source file entry is not canonical")
+        else:
+            raise RuntimeError(f"unsupported source binding kind: {kind!r}")
+    if paths != sorted(paths) or len(paths) != len(set(paths)) or paths[0] != ".":
+        raise RuntimeError("source binding paths are incomplete, duplicated, or unsorted")
+
+
+def open_absolute_directory_nofollow(path: Path) -> int:
+    """Open every absolute path component by fd, refusing symlink ancestors."""
+
+    if not path.is_absolute() or not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise RuntimeError(f"cannot securely open source directory: {path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current_fd = os.open("/", flags)
+    try:
+        for component in path.parts[1:]:
+            next_fd = os.open(component, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
+def collect_source_directory(
+    directory_fd: int,
+    relative_path: str,
+    entries: list[dict[str, Any]],
+) -> None:
+    """Walk a source tree through held directory fds without following links."""
+
+    directory_before = os.fstat(directory_fd)
+    if not stat.S_ISDIR(directory_before.st_mode):
+        raise RuntimeError(f"source entry is not a directory: {relative_path}")
+    entries.append(portable_source_entry(relative_path, "directory", None))
+    names_before = sorted(os.listdir(directory_fd))
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_flags = file_flags | os.O_DIRECTORY
+
+    for name in names_before:
+        if not name or name in {".", ".."} or "/" in name:
+            raise RuntimeError(f"source directory returned an invalid name: {name!r}")
+        child_relative = name if relative_path == "." else f"{relative_path}/{name}"
+        observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if stat.S_ISLNK(observed.st_mode):
+            raise RuntimeError(f"source snapshot contains a symlink: {child_relative}")
+        if stat.S_ISDIR(observed.st_mode):
+            child_fd = os.open(name, directory_flags, dir_fd=directory_fd)
+            try:
+                opened = os.fstat(child_fd)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or opened.st_dev != observed.st_dev
+                    or opened.st_ino != observed.st_ino
+                ):
+                    raise RuntimeError(f"source directory was replaced while opening: {child_relative}")
+                collect_source_directory(child_fd, child_relative, entries)
+                path_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(path_after.st_mode)
+                    or path_after.st_dev != opened.st_dev
+                    or path_after.st_ino != opened.st_ino
+                ):
+                    raise RuntimeError(f"source directory path was replaced: {child_relative}")
+            finally:
+                os.close(child_fd)
+            continue
+        if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+            raise RuntimeError(f"source snapshot contains unsupported entry: {child_relative}")
+
+        child_fd = os.open(name, file_flags, dir_fd=directory_fd)
+        try:
+            before = os.fstat(child_fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_dev != observed.st_dev
+                or before.st_ino != observed.st_ino
+            ):
+                raise RuntimeError(f"source file was replaced while opening: {child_relative}")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(child_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(child_fd)
+            path_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        finally:
+            os.close(child_fd)
+        payload = b"".join(chunks)
+        if (
+            descriptor(before) != descriptor(after)
+            or not stat.S_ISREG(path_after.st_mode)
+            or path_after.st_nlink != 1
+            or path_after.st_dev != after.st_dev
+            or path_after.st_ino != after.st_ino
+            or len(payload) != after.st_size
+        ):
+            raise RuntimeError(f"source file changed while reading: {child_relative}")
+        entries.append(portable_source_entry(child_relative, "file", payload))
+
+    names_after = sorted(os.listdir(directory_fd))
+    directory_after = os.fstat(directory_fd)
+    if names_before != names_after or descriptor(directory_before) != descriptor(directory_after):
+        raise RuntimeError(f"source directory changed while scanning: {relative_path}")
+
+
+def source_snapshot_metadata(source_root: Path) -> dict[str, Any]:
+    """Record portable paths and bytes through an fd-rooted, no-follow walk."""
+
+    root_fd = open_absolute_directory_nofollow(source_root)
+    try:
+        opened_root = os.fstat(root_fd)
+        entries: list[dict[str, Any]] = []
+        collect_source_directory(root_fd, ".", entries)
+    finally:
+        os.close(root_fd)
+    reopened_fd = open_absolute_directory_nofollow(source_root)
+    try:
+        reopened_root = os.fstat(reopened_fd)
+    finally:
+        os.close(reopened_fd)
+    if (
+        opened_root.st_dev != reopened_root.st_dev
+        or opened_root.st_ino != reopened_root.st_ino
+        or not stat.S_ISDIR(reopened_root.st_mode)
+    ):
+        raise RuntimeError("source root path was replaced while scanning")
+    entries.sort(key=lambda entry: entry["path"])
+    metadata = {
+        "schema": "fastwam-nohash-source-content-binding-v3",
         "approved_source_root": str(source_root),
         "entries": entries,
     }
+    validate_source_snapshot_metadata(metadata, source_root)
+    return metadata
 
 
 def assert_stats_source(value: str) -> Path:
