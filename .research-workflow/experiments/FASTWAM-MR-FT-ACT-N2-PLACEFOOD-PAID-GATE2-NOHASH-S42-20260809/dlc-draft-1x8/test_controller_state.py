@@ -25,6 +25,7 @@ R4_LAUNCHER = HERE / "submit_gate2_r4.py"
 R5_LAUNCHER = HERE / "submit_gate2_r5.py"
 R6_LAUNCHER = HERE / "submit_gate2_r6.py"
 R7_LAUNCHER = HERE / "submit_gate2_r7.py"
+R8_LAUNCHER = HERE / "submit_gate2_r8.py"
 READONLY_MONITOR = HERE / "monitor_gate2_readonly.py"
 RUNTIME = HERE / "runtime.sh"
 PUBLISHER = HERE / "publish_gate2.py"
@@ -33,6 +34,7 @@ R4_WRAPPER = HERE / "submit_from_ssh970_r4.sh"
 R5_WRAPPER = HERE / "submit_from_ssh970_r5.sh"
 R6_WRAPPER = HERE / "submit_from_ssh970_r6.sh"
 R7_WRAPPER = HERE / "submit_from_ssh970_r7.sh"
+R8_WRAPPER = HERE / "submit_from_ssh970_r8.sh"
 
 
 def load_launcher():
@@ -102,6 +104,19 @@ def load_r7_controller():
     sys.path.insert(0, str(HERE))
     try:
         namespace = runpy.run_path(str(R7_LAUNCHER))
+        return namespace["controller"]
+    finally:
+        sys.path.remove(str(HERE))
+        sys.modules.pop("submit_gate2", None)
+        if previous is not None:
+            sys.modules["submit_gate2"] = previous
+
+
+def load_r8_controller():
+    previous = sys.modules.pop("submit_gate2", None)
+    sys.path.insert(0, str(HERE))
+    try:
+        namespace = runpy.run_path(str(R8_LAUNCHER))
         return namespace["controller"]
     finally:
         sys.path.remove(str(HERE))
@@ -418,7 +433,6 @@ class ControllerStateTest(unittest.TestCase):
         self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r7-s42")
         self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r7-s42")
         self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r7.sh")
-        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
         self.assertIn(".gate2-nohash-r7-submit.lock", wrapper)
         self.assertIn("export PYTHONDONTWRITEBYTECODE=1", wrapper)
         self.assertIn(
@@ -433,7 +447,6 @@ class ControllerStateTest(unittest.TestCase):
         for retired in (retired_attempt, retired_job):
             self.assertNotIn(retired, wrapper)
             self.assertNotIn(retired, launcher)
-            self.assertNotIn(retired, runtime)
 
         body = module.build_request(
             expected_source,
@@ -464,8 +477,69 @@ class ControllerStateTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exact approved snapshot"):
             module.validate_request(body, validate_live_inputs=False)
 
-    def test_r7_launcher_and_readonly_monitor_are_isolated(self) -> None:
-        launcher = R7_LAUNCHER.read_text(encoding="utf-8")
+    def test_r8_has_fresh_identity_source_and_no_r7_reuse(self) -> None:
+        module = load_r8_controller()
+        expected = (
+            "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-"
+            "R8-S42-20260811"
+        )
+        retired_attempt = "48e33268-a111-4115-bb45-06862d3c97c7"
+        retired_job = "dlct3jzm2aiw4xit"
+        wrapper = R8_WRAPPER.read_text(encoding="utf-8")
+        launcher = R8_LAUNCHER.read_text(encoding="utf-8")
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        self.assertEqual(module.EXPERIMENT_ID, expected)
+        self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r8-s42")
+        self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r8-s42")
+        self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r8.sh")
+        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
+        self.assertIn(".gate2-nohash-r8-submit.lock", wrapper)
+        self.assertIn("export PYTHONDONTWRITEBYTECODE=1", wrapper)
+        self.assertIn(
+            'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/submit_gate2_r8.py" "$@"',
+            wrapper,
+        )
+        expected_source = Path(
+            "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
+            "fastwam-action-n234-formal-20260811-r8"
+        )
+        self.assertEqual(module.APPROVED_SOURCE_ROOT, expected_source)
+        for retired in (retired_attempt, retired_job):
+            self.assertNotIn(retired, wrapper)
+            self.assertNotIn(retired, launcher)
+            self.assertNotIn(retired, runtime)
+
+        body = module.build_request(
+            expected_source,
+            Path("/oss-chengjuntao/artifacts/r8-controller-test-stats.json"),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r8-controller-test-primary"
+            ),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r8-controller-test-fallback"
+            ),
+            "44556677-8899-4aab-9ccd-eeff00112233",
+            trusted_runtime_bytes=b"r8-controller-test-runtime\n",
+        )
+        module.validate_request(body, validate_live_inputs=False)
+        self.assertEqual(body["Envs"]["FASTWAM_EXPERIMENT_ID"], expected)
+        self.assertIn(
+            "fastwam-gate2-nohash-r8-s42-",
+            body["Envs"]["FASTWAM_SUBMISSION_TAG"],
+        )
+        self.assertNotIn("r7", body["Envs"]["FASTWAM_OSS_OUTPUT_ROOT"].lower())
+        self.assertIn(expected, body["Envs"]["FASTWAM_PREPARED_BINDING_PATH"])
+
+        body["Envs"]["FASTWAM_SOURCE_ROOT"] = str(
+            expected_source.with_name("retired-r7")
+        )
+        with self.assertRaisesRegex(RuntimeError, "exact approved snapshot"):
+            module.validate_request(body, validate_live_inputs=False)
+
+    def test_r8_launcher_and_readonly_monitor_are_isolated(self) -> None:
+        launcher = R8_LAUNCHER.read_text(encoding="utf-8")
         monitor = READONLY_MONITOR.read_text(encoding="utf-8")
         monitor_tree = ast.parse(monitor, filename=str(READONLY_MONITOR))
         client_methods = {
@@ -490,9 +564,9 @@ class ControllerStateTest(unittest.TestCase):
         )
         self.assertIn("sys.flags.isolated", monitor)
         self.assertIn("sys.flags.dont_write_bytecode", monitor)
-        with tempfile.TemporaryDirectory(prefix="gate2-r7-isolated-cwd-") as cwd:
+        with tempfile.TemporaryDirectory(prefix="gate2-r8-isolated-cwd-") as cwd:
             for command in (
-                [sys.executable, "-B", "-I", str(R7_LAUNCHER), "--help"],
+                [sys.executable, "-B", "-I", str(R8_LAUNCHER), "--help"],
                 [sys.executable, "-B", "-I", str(READONLY_MONITOR), "--help"],
             ):
                 completed = subprocess.run(
