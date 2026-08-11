@@ -14,12 +14,18 @@ read -r ssh_client ssh_client_port ssh_server ssh_server_port ssh_extra <<<"${SS
   exit 1
 }
 CONTROL_PYTHON=/mnt/workspace/tools/pai-control-py312/20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python
-[[ -x "${CONTROL_PYTHON}" && ! -L "${CONTROL_PYTHON}" ]] || {
+CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12
+[[ -L "${CONTROL_PYTHON}" && -x "${CONTROL_PYTHON}" ]] || {
   echo "Error: pinned PAI control Python is unavailable" >&2
   exit 1
 }
-[[ "$(realpath -e -- "${CONTROL_PYTHON}")" == "${CONTROL_PYTHON}" ]] || {
-  echo "Error: pinned PAI control Python does not resolve to its frozen path" >&2
+[[ "$(realpath -e -- "${CONTROL_PYTHON}")" == "${CONTROL_PYTHON_TARGET}" ]] || {
+  echo "Error: pinned PAI control Python resolves to an unexpected target" >&2
+  exit 1
+}
+[[ -f "${CONTROL_PYTHON_TARGET}" && -x "${CONTROL_PYTHON_TARGET}" \
+   && ! -L "${CONTROL_PYTHON_TARGET}" ]] || {
+  echo "Error: pinned PAI control Python target is not a regular executable" >&2
   exit 1
 }
 "${CONTROL_PYTHON}" -I -c \

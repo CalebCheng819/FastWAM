@@ -15,6 +15,7 @@ umask 077
 : "${FASTWAM_TASK_CONFIG:?}"
 : "${FASTWAM_ARTIFACT_INTEGRITY_MODE:?}"
 : "${FASTWAM_PYTHON:?}"
+: "${FASTWAM_PYTHON_TARGET:?}"
 : "${FASTWAM_DATASET_ROOT:?}"
 : "${FASTWAM_INITIAL_CHECKPOINT:?}"
 : "${FASTWAM_N234_NOHASH_STATS_SOURCE:?}"
@@ -24,7 +25,7 @@ umask 077
 : "${FASTWAM_MIN_TMP_FREE_BYTES:?}"
 : "${NPROC_PER_NODE:?}"
 
-EXPECTED_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R3-S42-20260809"
+EXPECTED_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R4-S42-20260811"
 SOURCE_EXPERIMENT="FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-S42-20260809"
 EXPECTED_TASK="robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5_nohash_gate"
 EXPECTED_DATASET_ROOT="/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
@@ -69,14 +70,22 @@ SOURCE_SNAPSHOT_NAME="${FASTWAM_SOURCE_ROOT#"${SOURCE_PREFIX}"}"
   || fail "fixed VAE source is missing or linked"
 [[ "$(stat -c %s -- "${EXPECTED_VAE_SOURCE}")" == "${EXPECTED_VAE_SOURCE_BYTES}" ]] \
   || fail "fixed VAE source byte count mismatch"
-[[ -x "${FASTWAM_PYTHON}" ]] || fail "pinned training Python is unavailable"
+[[ "${FASTWAM_PYTHON}" == "/cpfs/user/chengjuntao/venvs/fastwam-gaudp-py310-20260802/bin/python" ]] \
+  || fail "pinned venv Python contract mismatch"
+[[ "${FASTWAM_PYTHON_TARGET}" == "/cpfs/user/chengjuntao/runtimes/uv-python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10" ]] \
+  || fail "pinned Python target contract mismatch"
+[[ -L "${FASTWAM_PYTHON}" && -x "${FASTWAM_PYTHON}" ]] || fail "pinned venv Python is unavailable"
+RESOLVED_PYTHON="$(readlink -f -- "${FASTWAM_PYTHON}")"
+[[ "${RESOLVED_PYTHON}" == "${FASTWAM_PYTHON_TARGET}" ]] || fail "pinned venv Python target mismatch"
+[[ -f "${FASTWAM_PYTHON_TARGET}" && -x "${FASTWAM_PYTHON_TARGET}" && ! -L "${FASTWAM_PYTHON_TARGET}" ]] \
+  || fail "resolved pinned Python is not a regular executable"
 [[ -d "${FASTWAM_DATASET_ROOT}" && -d "${FASTWAM_TEXT_CACHE_DIR}" ]] || fail "dataset or text cache is unavailable"
 [[ -d "${FASTWAM_GAUSSIAN_CACHE_DIR}" && -d "${FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR}" ]] || fail "Gaussian caches are unavailable"
 
 TRUSTED_RUNTIME_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 [[ "${TRUSTED_RUNTIME_PATH}" == "${EXPECTED_TRUSTED_RUNTIME_PATH}" ]] \
   || fail "runtime did not start from the request-carried trusted bootstrap payload"
-/usr/bin/python3 -I -S - "${TRUSTED_RUNTIME_PATH}" <<'PY'
+"${FASTWAM_PYTHON}" -B -I -S - "${TRUSTED_RUNTIME_PATH}" <<'PY'
 import base64
 import os
 import stat

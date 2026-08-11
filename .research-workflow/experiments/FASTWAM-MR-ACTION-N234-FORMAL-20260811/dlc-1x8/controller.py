@@ -177,7 +177,11 @@ TRUSTED_BOOTSTRAP_COMMAND = (
     "unset BASH_ENV ENV PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT "
     "LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH LOCPATH NLSPATH;"
     f"PATH={BOOTSTRAP_PATH};export PATH;"
-    "exec /usr/bin/python3 -I -S -c 'import base64,os;"
+    f"test -L {PINNED_PYTHON} && test -x {PINNED_PYTHON} && "
+    f"test \"$(readlink -f -- {PINNED_PYTHON})\" = {PINNED_PYTHON_TARGET} && "
+    f"test -f {PINNED_PYTHON_TARGET} && test -x {PINNED_PYTHON_TARGET} && "
+    f"test ! -L {PINNED_PYTHON_TARGET} || exit 126;"
+    f"exec {PINNED_PYTHON} -B -I -S -c 'import base64,os;"
     f"payload=base64.b64decode(os.environ[\"{TRUSTED_RUNTIME_B64_ENV}\"],validate=True);"
     f"expected=int(os.environ[\"{TRUSTED_RUNTIME_BYTES_ENV}\"]);"
     "\nif len(payload)!=expected:\n raise RuntimeError(\"trusted runtime byte count mismatch\")\n"
@@ -1337,29 +1341,78 @@ def requested_subset(observed: Any, requested: Any) -> bool:
             and len(observed) == len(requested)
             and all(requested_subset(left, right) for left, right in zip(observed, requested))
         )
-    return observed == requested
+    return type(observed) is type(requested) and observed == requested
+
+
+def custom_env_projection_matches(job: dict[str, Any], request: dict[str, Any]) -> bool:
+    """Accept only PAI's observed public projection of the requested Envs map."""
+
+    requested_envs = request.get("Envs")
+    observed_custom = job.get("CustomEnvs")
+    if request.get("CustomEnvs") != [] or not isinstance(requested_envs, dict):
+        return False
+    if not isinstance(observed_custom, list) or len(observed_custom) != len(requested_envs):
+        return False
+    projection: dict[str, Any] = {}
+    for item in observed_custom:
+        if not isinstance(item, dict) or set(item) != {"Key", "Value", "Visible"}:
+            return False
+        key = item.get("Key")
+        if not isinstance(key, str) or key in projection or item.get("Visible") != "public":
+            return False
+        projection[key] = item.get("Value")
+    return projection == requested_envs
+
+
+def datasource_projection_matches(job: dict[str, Any], request: dict[str, Any]) -> bool:
+    """Accept only the exact GetJob datasource projection observed from PAI."""
+
+    requested_sources = request.get("DataSources")
+    observed_sources = job.get("DataSources")
+    if not isinstance(requested_sources, list) or not isinstance(observed_sources, list):
+        return False
+    if len(requested_sources) != len(observed_sources):
+        return False
+    for observed, requested in zip(observed_sources, requested_sources):
+        if (
+            not isinstance(requested, dict)
+            or set(requested) != {"DataSourceId", "MountAccess", "MountPath"}
+            or requested.get("MountAccess") not in {"RO", "RW"}
+            or not isinstance(observed, dict)
+            or set(observed) != {"DataSourceId", "MountPath", "Uri"}
+            or observed.get("DataSourceId") != requested.get("DataSourceId")
+            or observed.get("MountPath") != requested.get("MountPath")
+            or observed.get("Uri") != ""
+        ):
+            return False
+    return True
 
 
 def exact_job(job: dict[str, Any], request: dict[str, Any]) -> bool:
-    keys = (
-        "Accessibility",
-        "CustomEnvs",
-        "DataSources",
-        "Description",
-        "DisplayName",
-        "Envs",
-        "JobMaxRunningTimeMinutes",
-        "JobSpecs",
-        "JobType",
-        "Priority",
-        "Settings",
-        "SuccessPolicy",
-        "UserCommand",
-    )
-    return (
-        str(job.get("WorkspaceId") or "") == str(request.get("WorkspaceId") or "")
-        and str(job.get("ResourceId") or "") == str(request.get("ResourceId") or "")
-        and all(key in job and requested_subset(job[key], request[key]) for key in keys)
+    """Match one frozen request under the closed, observed PAI GetJob projection."""
+
+    if not isinstance(job, dict) or not isinstance(request, dict):
+        return False
+    if (
+        not requested_subset(job.get("WorkspaceId"), request.get("WorkspaceId"))
+        or not requested_subset(job.get("ResourceId"), request.get("ResourceId"))
+        or not custom_env_projection_matches(job, request)
+        or not datasource_projection_matches(job, request)
+    ):
+        return False
+    omitted_by_service = {"JobMaxRunningTimeMinutes", "SuccessPolicy"}
+    if not omitted_by_service.issubset(request):
+        return False
+    for key in omitted_by_service:
+        if key in job and not requested_subset(job[key], request[key]):
+            return False
+    special = {
+        "WorkspaceId", "ResourceId", "CustomEnvs", "DataSources", *omitted_by_service
+    }
+    return all(
+        key in job and requested_subset(job[key], value)
+        for key, value in request.items()
+        if key not in special
     )
 
 

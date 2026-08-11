@@ -57,6 +57,13 @@ VAE_SOURCE = Path(
     "DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
 )
 VAE_SOURCE_BYTES = 1_409_401_152
+PINNED_PYTHON = Path(
+    "/cpfs/user/chengjuntao/venvs/fastwam-gaudp-py310-20260802/bin/python"
+)
+PINNED_PYTHON_TARGET = Path(
+    "/cpfs/user/chengjuntao/runtimes/uv-python/"
+    "cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
+)
 BOOTSTRAP_PATH = (
     "/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:"
     "/usr/sbin:/usr/bin:/sbin:/bin"
@@ -78,6 +85,7 @@ BOOTSTRAP_ALLOWED_ENV = (
     "FASTWAM_OSS_OUTPUT_ROOT",
     "FASTWAM_PREPARED_BINDING_PATH",
     "FASTWAM_PYTHON",
+    "FASTWAM_PYTHON_TARGET",
     "FASTWAM_SOURCE_ROOT",
     "FASTWAM_SUBMISSION_TAG",
     "FASTWAM_TASK_CONFIG",
@@ -95,7 +103,11 @@ TRUSTED_BOOTSTRAP_COMMAND = (
     "unset BASH_ENV ENV PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT "
     "LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT GCONV_PATH LOCPATH NLSPATH;"
     f"PATH={BOOTSTRAP_PATH};export PATH;"
-    "exec /usr/bin/python3 -I -S -c 'import base64,os;"
+    f"test -L {PINNED_PYTHON} && test -x {PINNED_PYTHON} && "
+    f"test \"$(readlink -f -- {PINNED_PYTHON})\" = {PINNED_PYTHON_TARGET} && "
+    f"test -f {PINNED_PYTHON_TARGET} && test -x {PINNED_PYTHON_TARGET} && "
+    f"test ! -L {PINNED_PYTHON_TARGET} || exit 126;"
+    f"exec {PINNED_PYTHON} -B -I -S -c 'import base64,os;"
     f"payload=base64.b64decode(os.environ[\"{TRUSTED_RUNTIME_B64_ENV}\"],validate=True);"
     f"expected=int(os.environ[\"{TRUSTED_RUNTIME_BYTES_ENV}\"]);"
     "\nif len(payload)!=expected:\n raise RuntimeError(\"trusted runtime byte count mismatch\")\n"
@@ -547,6 +559,27 @@ def assert_vae_source(value: str) -> Path:
     return resolved
 
 
+def assert_pinned_python() -> Path:
+    """Bind the logical venv entry point to one regular CPFS interpreter."""
+
+    try:
+        resolved = PINNED_PYTHON.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(f"pinned CPFS Python cannot be resolved: {PINNED_PYTHON}") from error
+    if (
+        not PINNED_PYTHON.is_symlink()
+        or resolved != PINNED_PYTHON_TARGET
+        or PINNED_PYTHON_TARGET.is_symlink()
+        or not PINNED_PYTHON_TARGET.is_file()
+        or not os.access(PINNED_PYTHON_TARGET, os.X_OK)
+    ):
+        raise RuntimeError(
+            "pinned CPFS Python logical path or resolved executable target mismatch: "
+            f"{PINNED_PYTHON} -> {resolved}"
+        )
+    return resolved
+
+
 def assert_gaussian_cache_root(value: str, *, expected_kind: str) -> Path:
     supplied = Path(value)
     if not supplied.is_absolute() or supplied.is_symlink():
@@ -615,7 +648,8 @@ def build_request(
         "FASTWAM_OSS_OUTPUT_ROOT": str(output),
         "FASTWAM_TASK_CONFIG": TASK,
         "FASTWAM_ARTIFACT_INTEGRITY_MODE": "metadata_no_hash",
-        "FASTWAM_PYTHON": "/cpfs/user/chengjuntao/venvs/fastwam-gaudp-py310-20260802/bin/python",
+        "FASTWAM_PYTHON": str(PINNED_PYTHON),
+        "FASTWAM_PYTHON_TARGET": str(PINNED_PYTHON_TARGET),
         "FASTWAM_DATASET_ROOT": "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot",
         "FASTWAM_INITIAL_CHECKPOINT": (
             "/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-"
@@ -686,6 +720,15 @@ def validate_request(
 ) -> Any:
     if body.get("WorkspaceId") != WORKSPACE_ID or body.get("ResourceId") != RESOURCE_ID:
         raise RuntimeError("workspace/resource mismatch")
+    if (
+        body.get("Accessibility") != "PRIVATE"
+        or body.get("CustomEnvs") != []
+        or body.get("JobType") != "PyTorchJob"
+        or body.get("Priority") != 1
+        or body.get("JobMaxRunningTimeMinutes") != 720
+        or body.get("SuccessPolicy") != "AllWorkers"
+    ):
+        raise RuntimeError("job-level execution contract mismatch")
     specs = body.get("JobSpecs") or []
     if len(specs) != 1:
         raise RuntimeError("request must have exactly one job spec")
@@ -708,6 +751,8 @@ def validate_request(
         "FASTWAM_TASK_CONFIG": TASK,
         "FASTWAM_ARTIFACT_INTEGRITY_MODE": "metadata_no_hash",
         "FASTWAM_DATASET_ROOT": "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot",
+        "FASTWAM_PYTHON": str(PINNED_PYTHON),
+        "FASTWAM_PYTHON_TARGET": str(PINNED_PYTHON_TARGET),
         "NPROC_PER_NODE": "8",
     }
     for name, expected in exact_env.items():
@@ -752,6 +797,7 @@ def validate_request(
     if not tag or envs.get("FASTWAM_OSS_OUTPUT_ROOT") != expected_output:
         raise RuntimeError("submission tag and output identity mismatch")
     if validate_live_inputs:
+        assert_pinned_python()
         source_root = assert_source_root(str(envs.get("FASTWAM_SOURCE_ROOT") or ""))
         assert_vae_source(str(VAE_SOURCE))
         stats_source = assert_stats_source(
@@ -953,22 +999,83 @@ def requested_identity_subset(observed: Any, requested: Any) -> bool:
             requested_identity_subset(actual, wanted)
             for actual, wanted in zip(observed, requested)
         )
-    return observed == requested
+    return type(observed) is type(requested) and observed == requested
+
+
+def custom_env_projection_matches(job: dict[str, Any], request: dict[str, Any]) -> bool:
+    """Accept only PAI's observed public projection of the requested Envs map."""
+
+    requested_envs = request.get("Envs")
+    observed_custom = job.get("CustomEnvs")
+    if request.get("CustomEnvs") != [] or not isinstance(requested_envs, dict):
+        return False
+    if not isinstance(observed_custom, list) or len(observed_custom) != len(requested_envs):
+        return False
+    projection: dict[str, Any] = {}
+    for item in observed_custom:
+        if not isinstance(item, dict) or set(item) != {"Key", "Value", "Visible"}:
+            return False
+        key = item.get("Key")
+        if not isinstance(key, str) or key in projection or item.get("Visible") != "public":
+            return False
+        projection[key] = item.get("Value")
+    return projection == requested_envs
+
+
+def datasource_projection_matches(job: dict[str, Any], request: dict[str, Any]) -> bool:
+    """Accept only the exact GetJob datasource projection observed from PAI."""
+
+    requested_sources = request.get("DataSources")
+    observed_sources = job.get("DataSources")
+    if not isinstance(requested_sources, list) or not isinstance(observed_sources, list):
+        return False
+    if len(requested_sources) != len(observed_sources):
+        return False
+    for observed, requested in zip(observed_sources, requested_sources):
+        if (
+            not isinstance(requested, dict)
+            or set(requested) != {"DataSourceId", "MountAccess", "MountPath"}
+            or requested.get("MountAccess") not in {"RO", "RW"}
+            or not isinstance(observed, dict)
+            or set(observed) != {"DataSourceId", "MountPath", "Uri"}
+            or observed.get("DataSourceId") != requested.get("DataSourceId")
+            or observed.get("MountPath") != requested.get("MountPath")
+            or observed.get("Uri") != ""
+        ):
+            return False
+    return True
 
 
 def exact_identity(job: dict[str, Any], request: dict[str, Any]) -> bool:
-    exact_keys = (
-        "Accessibility", "CustomEnvs", "DataSources", "Description", "DisplayName",
-        "Envs", "JobMaxRunningTimeMinutes", "JobSpecs", "JobType", "Priority",
-        "Settings", "SuccessPolicy", "UserCommand",
-    )
-    return (
-        str(job.get("WorkspaceId") or "") == str(request.get("WorkspaceId") or "")
-        and str(job.get("ResourceId") or "") == str(request.get("ResourceId") or "")
-        and all(
-            key in job and requested_identity_subset(job[key], request[key])
-            for key in exact_keys
-        )
+    """Match one frozen request under the closed, observed PAI GetJob projection."""
+
+    if not isinstance(job, dict) or not isinstance(request, dict):
+        return False
+    if (
+        not requested_identity_subset(job.get("WorkspaceId"), request.get("WorkspaceId"))
+        or not requested_identity_subset(job.get("ResourceId"), request.get("ResourceId"))
+        or not custom_env_projection_matches(job, request)
+        or not datasource_projection_matches(job, request)
+    ):
+        return False
+
+    # The service omitted exactly these two frozen request fields in all three
+    # observed Gate2 responses.  If it ever returns either field, its value must
+    # still match; no default is synthesized into the observed response.
+    omitted_by_service = {"JobMaxRunningTimeMinutes", "SuccessPolicy"}
+    if not omitted_by_service.issubset(request):
+        return False
+    for key in omitted_by_service:
+        if key in job and not requested_identity_subset(job[key], request[key]):
+            return False
+
+    special = {
+        "WorkspaceId", "ResourceId", "CustomEnvs", "DataSources", *omitted_by_service
+    }
+    return all(
+        key in job and requested_identity_subset(job[key], value)
+        for key, value in request.items()
+        if key not in special
     )
 
 

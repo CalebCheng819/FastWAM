@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import runpy
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,9 +20,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 LAUNCHER = HERE / "submit_gate2.py"
 R3_LAUNCHER = HERE / "submit_gate2_r3.py"
+R4_LAUNCHER = HERE / "submit_gate2_r4.py"
 RUNTIME = HERE / "runtime.sh"
 PUBLISHER = HERE / "publish_gate2.py"
 R3_WRAPPER = HERE / "submit_from_ssh970_r3.sh"
+R4_WRAPPER = HERE / "submit_from_ssh970_r4.sh"
 
 
 def load_launcher():
@@ -45,6 +48,47 @@ def load_r3_controller():
         sys.modules.pop("submit_gate2", None)
         if previous is not None:
             sys.modules["submit_gate2"] = previous
+
+
+def load_r4_controller():
+    previous = sys.modules.pop("submit_gate2", None)
+    sys.path.insert(0, str(HERE))
+    try:
+        namespace = runpy.run_path(str(R4_LAUNCHER))
+        return namespace["controller"]
+    finally:
+        sys.path.remove(str(HERE))
+        sys.modules.pop("submit_gate2", None)
+        if previous is not None:
+            sys.modules["submit_gate2"] = previous
+
+
+def observed_getjob_shape(request: dict) -> dict:
+    """Identity-relevant shape observed for failed job dlchdvsayhmjbn2w."""
+
+    observed = copy.deepcopy(request)
+    observed["JobId"] = "dlchdvsayhmjbn2w"
+    observed["Status"] = "Failed"
+    observed.pop("JobMaxRunningTimeMinutes")
+    observed.pop("SuccessPolicy")
+    observed["CustomEnvs"] = [
+        {"Key": key, "Value": value, "Visible": "public"}
+        for key, value in reversed(list(request["Envs"].items()))
+    ]
+    observed["DataSources"] = [
+        {
+            "DataSourceId": item["DataSourceId"],
+            "MountPath": item["MountPath"],
+            "Uri": "",
+        }
+        for item in request["DataSources"]
+    ]
+    observed["Settings"]["ServerManagedSetting"] = True
+    observed["JobSpecs"][0].update(
+        {"AssignNodeSpec": {}, "EcsSpec": {}, "ImageConfig": {}}
+    )
+    observed["JobSpecs"][0]["ResourceConfig"]["GPUType"] = ""
+    return observed
 
 
 class ControllerStateTest(unittest.TestCase):
@@ -93,6 +137,90 @@ class ControllerStateTest(unittest.TestCase):
             'exec "${CONTROL_PYTHON}" -B "${SCRIPT_DIR}/submit_gate2_r3.py" "$@"',
             wrapper,
         )
+
+    def test_r4_has_new_identity_wrapper_and_no_r3_attempt_reuse(self) -> None:
+        module = load_r4_controller()
+        expected = (
+            "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-"
+            "R4-S42-20260811"
+        )
+        retired_attempt = "7bcd3b16-d73d-4538-add9-394276b9f15f"
+        retired_job = "dlchdvsayhmjbn2w"
+        wrapper = R4_WRAPPER.read_text(encoding="utf-8")
+        launcher = R4_LAUNCHER.read_text(encoding="utf-8")
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        self.assertEqual(module.EXPERIMENT_ID, expected)
+        self.assertEqual(module.SUBMISSION_TAG_PREFIX, "fastwam-gate2-nohash-r4-s42")
+        self.assertEqual(module.DISPLAY_NAME_PREFIX, "fw-g2-nh-r4-s42")
+        self.assertEqual(module.CONTROL_ENTRYPOINT, "submit_from_ssh970_r4.sh")
+        self.assertIn(f'EXPECTED_EXPERIMENT="{expected}"', runtime)
+        self.assertIn('[[ -z "${SSH_CONNECTION:-}" ]]', wrapper)
+        self.assertIn('CONTROL_PYTHON_TARGET="/usr/local/bin/python3.12"', wrapper)
+        self.assertIn('[[ ! -L "${CONTROL_PYTHON}"', wrapper)
+        self.assertIn('realpath -e -- "${CONTROL_PYTHON}"', wrapper)
+        self.assertIn(
+            '"${CONTROL_PYTHON_REAL}" != "${CONTROL_PYTHON_TARGET}"', wrapper
+        )
+        self.assertIn('-L "${CONTROL_PYTHON_TARGET}"', wrapper)
+        self.assertIn(
+            "import alibabacloud_credentials,alibabacloud_pai_dlc20201203,"
+            "alibabacloud_tea_openapi",
+            wrapper,
+        )
+        self.assertIn(
+            'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/submit_gate2_r4.py" "$@"',
+            wrapper,
+        )
+        for retired in (retired_attempt, retired_job):
+            self.assertNotIn(retired, wrapper)
+            self.assertNotIn(retired, launcher)
+            self.assertNotIn(retired, runtime)
+
+        expected_source = Path(
+            "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
+            "fastwam-action-n234-formal-20260811-r3"
+        )
+        self.assertEqual(module.APPROVED_SOURCE_ROOT, expected_source)
+        body = module.build_request(
+            expected_source,
+            Path("/oss-chengjuntao/artifacts/r4-controller-test-stats.json"),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r4-controller-test-primary"
+            ),
+            Path(
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "r4-controller-test-fallback"
+            ),
+            "87654321-4321-4123-8123-cba987654321",
+            trusted_runtime_bytes=b"r4-controller-test-runtime\n",
+        )
+        module.validate_request(body, validate_live_inputs=False)
+        self.assertEqual(body["Envs"]["FASTWAM_EXPERIMENT_ID"], expected)
+        self.assertIn("fastwam-gate2-nohash-r4-s42-", body["Envs"]["FASTWAM_SUBMISSION_TAG"])
+        self.assertNotIn("r3", body["Envs"]["FASTWAM_OSS_OUTPUT_ROOT"].lower())
+
+        body["Envs"]["FASTWAM_SOURCE_ROOT"] = str(expected_source.with_name("retired-r2"))
+        with self.assertRaisesRegex(RuntimeError, "exact approved snapshot"):
+            module.validate_request(body, validate_live_inputs=False)
+
+    def test_r4_launcher_imports_exact_sibling_under_isolated_python(self) -> None:
+        launcher = R4_LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn('Path(__file__).resolve(strict=True).parent', launcher)
+        self.assertIn('_HERE / "submit_gate2.py"', launcher)
+        self.assertIn("spec_from_file_location", launcher)
+        self.assertNotIn("import submit_gate2 as controller", launcher)
+        with tempfile.TemporaryDirectory(prefix="gate2-r4-isolated-cwd-") as cwd:
+            completed = subprocess.run(
+                [sys.executable, "-B", "-I", str(R4_LAUNCHER), "--help"],
+                cwd=cwd,
+                env={"PATH": os.environ.get("PATH", "")},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("usage:", completed.stdout.lower())
 
     def test_durable_record_is_immutable_and_exact(self) -> None:
         path = self.module.prepared_binding_path()
@@ -146,27 +274,34 @@ class ControllerStateTest(unittest.TestCase):
         self.assertNotIn("expected_existing_job_id", observed)
 
     def test_exact_identity_covers_critical_request_fields(self) -> None:
-        observed = copy.deepcopy(self.body)
-        observed["ServerManagedStatus"] = "Creating"
-        observed["Settings"]["ServerManagedSetting"] = True
-        observed["JobSpecs"][0]["ServerManagedSpecField"] = "accepted"
+        observed = observed_getjob_shape(self.body)
         self.assertTrue(self.module.exact_identity(observed, self.body))
-        mutations = (
-            ("Envs", "FASTWAM_INITIAL_CHECKPOINT"),
-            ("Envs", self.module.TRUSTED_RUNTIME_B64_ENV),
-            ("DataSources", None),
-            ("JobSpecs", None),
-            ("Settings", None),
-            ("UserCommand", None),
-        )
-        for top, nested in mutations:
+
+        for nested in (
+            "FASTWAM_INITIAL_CHECKPOINT",
+            self.module.TRUSTED_RUNTIME_B64_ENV,
+        ):
             changed = copy.deepcopy(observed)
-            if nested is None:
-                changed[top] = "changed"
-            else:
-                changed[top][nested] = "changed"
-            with self.subTest(field=f"{top}.{nested}" if nested else top):
+            changed["Envs"][nested] = "changed"
+            with self.subTest(field=f"Envs.{nested}"):
                 self.assertFalse(self.module.exact_identity(changed, self.body))
+
+        direct_mutations = (
+            ("UserCommand", "changed"),
+            ("JobType", "changed"),
+            ("Priority", 99),
+            ("Accessibility", "PUBLIC"),
+            ("WorkspaceId", int(self.body["WorkspaceId"])),
+        )
+        for field, value in direct_mutations:
+            changed = copy.deepcopy(observed)
+            changed[field] = value
+            with self.subTest(field=field):
+                self.assertFalse(self.module.exact_identity(changed, self.body))
+
+        changed = copy.deepcopy(observed)
+        changed["Settings"]["Tags"]["submission_tag"] = "changed"
+        self.assertFalse(self.module.exact_identity(changed, self.body))
 
         critical_spec_fields = (
             "Image", "Type", "PodCount", "ResourceConfig", "RestartPolicy",
@@ -177,6 +312,78 @@ class ControllerStateTest(unittest.TestCase):
             changed["JobSpecs"][0][field] = "changed"
             with self.subTest(field=f"JobSpecs.{field}"):
                 self.assertFalse(self.module.exact_identity(changed, self.body))
+
+        for field, value in (("DataSourceId", "changed"), ("MountPath", "/changed"), ("Uri", "oss://unexpected")):
+            changed = copy.deepcopy(observed)
+            changed["DataSources"][0][field] = value
+            with self.subTest(field=f"DataSources.{field}"):
+                self.assertFalse(self.module.exact_identity(changed, self.body))
+        changed = copy.deepcopy(observed)
+        changed["DataSources"].reverse()
+        self.assertFalse(self.module.exact_identity(changed, self.body))
+
+        custom_env_mutations = []
+        missing = copy.deepcopy(observed)
+        missing["CustomEnvs"].pop()
+        custom_env_mutations.append(missing)
+        duplicate = copy.deepcopy(observed)
+        duplicate["CustomEnvs"][-1] = copy.deepcopy(duplicate["CustomEnvs"][0])
+        custom_env_mutations.append(duplicate)
+        wrong_value = copy.deepcopy(observed)
+        wrong_value["CustomEnvs"][0]["Value"] = "changed"
+        custom_env_mutations.append(wrong_value)
+        private = copy.deepcopy(observed)
+        private["CustomEnvs"][0]["Visible"] = "private"
+        custom_env_mutations.append(private)
+        extra_key = copy.deepcopy(observed)
+        extra_key["CustomEnvs"][0]["ServerField"] = "unexpected"
+        custom_env_mutations.append(extra_key)
+        for index, changed in enumerate(custom_env_mutations):
+            with self.subTest(custom_env_mutation=index):
+                self.assertFalse(self.module.exact_identity(changed, self.body))
+
+        # The service may omit only these two fields.  If returned, the exact
+        # frozen value is still required; no response-side default is inferred.
+        for field in ("JobMaxRunningTimeMinutes", "SuccessPolicy"):
+            returned = copy.deepcopy(observed)
+            returned[field] = self.body[field]
+            self.assertTrue(self.module.exact_identity(returned, self.body))
+            returned[field] = "changed"
+            self.assertFalse(self.module.exact_identity(returned, self.body))
+
+        future_request = copy.deepcopy(self.body)
+        future_request["FutureFrozenField"] = {"Required": True}
+        self.assertFalse(self.module.exact_identity(observed, future_request))
+        future_observed = copy.deepcopy(observed)
+        future_observed["FutureFrozenField"] = {"Required": True, "ServerAdded": 1}
+        self.assertTrue(self.module.exact_identity(future_observed, future_request))
+        future_observed["FutureFrozenField"]["Required"] = False
+        self.assertFalse(self.module.exact_identity(future_observed, future_request))
+
+        strict_scalar_request = copy.deepcopy(self.body)
+        strict_scalar_request["FutureFrozenField"] = {"Required": 1}
+        strict_scalar_observed = copy.deepcopy(observed)
+        strict_scalar_observed["FutureFrozenField"] = {"Required": True}
+        self.assertFalse(
+            self.module.exact_identity(strict_scalar_observed, strict_scalar_request)
+        )
+
+    def test_validate_request_freezes_service_omitted_fields(self) -> None:
+        for field, changed_value in (
+            ("JobMaxRunningTimeMinutes", 721),
+            ("SuccessPolicy", "ChiefWorker"),
+            ("CustomEnvs", [{"Key": "unexpected"}]),
+        ):
+            changed = copy.deepcopy(self.body)
+            changed[field] = changed_value
+            with self.subTest(field=field, mutation="changed"):
+                with self.assertRaisesRegex(RuntimeError, "job-level execution contract"):
+                    self.module.validate_request(changed, validate_live_inputs=False)
+            changed = copy.deepcopy(self.body)
+            changed.pop(field)
+            with self.subTest(field=field, mutation="removed"):
+                with self.assertRaisesRegex(RuntimeError, "job-level execution contract"):
+                    self.module.validate_request(changed, validate_live_inputs=False)
 
     def test_request_carries_exact_trusted_runtime_bytes(self) -> None:
         envs = self.body["Envs"]
@@ -199,14 +406,18 @@ class ControllerStateTest(unittest.TestCase):
             self.module.validate_request(changed, validate_live_inputs=False)
 
     def test_request_respects_env_limit_and_bootstrap_uses_allowlist(self) -> None:
-        self.assertLessEqual(len(self.body["Envs"]), 20)
+        self.assertEqual(len(self.body["Envs"]), 20)
         command = self.body["UserCommand"]
-        self.assertIn("/usr/bin/python3 -I -S", command)
+        self.assertIn(f"exec {self.module.PINNED_PYTHON} -B -I -S", command)
+        self.assertIn(f"readlink -f -- {self.module.PINNED_PYTHON}", command)
+        self.assertIn(str(self.module.PINNED_PYTHON_TARGET), command)
+        self.assertNotIn("/usr/bin/python3", command)
         self.assertEqual(command.count("'"), 2)
         self.assertTrue(command.startswith("unset BASH_ENV ENV PYTHONHOME"))
         self.assertIn("LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT", command)
         self.assertIn("clean={key:os.environ[key] for key in allowed", command)
         self.assertNotIn("clean=dict(os.environ)", command)
+        self.assertIn("FASTWAM_PYTHON_TARGET", self.module.BOOTSTRAP_ALLOWED_ENV)
         for forbidden in (
             "LD_AUDIT",
             "LD_LIBRARY_PATH",
@@ -236,7 +447,10 @@ class ControllerStateTest(unittest.TestCase):
             '"vae_staging.json": stage / "vae_staging.json"',
             PUBLISHER.read_text(encoding="utf-8"),
         )
-        self.assertIn('/usr/bin/python3 -I -S - "${TRUSTED_RUNTIME_PATH}"', text)
+        self.assertIn('"${FASTWAM_PYTHON}" -B -I -S - "${TRUSTED_RUNTIME_PATH}"', text)
+        self.assertIn('FASTWAM_PYTHON_TARGET', text)
+        self.assertIn('RESOLVED_PYTHON="$(readlink -f -- "${FASTWAM_PYTHON}")"', text)
+        self.assertNotIn('/usr/bin/python3', text)
 
     def test_source_content_binding_detects_same_size_same_mtime_replacement(self) -> None:
         source = Path(self.temporary.name) / "source-binding"
@@ -344,6 +558,7 @@ class ControllerStateTest(unittest.TestCase):
         module.VAE_SOURCE = fixture_root / "oss" / "model-cache" / "vae.safetensors"
         module.VAE_SOURCE_BYTES = 16
         module.APPROVED_SOURCE_ROOT = None
+        module.assert_pinned_python = lambda: module.PINNED_PYTHON_TARGET
 
         source = module.SOURCE_PREFIX / "explicit-unique-snapshot-20260811"
         required_files = (
@@ -438,7 +653,7 @@ class ControllerStateTest(unittest.TestCase):
                 return FakeResponse()
 
         client = FakeClient()
-        observed = copy.deepcopy(self.body)
+        observed = observed_getjob_shape(self.body)
         observed.update({"JobId": "dlc-gate2-test", "Status": "Creating"})
         snapshot = {
             "active_jobs": [

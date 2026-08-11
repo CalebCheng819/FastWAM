@@ -66,7 +66,7 @@ PAI, create a DLC job, stop E38, or touch E38 artifacts.
 
 ## Single-submit protocol
 
-`submit_from_ssh970_r3.sh` is the only R3 entrypoint.  It must be run inside the
+`submit_from_ssh970_r4.sh` is the only R4 entrypoint.  It must be run inside the
 SSH session reached through `ssh root@123.57.187.96 -p 970`, and holds local
 `flock` file descriptor 9 for the whole controller process.  This local lock
 serializes one SSH970 instance but is not the cross-node safety boundary.  The
@@ -74,7 +74,7 @@ mutable POSIX state and lock live on the SSH970 node-local ext4 filesystem:
 
 ```text
 /tmp/fastwam-dlc-submit-state/workspace-270969/
-  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R3-S42-20260809/
+  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R4-S42-20260811/
     <attempt-uuid>/
       request.json
       state.json
@@ -87,7 +87,7 @@ append-only ledger lives on OSS:
 
 ```text
 /oss-chengjuntao/artifacts/fastwam-dlc-submit-ledger/workspace-270969/
-  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R3-S42-20260809/
+  FASTWAM-MR-FT-ACT-N2-PLACEFOOD-PAID-GATE2-NOHASH-R4-S42-20260811/
     prepared-binding.json
     submission-latch.json
     create-response.json       # only if a response was received
@@ -143,7 +143,27 @@ workspace/resource, output, settings, and exactly one 8-GPU worker.  ACK
 requires an exact `GetJob` readback and is then persisted as an immutable OSS
 acknowledgement.
 
-## R3 sequence (do not execute until the source snapshot is frozen and reviewed)
+## Retired R3 attempt and R4 sequence
+
+R3 is permanently retired.  Its one CreateJob call used attempt
+`7bcd3b16-d73d-4538-add9-394276b9f15f` and created job
+`dlchdvsayhmjbn2w`.  The job was created at 2026-08-11 07:44:00 UTC, its pod
+started at 07:44:13 UTC, and it failed at 07:44:28 UTC with exit reason 127
+because the trusted bootstrap referenced `/usr/bin/python3`, which was absent
+from the DLC image.  It never entered the FastWAM runtime or any training
+world, so this is infrastructure-startup evidence rather than a model, data,
+or training failure.  The R3 latch and attempt must never be submitted again.
+
+R4 has a new experiment ID, submission tag, attempt, output root, and durable
+ledger.  Its bootstrap binds the logical CPFS venv Python to the exact final
+regular interpreter target before execution; the runtime repeats that check.
+ACK reconciliation accepts only the observed PAI GetJob projection: unordered
+public `CustomEnvs` projected exactly from `Envs`, data sources with the same
+order/ID/mount path plus empty `Uri`, server-added JobSpec/Settings fields, and
+omission of `JobMaxRunningTimeMinutes` and `SuccessPolicy`.  All requested
+identity fields and any returned omitted field must still match exactly.
+
+Do not execute R4 until its new source snapshot is frozen and reviewed.
 
 The source snapshot is an explicitly chosen, unique direct child of
 `/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/`.  Its exact path
@@ -161,7 +181,7 @@ same direct-content binding, and compares every staged regular file byte for
 byte with the source.
 
 ```bash
-./submit_from_ssh970_r3.sh prepare \
+./submit_from_ssh970_r4.sh prepare \
   --source-root /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/<unique-snapshot-name> \
   --stats-source /oss-chengjuntao/artifacts/fastwam-nohash-inputs-20260809/fastwam_multi_robot_n234_train_s42_stats_cpfs_nohash_v1.json \
   --gaussian-cache /oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/compact-s42-13x28x40-fp16-meanalpha-v2 \
@@ -172,14 +192,14 @@ byte with the source.
 reviewing its `request.json`, the only submission command is:
 
 ```bash
-./submit_from_ssh970_r3.sh execute --attempt <attempt-uuid>
+./submit_from_ssh970_r4.sh execute --attempt <attempt-uuid>
 ```
 
 If the permanent latch exists, or the recorded phase is anything other than an
 unlatched `PREPARED`, do not run `execute` again.  Use the read-only command:
 
 ```bash
-./submit_from_ssh970_r3.sh reconcile --attempt <attempt-uuid>
+./submit_from_ssh970_r4.sh reconcile --attempt <attempt-uuid>
 ```
 
 No command in this draft stops, deletes, restarts, or otherwise changes E38.

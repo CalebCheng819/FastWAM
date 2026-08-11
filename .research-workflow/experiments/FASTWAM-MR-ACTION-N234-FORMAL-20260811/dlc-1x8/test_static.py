@@ -46,6 +46,34 @@ def build_test_request(module, member: str) -> dict:
     )
 
 
+def observed_getjob_shape(request: dict) -> dict:
+    """Exact identity-relevant response projection observed from PAI GetJob."""
+
+    observed = copy.deepcopy(request)
+    observed["JobId"] = "dlc-observed-fixture"
+    observed["Status"] = "Running"
+    observed.pop("JobMaxRunningTimeMinutes")
+    observed.pop("SuccessPolicy")
+    observed["CustomEnvs"] = [
+        {"Key": key, "Value": value, "Visible": "public"}
+        for key, value in reversed(list(request["Envs"].items()))
+    ]
+    observed["DataSources"] = [
+        {
+            "DataSourceId": source["DataSourceId"],
+            "MountPath": source["MountPath"],
+            "Uri": "",
+        }
+        for source in request["DataSources"]
+    ]
+    observed["Settings"]["ServerManagedSetting"] = True
+    observed["JobSpecs"][0].update(
+        {"AssignNodeSpec": {}, "EcsSpec": {}, "ImageConfig": {}}
+    )
+    observed["JobSpecs"][0]["ResourceConfig"]["GPUType"] = ""
+    return observed
+
+
 def assert_request(module, member: str) -> None:
     spec = module.MEMBERS[member]
     request = build_test_request(module, member)
@@ -134,6 +162,11 @@ def test_controller_structure(module) -> None:
     assert str(module.PINNED_PYTHON_TARGET).endswith(
         "/runtimes/uv-python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10"
     )
+    bootstrap = module.TRUSTED_BOOTSTRAP_COMMAND
+    assert f"exec {module.PINNED_PYTHON} -B -I -S" in bootstrap
+    assert f"readlink -f -- {module.PINNED_PYTHON}" in bootstrap
+    assert str(module.PINNED_PYTHON_TARGET) in bootstrap
+    assert "/usr/bin/python3" not in bootstrap
     first = SimpleNamespace(st_mode=0o100600, st_size=17, st_mtime_ns=23,
                             st_dev=1, st_ino=2)
     remounted = SimpleNamespace(st_mode=0o100600, st_size=17, st_mtime_ns=23,
@@ -200,6 +233,110 @@ def test_controller_structure(module) -> None:
         pass
     else:
         raise AssertionError("stale platform quota evidence must not authorize prepare")
+
+    request = build_test_request(module, "n2")
+    observed = observed_getjob_shape(request)
+    assert module.exact_job(observed, request)
+
+    direct_mutations = (
+        ("UserCommand", "changed"),
+        ("Accessibility", "PUBLIC"),
+        ("JobType", "changed"),
+        ("Priority", 99),
+    )
+    for field, value in direct_mutations:
+        changed = copy.deepcopy(observed)
+        changed[field] = value
+        assert not module.exact_job(changed, request)
+
+    changed = copy.deepcopy(observed)
+    changed["Envs"]["FASTWAM_INITIAL_CHECKPOINT"] = "changed"
+    assert not module.exact_job(changed, request)
+    changed = copy.deepcopy(observed)
+    changed["Settings"]["Tags"]["run_id"] = "changed"
+    assert not module.exact_job(changed, request)
+    changed = copy.deepcopy(observed)
+    changed["JobSpecs"][0]["Image"] = "changed"
+    assert not module.exact_job(changed, request)
+    changed = copy.deepcopy(observed)
+    changed["JobSpecs"][0]["ResourceConfig"]["GPU"] = "7"
+    assert not module.exact_job(changed, request)
+    changed = copy.deepcopy(observed)
+    changed["WorkspaceId"] = int(request["WorkspaceId"])
+    assert not module.exact_job(changed, request)
+
+    for field, value in (
+        ("DataSourceId", "changed"),
+        ("MountPath", "/changed"),
+        ("Uri", "oss://unexpected"),
+    ):
+        changed = copy.deepcopy(observed)
+        changed["DataSources"][0][field] = value
+        assert not module.exact_job(changed, request)
+    changed = copy.deepcopy(observed)
+    changed["DataSources"].reverse()
+    assert not module.exact_job(changed, request)
+
+    custom_mutations = []
+    changed = copy.deepcopy(observed)
+    changed["CustomEnvs"].pop()
+    custom_mutations.append(changed)
+    changed = copy.deepcopy(observed)
+    changed["CustomEnvs"][-1] = copy.deepcopy(changed["CustomEnvs"][0])
+    custom_mutations.append(changed)
+    changed = copy.deepcopy(observed)
+    changed["CustomEnvs"][0]["Value"] = "changed"
+    custom_mutations.append(changed)
+    changed = copy.deepcopy(observed)
+    changed["CustomEnvs"][0]["Visible"] = "private"
+    custom_mutations.append(changed)
+    changed = copy.deepcopy(observed)
+    changed["CustomEnvs"][0]["Unexpected"] = True
+    custom_mutations.append(changed)
+    assert all(not module.exact_job(changed, request) for changed in custom_mutations)
+
+    for field in ("JobMaxRunningTimeMinutes", "SuccessPolicy"):
+        returned = copy.deepcopy(observed)
+        returned[field] = request[field]
+        assert module.exact_job(returned, request)
+        returned[field] = "changed"
+        assert not module.exact_job(returned, request)
+
+        for mutation in ("removed", "changed"):
+            invalid_request = copy.deepcopy(request)
+            if mutation == "removed":
+                invalid_request.pop(field)
+            else:
+                invalid_request[field] = "changed"
+            try:
+                module.validate_request("n2", invalid_request)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(f"request {field} {mutation} must fail closed")
+
+    invalid_request = copy.deepcopy(request)
+    invalid_request["CustomEnvs"] = [{"Key": "unexpected"}]
+    try:
+        module.validate_request("n2", invalid_request)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("request CustomEnvs must remain exactly empty")
+
+    future_request = copy.deepcopy(request)
+    future_request["FutureFrozenField"] = {"Required": True}
+    assert not module.exact_job(observed, future_request)
+    future_observed = copy.deepcopy(observed)
+    future_observed["FutureFrozenField"] = {"Required": True, "ServerAdded": 1}
+    assert module.exact_job(future_observed, future_request)
+    future_observed["FutureFrozenField"]["Required"] = False
+    assert not module.exact_job(future_observed, future_request)
+    strict_scalar_request = copy.deepcopy(request)
+    strict_scalar_request["FutureFrozenField"] = {"Required": 1}
+    strict_scalar_observed = copy.deepcopy(observed)
+    strict_scalar_observed["FutureFrozenField"] = {"Required": True}
+    assert not module.exact_job(strict_scalar_observed, strict_scalar_request)
 
 
 def test_runtime_structure() -> None:
@@ -327,7 +464,11 @@ def main() -> None:
         "20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python"
     )
     assert f"CONTROL_PYTHON={control_python}" in wrapper
+    assert "CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12" in wrapper
+    assert '[[ -L "${CONTROL_PYTHON}" && -x "${CONTROL_PYTHON}" ]]' in wrapper
     assert 'realpath -e -- "${CONTROL_PYTHON}"' in wrapper
+    assert '== "${CONTROL_PYTHON_TARGET}"' in wrapper
+    assert '-L "${CONTROL_PYTHON_TARGET}"' in wrapper
     assert "import alibabacloud_credentials,alibabacloud_pai_dlc20201203" in wrapper
     assert "export PYTHONDONTWRITEBYTECODE=1" in wrapper
     assert 'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/controller.py" "$@"' in wrapper
