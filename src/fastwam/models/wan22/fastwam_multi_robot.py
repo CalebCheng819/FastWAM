@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+import math
+import os
+import stat
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
@@ -29,7 +33,29 @@ class FastWAMMultiRobot(FastWAM):
     video/action flow-matching objective.
     """
 
-    def __init__(self, *args, training_mode: str = "action_only_cache", **kwargs):
+    def __init__(
+        self,
+        *args,
+        training_mode: str = "action_only_cache",
+        b4_aux_loss_enabled: bool = False,
+        b4_arm_huber_loss_weight: float = 0.0,
+        b4_gripper_event_loss_weight: float = 0.0,
+        b4_contact_intent_proxy_loss_weight: float = 0.0,
+        b4_arm_huber_beta: float = 1.0,
+        b4_first_steps: int = 5,
+        b4_first_steps_weight: float = 1.0,
+        b4_gripper_dim: int = -1,
+        b4_gripper_action_mean: Optional[float] = None,
+        b4_gripper_action_std: Optional[float] = None,
+        b4_event_delta_threshold: float = 0.05,
+        b4_stable_closed_command_threshold: float = -0.8,
+        b4_closed_command_threshold: float = 0.0,
+        b4_stable_steps: int = 4,
+        b4_event_temperature: float = 0.05,
+        b4_closed_temperature: float = 0.1,
+        b4_background_weight: float = 0.25,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         if training_mode not in {"action_only_cache", "joint"}:
             raise ValueError(
@@ -45,8 +71,103 @@ class FastWAMMultiRobot(FastWAM):
         self._trainable_scope = "dit"
         self._loaded_base_checkpoint: Optional[str] = None
         self._loaded_base_checkpoint_sha256: Optional[str] = None
-        self._loaded_base_checkpoint_descriptor: Optional[dict[str, str]] = None
+        self._loaded_base_checkpoint_descriptor: Optional[dict[str, Any]] = None
         self._loaded_base_checkpoint_can_restore_sparse = False
+
+        self.b4_aux_loss_enabled = bool(b4_aux_loss_enabled)
+        self.b4_arm_huber_loss_weight = float(b4_arm_huber_loss_weight)
+        self.b4_gripper_event_loss_weight = float(b4_gripper_event_loss_weight)
+        self.b4_contact_intent_proxy_loss_weight = float(
+            b4_contact_intent_proxy_loss_weight
+        )
+        if self.b4_arm_huber_loss_weight < 0.0:
+            raise ValueError("b4_arm_huber_loss_weight must be non-negative")
+        if self.b4_gripper_event_loss_weight < 0.0:
+            raise ValueError("b4_gripper_event_loss_weight must be non-negative")
+        if self.b4_contact_intent_proxy_loss_weight < 0.0:
+            raise ValueError("b4_contact_intent_proxy_loss_weight must be non-negative")
+        if not self.b4_aux_loss_enabled and (
+            self.b4_arm_huber_loss_weight > 0.0
+            or self.b4_gripper_event_loss_weight > 0.0
+            or self.b4_contact_intent_proxy_loss_weight > 0.0
+        ):
+            raise ValueError("B4 auxiliary loss weights require b4_aux_loss_enabled=true")
+        if self.b4_aux_loss_enabled and (
+            self.b4_arm_huber_loss_weight
+            + self.b4_gripper_event_loss_weight
+            + self.b4_contact_intent_proxy_loss_weight
+            <= 0.0
+        ):
+            raise ValueError("Enabled B4 auxiliary loss requires at least one positive loss weight")
+
+        action_dim = int(self.action_expert.action_dim)
+        gripper_dim = int(b4_gripper_dim)
+        if gripper_dim < 0:
+            gripper_dim += action_dim
+        if not 0 <= gripper_dim < action_dim:
+            raise ValueError(
+                f"b4_gripper_dim={b4_gripper_dim} is invalid for action_dim={action_dim}"
+            )
+        self.b4_gripper_dim = gripper_dim
+        if action_dim <= 1 and self.b4_arm_huber_loss_weight > 0.0:
+            raise ValueError("B4 arm Huber loss requires at least one non-gripper action dimension")
+
+        if self.b4_aux_loss_enabled and (
+            b4_gripper_action_mean is None or b4_gripper_action_std is None
+        ):
+            raise ValueError(
+                "Enabled B4 auxiliary loss requires explicit gripper_action_mean/std "
+                "from the action normalization statistics"
+            )
+        self.b4_gripper_action_mean = float(
+            0.0 if b4_gripper_action_mean is None else b4_gripper_action_mean
+        )
+        self.b4_gripper_action_std = float(
+            1.0 if b4_gripper_action_std is None else b4_gripper_action_std
+        )
+        self.b4_arm_huber_beta = float(b4_arm_huber_beta)
+        self.b4_first_steps = int(b4_first_steps)
+        self.b4_first_steps_weight = float(b4_first_steps_weight)
+        self.b4_event_delta_threshold = float(b4_event_delta_threshold)
+        self.b4_stable_closed_command_threshold = float(
+            b4_stable_closed_command_threshold
+        )
+        self.b4_closed_command_threshold = float(b4_closed_command_threshold)
+        self.b4_stable_steps = int(b4_stable_steps)
+        self.b4_event_temperature = float(b4_event_temperature)
+        self.b4_closed_temperature = float(b4_closed_temperature)
+        self.b4_background_weight = float(b4_background_weight)
+        finite_values = {
+            "b4_gripper_action_mean": self.b4_gripper_action_mean,
+            "b4_gripper_action_std": self.b4_gripper_action_std,
+            "b4_arm_huber_beta": self.b4_arm_huber_beta,
+            "b4_first_steps_weight": self.b4_first_steps_weight,
+            "b4_event_delta_threshold": self.b4_event_delta_threshold,
+            "b4_stable_closed_command_threshold": self.b4_stable_closed_command_threshold,
+            "b4_closed_command_threshold": self.b4_closed_command_threshold,
+            "b4_event_temperature": self.b4_event_temperature,
+            "b4_closed_temperature": self.b4_closed_temperature,
+            "b4_background_weight": self.b4_background_weight,
+        }
+        invalid_finite = [name for name, value in finite_values.items() if not math.isfinite(value)]
+        if invalid_finite:
+            raise ValueError(f"B4 auxiliary loss values must be finite: {invalid_finite}")
+        if self.b4_gripper_action_std <= 0.0:
+            raise ValueError("b4_gripper_action_std must be positive")
+        if self.b4_arm_huber_beta <= 0.0:
+            raise ValueError("b4_arm_huber_beta must be positive")
+        if self.b4_first_steps < 0:
+            raise ValueError("b4_first_steps must be non-negative")
+        if self.b4_first_steps_weight < 1.0:
+            raise ValueError("b4_first_steps_weight must be at least 1")
+        if self.b4_event_delta_threshold <= 0.0:
+            raise ValueError("b4_event_delta_threshold must be positive")
+        if self.b4_stable_steps < 2:
+            raise ValueError("b4_stable_steps must be at least 2")
+        if self.b4_event_temperature <= 0.0 or self.b4_closed_temperature <= 0.0:
+            raise ValueError("B4 temperatures must be positive")
+        if not 0.0 < self.b4_background_weight <= 1.0:
+            raise ValueError("b4_background_weight must be in (0, 1]")
 
     @classmethod
     def from_wan22_pretrained(
@@ -72,6 +193,23 @@ class FastWAMMultiRobot(FastWAM):
         action_num_train_timesteps: int = 1000,
         loss_lambda_video: float = 0.0,
         loss_lambda_action: float = 1.0,
+        b4_aux_loss_enabled: bool = False,
+        b4_arm_huber_loss_weight: float = 0.0,
+        b4_gripper_event_loss_weight: float = 0.0,
+        b4_contact_intent_proxy_loss_weight: float = 0.0,
+        b4_arm_huber_beta: float = 1.0,
+        b4_first_steps: int = 5,
+        b4_first_steps_weight: float = 1.0,
+        b4_gripper_dim: int = -1,
+        b4_gripper_action_mean: Optional[float] = None,
+        b4_gripper_action_std: Optional[float] = None,
+        b4_event_delta_threshold: float = 0.05,
+        b4_stable_closed_command_threshold: float = -0.8,
+        b4_closed_command_threshold: float = 0.0,
+        b4_stable_steps: int = 4,
+        b4_event_temperature: float = 0.05,
+        b4_closed_temperature: float = 0.1,
+        b4_background_weight: float = 0.25,
     ) -> "FastWAMMultiRobot":
         if video_dit_config is None or "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config` with `text_dim` is required.")
@@ -128,6 +266,23 @@ class FastWAMMultiRobot(FastWAM):
             action_num_train_timesteps=action_num_train_timesteps,
             loss_lambda_video=loss_lambda_video,
             loss_lambda_action=loss_lambda_action,
+            b4_aux_loss_enabled=b4_aux_loss_enabled,
+            b4_arm_huber_loss_weight=b4_arm_huber_loss_weight,
+            b4_gripper_event_loss_weight=b4_gripper_event_loss_weight,
+            b4_contact_intent_proxy_loss_weight=b4_contact_intent_proxy_loss_weight,
+            b4_arm_huber_beta=b4_arm_huber_beta,
+            b4_first_steps=b4_first_steps,
+            b4_first_steps_weight=b4_first_steps_weight,
+            b4_gripper_dim=b4_gripper_dim,
+            b4_gripper_action_mean=b4_gripper_action_mean,
+            b4_gripper_action_std=b4_gripper_action_std,
+            b4_event_delta_threshold=b4_event_delta_threshold,
+            b4_stable_closed_command_threshold=b4_stable_closed_command_threshold,
+            b4_closed_command_threshold=b4_closed_command_threshold,
+            b4_stable_steps=b4_stable_steps,
+            b4_event_temperature=b4_event_temperature,
+            b4_closed_temperature=b4_closed_temperature,
+            b4_background_weight=b4_background_weight,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -199,6 +354,15 @@ class FastWAMMultiRobot(FastWAM):
             required.add("agent_geometry")
         if self.action_expert.enable_gaussian:
             required.add("agent_gaussian")
+        b4_enabled = bool(getattr(self, "b4_aux_loss_enabled", False))
+        b4_fields = (
+            "b4_target_action_phase",
+            "b4_gripper_closed_target",
+            "b4_gripper_event_target",
+            "b4_stable_contact_proxy",
+        )
+        if b4_enabled:
+            required.update(b4_fields)
         missing = sorted(required - set(sample))
         if missing:
             raise ValueError(f"Missing multi-robot sample fields: {missing}")
@@ -296,6 +460,47 @@ class FastWAMMultiRobot(FastWAM):
                 f"`action_is_pad` must be {(batch_size, num_agents, horizon)}, "
                 f"got {tuple(action_is_pad.shape)}"
             )
+        b4_targets: dict[str, torch.Tensor] = {}
+        if b4_enabled:
+            expected_b4_shape = (batch_size, num_agents, horizon)
+            for field in b4_fields:
+                value = sample[field]
+                if not isinstance(value, torch.Tensor):
+                    raise TypeError(f"`{field}` must be a torch.Tensor, got {type(value)}")
+                if value.shape != expected_b4_shape:
+                    raise ValueError(
+                        f"`{field}` must be {expected_b4_shape}, got {tuple(value.shape)}"
+                    )
+                b4_targets[field] = value
+            for field in ("b4_target_action_phase", "b4_gripper_event_target"):
+                if b4_targets[field].dtype != torch.long:
+                    raise TypeError(f"`{field}` must be int64, got {b4_targets[field].dtype}")
+            for field in ("b4_gripper_closed_target", "b4_stable_contact_proxy"):
+                if not torch.is_floating_point(b4_targets[field]):
+                    raise TypeError(f"`{field}` must be floating point, got {b4_targets[field].dtype}")
+
+            phase = b4_targets["b4_target_action_phase"]
+            event = b4_targets["b4_gripper_event_target"]
+            closed = b4_targets["b4_gripper_closed_target"]
+            stable_proxy = b4_targets["b4_stable_contact_proxy"]
+            if bool(((phase < 0) | (phase > 3)).any().item()):
+                raise ValueError("`b4_target_action_phase` values must be in [0, 3]")
+            if bool(((event < 0) | (event > 2)).any().item()):
+                raise ValueError("`b4_gripper_event_target` values must be in [0, 2]")
+            for field, value in (
+                ("b4_gripper_closed_target", closed),
+                ("b4_stable_contact_proxy", stable_proxy),
+            ):
+                if not bool(torch.isfinite(value).all().item()):
+                    raise ValueError(f"`{field}` contains non-finite values")
+                if bool(((value != 0.0) & (value != 1.0)).any().item()):
+                    raise ValueError(f"`{field}` must contain binary 0/1 targets")
+            if bool((((phase == 1) != (event == 1)) | ((phase == 3) != (event == 2))).any().item()):
+                raise ValueError("B4 phase/event targets are inconsistent")
+            if bool(((phase == 2) != (stable_proxy == 1.0)).any().item()):
+                raise ValueError("B4 stable-closed phase/proxy targets are inconsistent")
+            if bool(((stable_proxy == 1.0) & (closed != 1.0)).any().item()):
+                raise ValueError("B4 stable command proxy requires a closed-command target")
         image_is_pad = sample.get("image_is_pad")
         if image_is_pad is not None and image_is_pad.shape != (batch_size, num_frames):
             raise ValueError(
@@ -313,7 +518,7 @@ class FastWAMMultiRobot(FastWAM):
         input_latents = self._encode_video_latents(input_video, tiled=tiled)
         first_frame_latents = input_latents[:, :, :1]
 
-        return {
+        inputs = {
             "context": context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True),
             "context_mask": context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True),
             "input_latents": input_latents,
@@ -351,6 +556,24 @@ class FastWAMMultiRobot(FastWAM):
                 else image_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
             ),
         }
+        if b4_enabled:
+            inputs.update(
+                {
+                    "b4_target_action_phase": b4_targets["b4_target_action_phase"].to(
+                        device=self.device, dtype=torch.long, non_blocking=True
+                    ),
+                    "b4_gripper_closed_target": b4_targets[
+                        "b4_gripper_closed_target"
+                    ].to(device=self.device, dtype=torch.float32, non_blocking=True),
+                    "b4_gripper_event_target": b4_targets["b4_gripper_event_target"].to(
+                        device=self.device, dtype=torch.long, non_blocking=True
+                    ),
+                    "b4_stable_contact_proxy": b4_targets["b4_stable_contact_proxy"].to(
+                        device=self.device, dtype=torch.float32, non_blocking=True
+                    ),
+                }
+            )
+        return inputs
 
     @staticmethod
     def _multi_robot_attention_layout(
@@ -412,6 +635,325 @@ class FastWAMMultiRobot(FastWAM):
             device=per_sample.device, dtype=per_sample.dtype
         )
         return (per_sample * weight).mean()
+
+    @staticmethod
+    def _masked_per_sample_mean(
+        value: torch.Tensor,
+        valid: torch.Tensor,
+        *,
+        token_weight: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Reduce native ``[B,N,H]`` tokens without padding the agent axis."""
+
+        if value.shape != valid.shape:
+            raise ValueError(
+                f"Masked reduction shape mismatch: value={tuple(value.shape)} "
+                f"valid={tuple(valid.shape)}"
+            )
+        weight = valid.to(dtype=value.dtype)
+        if token_weight is not None:
+            if token_weight.shape != value.shape:
+                raise ValueError(
+                    f"Token weight shape mismatch: value={tuple(value.shape)} "
+                    f"weight={tuple(token_weight.shape)}"
+                )
+            weight = weight * token_weight.to(device=value.device, dtype=value.dtype)
+        reduce_dims = tuple(range(1, value.ndim))
+        numerator = (value * weight).sum(dim=reduce_dims)
+        denominator = weight.sum(dim=reduce_dims).clamp(min=1.0)
+        return numerator / denominator
+
+    def _reconstruct_b4_action_x0(
+        self,
+        *,
+        noisy_action: torch.Tensor,
+        pred_action_velocity: torch.Tensor,
+        timestep_action: torch.Tensor,
+    ) -> torch.Tensor:
+        """Recover normalized clean actions from the continuous-flow prediction."""
+
+        if noisy_action.shape != pred_action_velocity.shape:
+            raise ValueError(
+                "B4 x0 reconstruction requires matching noisy/predicted action shapes, "
+                f"got {tuple(noisy_action.shape)} and {tuple(pred_action_velocity.shape)}"
+            )
+        sigma = timestep_action.float() / float(
+            self.train_action_scheduler.num_train_timesteps
+        )
+        if sigma.ndim == 0:
+            sigma = sigma.reshape(1)
+        if sigma.shape != (noisy_action.shape[0],):
+            raise ValueError(
+                f"B4 timestep must be [B], got {tuple(timestep_action.shape)} for "
+                f"B={noisy_action.shape[0]}"
+            )
+        sigma = sigma.to(device=noisy_action.device).view(
+            -1, *([1] * (noisy_action.ndim - 1))
+        )
+        # The scheduler uses x_t=(1-sigma)*x0+sigma*noise and
+        # v_target=noise-x0, hence x0=x_t-sigma*v.
+        return noisy_action.float() - sigma * pred_action_velocity.float()
+
+    def _b4_auxiliary_action_losses(
+        self,
+        *,
+        inputs: dict[str, Any],
+        noisy_action: torch.Tensor,
+        pred_action: torch.Tensor,
+        timestep_action: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Compute command-timing auxiliaries; no target is a physical contact label."""
+
+        if not getattr(self, "b4_aux_loss_enabled", False):
+            return {}
+
+        x0_hat = self._reconstruct_b4_action_x0(
+            noisy_action=noisy_action,
+            pred_action_velocity=pred_action,
+            timestep_action=timestep_action,
+        )
+        x0_target = inputs["action"].float()
+        gripper_hat_norm = x0_hat[..., self.b4_gripper_dim]
+        gripper_target_norm = x0_target[..., self.b4_gripper_dim]
+        gripper_hat_raw = (
+            gripper_hat_norm * self.b4_gripper_action_std
+            + self.b4_gripper_action_mean
+        )
+        gripper_target_raw = (
+            gripper_target_norm * self.b4_gripper_action_std
+            + self.b4_gripper_action_mean
+        )
+
+        valid = torch.ones_like(gripper_hat_norm, dtype=torch.bool)
+        action_is_pad = inputs.get("action_is_pad")
+        if action_is_pad is not None:
+            valid = ~action_is_pad
+        temporal_weight = torch.ones_like(gripper_hat_norm, dtype=torch.float32)
+        early_steps = min(self.b4_first_steps, gripper_hat_norm.shape[-1])
+        if early_steps:
+            temporal_weight[..., :early_steps] = self.b4_first_steps_weight
+        action_weight = self.train_action_scheduler.training_weight(timestep_action).to(
+            device=x0_hat.device, dtype=torch.float32
+        )
+        if action_weight.ndim == 0:
+            action_weight = action_weight.reshape(1)
+
+        def weighted_mean(per_sample: torch.Tensor) -> torch.Tensor:
+            return (per_sample * action_weight).mean()
+
+        arm_dims = [
+            dim for dim in range(x0_hat.shape[-1]) if dim != self.b4_gripper_dim
+        ]
+        arm_token_loss = F.smooth_l1_loss(
+            x0_hat[..., arm_dims],
+            x0_target[..., arm_dims],
+            reduction="none",
+            beta=self.b4_arm_huber_beta,
+        ).mean(dim=-1)
+        arm_huber = weighted_mean(
+            self._masked_per_sample_mean(
+                arm_token_loss,
+                valid,
+                token_weight=temporal_weight,
+            )
+        )
+
+        closed_target = inputs["b4_gripper_closed_target"].float()
+        closed_logits = (
+            self.b4_closed_command_threshold - gripper_hat_raw
+        ) / self.b4_closed_temperature
+        closed_token_loss = F.binary_cross_entropy_with_logits(
+            closed_logits, closed_target, reduction="none"
+        )
+        closed_command_raw = weighted_mean(
+            self._masked_per_sample_mean(
+                closed_token_loss,
+                valid,
+                token_weight=temporal_weight,
+            )
+        )
+
+        zero = pred_action.float().sum() * 0.0
+        if gripper_hat_norm.shape[-1] > 1:
+            delta_hat_norm = gripper_hat_norm[..., 1:] - gripper_hat_norm[..., :-1]
+            delta_target_norm = (
+                gripper_target_norm[..., 1:] - gripper_target_norm[..., :-1]
+            )
+            delta_hat_raw = gripper_hat_raw[..., 1:] - gripper_hat_raw[..., :-1]
+            delta_target_raw = (
+                gripper_target_raw[..., 1:] - gripper_target_raw[..., :-1]
+            )
+            transition_valid = valid[..., 1:] & valid[..., :-1]
+            event_target = inputs["b4_gripper_event_target"][..., 1:]
+            background_weight = torch.where(
+                event_target == 0,
+                torch.full_like(delta_hat_raw, self.b4_background_weight),
+                torch.ones_like(delta_hat_raw),
+            )
+            transition_token_weight = (
+                background_weight * temporal_weight[..., 1:]
+            )
+
+            normalized_beta = max(
+                self.b4_event_delta_threshold / self.b4_gripper_action_std,
+                torch.finfo(torch.float32).eps,
+            )
+            transition_normalized_token = F.smooth_l1_loss(
+                delta_hat_norm,
+                delta_target_norm,
+                reduction="none",
+                beta=normalized_beta,
+            )
+            transition_raw_token = F.smooth_l1_loss(
+                delta_hat_raw,
+                delta_target_raw,
+                reduction="none",
+                beta=self.b4_event_delta_threshold,
+            )
+            transition_normalized = weighted_mean(
+                self._masked_per_sample_mean(
+                    transition_normalized_token,
+                    transition_valid,
+                    token_weight=transition_token_weight,
+                )
+            )
+            transition_raw = weighted_mean(
+                self._masked_per_sample_mean(
+                    transition_raw_token,
+                    transition_valid,
+                    token_weight=transition_token_weight,
+                )
+            )
+
+            threshold = self.b4_event_delta_threshold
+            temperature = self.b4_event_temperature
+            event_logits = torch.stack(
+                (
+                    (threshold - delta_hat_raw.abs()) / temperature,
+                    (-delta_hat_raw - threshold) / temperature,
+                    (delta_hat_raw - threshold) / temperature,
+                ),
+                dim=-1,
+            )
+            event_token_loss = F.cross_entropy(
+                event_logits.reshape(-1, 3),
+                event_target.reshape(-1),
+                reduction="none",
+            ).reshape_as(event_target)
+            event_classification_raw = weighted_mean(
+                self._masked_per_sample_mean(
+                    event_token_loss,
+                    transition_valid,
+                    token_weight=transition_token_weight,
+                )
+            )
+        else:
+            delta_hat_raw = gripper_hat_raw[..., :0]
+            transition_valid = valid[..., :0]
+            transition_normalized = zero
+            transition_raw = zero
+            event_classification_raw = zero
+
+        stable_steps = self.b4_stable_steps
+        if gripper_hat_raw.shape[-1] > stable_steps:
+            closed_margin = (
+                self.b4_stable_closed_command_threshold - gripper_hat_raw
+            ) / self.b4_closed_temperature
+            steady_margin = (
+                self.b4_event_delta_threshold - delta_hat_raw.abs()
+            ) / self.b4_event_temperature
+            # The dataset proxy requires ``stable_steps`` commands that are each
+            # closed and delta-stable.  The first such delta needs one preceding
+            # command, so endpoints before ``stable_steps`` cannot be reconstructed
+            # from this predicted window and are excluded.
+            closed_windows = closed_margin[..., 1:].unfold(
+                -1, stable_steps, 1
+            )
+            steady_windows = steady_margin.unfold(-1, stable_steps, 1)
+            stable_proxy_logits = torch.cat(
+                (closed_windows, steady_windows), dim=-1
+            ).amin(dim=-1)
+            stable_proxy_target = inputs["b4_stable_contact_proxy"][
+                ..., stable_steps:
+            ].float()
+            stable_window_valid = (
+                valid[..., 1:].unfold(-1, stable_steps, 1).all(dim=-1)
+                & transition_valid.unfold(-1, stable_steps, 1).all(dim=-1)
+            )
+            stable_background_weight = torch.where(
+                stable_proxy_target > 0.5,
+                torch.ones_like(stable_proxy_target),
+                torch.full_like(stable_proxy_target, self.b4_background_weight),
+            )
+            stable_token_weight = (
+                stable_background_weight
+                * temporal_weight[..., stable_steps:]
+            )
+            stable_proxy_token_loss = F.binary_cross_entropy_with_logits(
+                stable_proxy_logits, stable_proxy_target, reduction="none"
+            )
+            contact_intent_proxy = weighted_mean(
+                self._masked_per_sample_mean(
+                    stable_proxy_token_loss,
+                    stable_window_valid,
+                    token_weight=stable_token_weight,
+                )
+            )
+        else:
+            contact_intent_proxy = zero
+
+        gripper_event = (
+            0.5 * (transition_normalized + transition_raw)
+            + event_classification_raw
+            + closed_command_raw
+        )
+        return {
+            "arm_huber": arm_huber,
+            "gripper_event": gripper_event,
+            "contact_intent_proxy": contact_intent_proxy,
+            "transition_normalized": transition_normalized,
+            "transition_raw": transition_raw,
+            "event_classification_raw": event_classification_raw,
+            "closed_command_raw": closed_command_raw,
+        }
+
+    def _multi_action_objective(
+        self,
+        *,
+        inputs: dict[str, Any],
+        noisy_action: torch.Tensor,
+        pred_action: torch.Tensor,
+        target_action: torch.Tensor,
+        timestep_action: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        flow_loss = self._multi_action_loss(
+            pred_action=pred_action,
+            target_action=target_action,
+            timestep_action=timestep_action,
+            action_is_pad=inputs["action_is_pad"],
+        )
+        if not getattr(self, "b4_aux_loss_enabled", False):
+            return flow_loss, {}
+        b4_losses = self._b4_auxiliary_action_losses(
+            inputs=inputs,
+            noisy_action=noisy_action,
+            pred_action=pred_action,
+            timestep_action=timestep_action,
+        )
+        arm_contribution = self.b4_arm_huber_loss_weight * b4_losses["arm_huber"]
+        event_contribution = (
+            self.b4_gripper_event_loss_weight * b4_losses["gripper_event"]
+        )
+        proxy_contribution = (
+            self.b4_contact_intent_proxy_loss_weight
+            * b4_losses["contact_intent_proxy"]
+        )
+        return flow_loss + arm_contribution + event_contribution + proxy_contribution, {
+            "flow": flow_loss,
+            "arm_huber": arm_contribution,
+            "gripper_event": event_contribution,
+            "contact_intent_proxy": proxy_contribution,
+        }
 
     def _prepare_noisy_action(self, inputs: dict[str, Any]):
         action = inputs["action"]
@@ -498,16 +1040,31 @@ class FastWAMMultiRobot(FastWAM):
             **attention_layout,
         )
         pred_action = self.action_expert.post_dit(action_tokens, action_pre)
-        loss_action = self._multi_action_loss(
+        loss_action, b4_metrics = self._multi_action_objective(
+            inputs=inputs,
+            noisy_action=noisy_action,
             pred_action=pred_action,
             target_action=target_action,
             timestep_action=timestep_action,
-            action_is_pad=inputs["action_is_pad"],
         )
         loss_total = self.loss_lambda_action * loss_action
-        return loss_total, {
+        metrics = {
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
         }
+        if b4_metrics:
+            metrics.update(
+                {
+                    "loss_action_flow": self.loss_lambda_action
+                    * float(b4_metrics["flow"].detach().item()),
+                    "loss_b4_arm_huber": self.loss_lambda_action
+                    * float(b4_metrics["arm_huber"].detach().item()),
+                    "loss_b4_gripper_event": self.loss_lambda_action
+                    * float(b4_metrics["gripper_event"].detach().item()),
+                    "loss_b4_contact_intent_proxy": self.loss_lambda_action
+                    * float(b4_metrics["contact_intent_proxy"].detach().item()),
+                }
+            )
+        return loss_total, metrics
 
     def _training_loss_joint(self, inputs: dict[str, Any]):
         input_latents = inputs["input_latents"]
@@ -586,17 +1143,32 @@ class FastWAMMultiRobot(FastWAM):
             loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
         )
         loss_video = (loss_video_per_sample * video_weight).mean()
-        loss_action = self._multi_action_loss(
+        loss_action, b4_metrics = self._multi_action_objective(
+            inputs=inputs,
+            noisy_action=noisy_action,
             pred_action=pred_action,
             target_action=target_action,
             timestep_action=timestep_action,
-            action_is_pad=inputs["action_is_pad"],
         )
         loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
-        return loss_total, {
+        metrics = {
             "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
         }
+        if b4_metrics:
+            metrics.update(
+                {
+                    "loss_action_flow": self.loss_lambda_action
+                    * float(b4_metrics["flow"].detach().item()),
+                    "loss_b4_arm_huber": self.loss_lambda_action
+                    * float(b4_metrics["arm_huber"].detach().item()),
+                    "loss_b4_gripper_event": self.loss_lambda_action
+                    * float(b4_metrics["gripper_event"].detach().item()),
+                    "loss_b4_contact_intent_proxy": self.loss_lambda_action
+                    * float(b4_metrics["contact_intent_proxy"].detach().item()),
+                }
+            )
+        return loss_total, metrics
 
     def training_loss(self, sample, tiled: bool = False):
         inputs = self.build_inputs(sample, tiled=tiled)
@@ -840,6 +1412,56 @@ class FastWAMMultiRobot(FastWAM):
         return digest.hexdigest()
 
     @staticmethod
+    def _checkpoint_file_stat(path: str | Path) -> dict[str, int]:
+        checkpoint_path = Path(path)
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(checkpoint_path, flags)
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise RuntimeError(
+                    f"Checkpoint path must not be a symlink: {checkpoint_path}"
+                ) from error
+            raise
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    f"Checkpoint path is not a regular file: {checkpoint_path}"
+                )
+            return {
+                "bytes": int(metadata.st_size),
+                "mtime_ns": int(metadata.st_mtime_ns),
+            }
+        finally:
+            os.close(descriptor)
+
+    def _checkpoint_provenance_mode_value(self) -> str:
+        mode = str(getattr(self, "_checkpoint_provenance_mode", "sha256")).strip().lower()
+        if mode not in {"sha256", "stat_cmp"}:
+            raise ValueError(
+                "_checkpoint_provenance_mode must be 'sha256' or 'stat_cmp', "
+                f"got {mode!r}"
+            )
+        return mode
+
+    def _checkpoint_receipt(self, path: str | Path, *, role: str) -> dict[str, Any]:
+        checkpoint_path = Path(path).expanduser().resolve(strict=True)
+        if self._checkpoint_provenance_mode_value() == "stat_cmp":
+            return {
+                "provenance_mode": "stat_cmp",
+                "path": str(checkpoint_path),
+                **self._checkpoint_file_stat(checkpoint_path),
+                "count": 1,
+                "role": role,
+            }
+        return {
+            "path": str(checkpoint_path),
+            "sha256": self._checkpoint_sha256(checkpoint_path),
+            "role": role,
+        }
+
+    @staticmethod
     def _validate_exact_tensor_state(
         expected_state: dict[str, Any],
         received_state: dict[str, Any],
@@ -1031,9 +1653,8 @@ class FastWAMMultiRobot(FastWAM):
                 f"missing={missing[:12]} (count={len(missing)}) in {path}"
             )
 
-    @classmethod
     def _validated_base_dependency_descriptor(
-        cls,
+        self,
         descriptor: Any,
         *,
         owner_path: str | Path,
@@ -1072,6 +1693,13 @@ class FastWAMMultiRobot(FastWAM):
                 "Checkpoint base dependency cycle detected: "
                 f"{dependency_path} is already active"
             )
+        if self._checkpoint_provenance_mode_value() == "stat_cmp":
+            # The descriptor's historical SHA field remains part of the v2
+            # checkpoint schema, but is deliberately opaque in stat_cmp mode.
+            return self._checkpoint_receipt(
+                dependency_path,
+                role="base_dependency",
+            )
         expected_sha256 = descriptor["sha256"]
         if (
             not isinstance(expected_sha256, str)
@@ -1082,7 +1710,7 @@ class FastWAMMultiRobot(FastWAM):
                 f"Invalid base checkpoint SHA-256 in {owner_path}: {expected_sha256!r}"
             )
         expected_sha256 = expected_sha256.lower()
-        actual_sha256 = cls._checkpoint_sha256(dependency_path)
+        actual_sha256 = self._checkpoint_sha256(dependency_path)
         if actual_sha256 != expected_sha256:
             raise ValueError(
                 "Base checkpoint SHA-256 mismatch: "
@@ -1095,7 +1723,12 @@ class FastWAMMultiRobot(FastWAM):
             "role": "base_dependency",
         }
 
-    def _base_dependency_descriptor_for_save(self, output_path) -> dict[str, str]:
+    def _base_dependency_descriptor_for_save(self, output_path) -> dict[str, Any]:
+        if self._checkpoint_provenance_mode_value() == "stat_cmp":
+            raise ValueError(
+                "provenance_mode='stat_cmp' requires self-contained full checkpoints; "
+                "sparse_delta base dependencies require the legacy SHA-256 contract"
+            )
         if not getattr(self, "_loaded_base_checkpoint_can_restore_sparse", False):
             raise RuntimeError(
                 "Cannot save sparse_delta: no loaded full `mot` checkpoint can "
@@ -1117,12 +1750,8 @@ class FastWAMMultiRobot(FastWAM):
         cached = getattr(self, "_loaded_base_checkpoint_descriptor", None)
         if isinstance(cached, dict) and cached.get("path") == str(base_path):
             return dict(cached)
-        cached_sha256 = self._checkpoint_sha256(base_path)
-        descriptor = {
-            "path": str(base_path),
-            "sha256": cached_sha256,
-            "role": "base_dependency",
-        }
+        descriptor = self._checkpoint_receipt(base_path, role="base_dependency")
+        cached_sha256 = descriptor["sha256"]
         self._loaded_base_checkpoint_sha256 = cached_sha256
         self._loaded_base_checkpoint_descriptor = descriptor
         return dict(descriptor)
@@ -1366,7 +1995,25 @@ class FastWAMMultiRobot(FastWAM):
         active_paths = set(active_paths)
         active_paths.add(checkpoint_path)
 
-        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        provenance_mode = self._checkpoint_provenance_mode_value()
+        checkpoint_stat = (
+            self._checkpoint_file_stat(checkpoint_path)
+            if provenance_mode == "stat_cmp"
+            else None
+        )
+
+        payload = torch.load(
+            checkpoint_path,
+            map_location="cpu",
+            weights_only=True,
+            mmap=True,
+        )
+        if checkpoint_stat is not None and self._checkpoint_file_stat(
+            checkpoint_path
+        ) != checkpoint_stat:
+            raise RuntimeError(
+                f"Checkpoint stat changed during mmap load: {checkpoint_path}"
+            )
         if not isinstance(payload, dict):
             raise ValueError(f"Checkpoint payload must be a dict: {checkpoint_path}")
 
@@ -1396,16 +2043,14 @@ class FastWAMMultiRobot(FastWAM):
                     label="mot",
                 )
                 self.mot.load_state_dict(mot_state, strict=True)
-                if load_role == "top_level":
-                    self._loaded_base_checkpoint = str(checkpoint_path)
-                    self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
-                        checkpoint_path
+                if load_role == "top_level" or provenance_mode == "stat_cmp":
+                    descriptor = self._checkpoint_receipt(
+                        checkpoint_path,
+                        role="base_dependency",
                     )
-                    self._loaded_base_checkpoint_descriptor = {
-                        "path": str(checkpoint_path),
-                        "sha256": self._loaded_base_checkpoint_sha256,
-                        "role": "base_dependency",
-                    }
+                    self._loaded_base_checkpoint = str(checkpoint_path)
+                    self._loaded_base_checkpoint_sha256 = descriptor.get("sha256")
+                    self._loaded_base_checkpoint_descriptor = descriptor
                     self._loaded_base_checkpoint_can_restore_sparse = True
             else:
                 if load_role != "top_level":
@@ -1435,9 +2080,9 @@ class FastWAMMultiRobot(FastWAM):
                     raise RuntimeError(
                         "Validated sparse state produced unexpected keys during load: "
                         f"{result.unexpected_keys}"
-                    )
+                )
                 self._loaded_base_checkpoint = descriptor["path"]
-                self._loaded_base_checkpoint_sha256 = descriptor["sha256"]
+                self._loaded_base_checkpoint_sha256 = descriptor.get("sha256")
                 self._loaded_base_checkpoint_descriptor = descriptor
                 self._loaded_base_checkpoint_can_restore_sparse = True
         elif checkpoint_format is not None:
@@ -1453,16 +2098,14 @@ class FastWAMMultiRobot(FastWAM):
                 load_role=load_role,
             )
             self._load_matching_state(self.mot, mot_state, label="legacy mot")
-            if load_role == "top_level":
-                self._loaded_base_checkpoint = str(checkpoint_path)
-                self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
-                    checkpoint_path
+            if load_role == "top_level" or provenance_mode == "stat_cmp":
+                descriptor = self._checkpoint_receipt(
+                    checkpoint_path,
+                    role="base_dependency",
                 )
-                self._loaded_base_checkpoint_descriptor = {
-                    "path": str(checkpoint_path),
-                    "sha256": self._loaded_base_checkpoint_sha256,
-                    "role": "base_dependency",
-                }
+                self._loaded_base_checkpoint = str(checkpoint_path)
+                self._loaded_base_checkpoint_sha256 = descriptor.get("sha256")
+                self._loaded_base_checkpoint_descriptor = descriptor
                 self._loaded_base_checkpoint_can_restore_sparse = True
         elif "dit" in payload:
             self._validate_legacy_minimum_coverage(
@@ -1488,4 +2131,10 @@ class FastWAMMultiRobot(FastWAM):
 
         if load_role == "top_level" and optimizer is not None and "optimizer" in payload:
             optimizer.load_state_dict(payload["optimizer"])
+        if checkpoint_stat is not None and self._checkpoint_file_stat(
+            checkpoint_path
+        ) != checkpoint_stat:
+            raise RuntimeError(
+                f"Checkpoint stat changed while mmap tensors were consumed: {checkpoint_path}"
+            )
         return payload

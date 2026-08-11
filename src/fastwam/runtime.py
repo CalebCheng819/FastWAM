@@ -196,6 +196,7 @@ def create_multi_robot_fastwam(
     video_scheduler = _as_dict(video_scheduler, name="video_scheduler")
     action_scheduler = _as_dict(action_scheduler, name="action_scheduler")
     loss = _as_dict(loss, name="loss")
+    b4_loss = _as_dict(loss.get("b4"), name="loss.b4")
     required_scheduler_keys = {"train_shift", "infer_shift", "num_train_timesteps"}
     missing_keys = required_scheduler_keys - set(action_scheduler)
     if missing_keys:
@@ -223,6 +224,43 @@ def create_multi_robot_fastwam(
         action_num_train_timesteps=int(action_scheduler["num_train_timesteps"]),
         loss_lambda_video=float(loss.get("lambda_video", 0.0)),
         loss_lambda_action=float(loss.get("lambda_action", 1.0)),
+        b4_aux_loss_enabled=bool(b4_loss.get("enabled", False)),
+        b4_arm_huber_loss_weight=float(
+            b4_loss.get("lambda_arm_huber", 0.0)
+        ),
+        b4_gripper_event_loss_weight=float(
+            b4_loss.get("lambda_gripper_event", 0.0)
+        ),
+        b4_contact_intent_proxy_loss_weight=float(
+            b4_loss.get("lambda_contact_intent_proxy", 0.0)
+        ),
+        b4_arm_huber_beta=float(b4_loss.get("arm_huber_beta", 1.0)),
+        b4_first_steps=int(b4_loss.get("first_steps", 5)),
+        b4_first_steps_weight=float(b4_loss.get("first_steps_weight", 1.0)),
+        b4_gripper_dim=int(b4_loss.get("gripper_dim", -1)),
+        b4_gripper_action_mean=(
+            None
+            if b4_loss.get("gripper_action_mean") is None
+            else float(b4_loss["gripper_action_mean"])
+        ),
+        b4_gripper_action_std=(
+            None
+            if b4_loss.get("gripper_action_std") is None
+            else float(b4_loss["gripper_action_std"])
+        ),
+        b4_event_delta_threshold=float(
+            b4_loss.get("event_delta_threshold", 0.05)
+        ),
+        b4_stable_closed_command_threshold=float(
+            b4_loss.get("stable_closed_command_threshold", -0.8)
+        ),
+        b4_closed_command_threshold=float(
+            b4_loss.get("closed_command_threshold", 0.0)
+        ),
+        b4_stable_steps=int(b4_loss.get("stable_steps", 4)),
+        b4_event_temperature=float(b4_loss.get("event_temperature", 0.05)),
+        b4_closed_temperature=float(b4_loss.get("closed_temperature", 0.1)),
+        b4_background_weight=float(b4_loss.get("background_weight", 0.25)),
     )
 
 
@@ -460,24 +498,43 @@ def run_training(cfg: DictConfig):
         config_timeout = float(os.environ.get("FASTWAM_CONFIG_BARRIER_TIMEOUT", "300"))
     except ValueError as error:
         raise RuntimeError("FASTWAM_CONFIG_BARRIER_TIMEOUT must be numeric") from error
-    config_sha256 = publish_rank_zero_file(
+    provenance_mode = str(cfg.get("provenance_mode", "sha256")).strip().lower()
+    attempt_id = (
+        os.environ.get("FASTWAM_B4_ATTEMPT_ID")
+        if provenance_mode == "stat_cmp"
+        else None
+    )
+    config_identity = publish_rank_zero_file(
         Path(cfg.output_dir) / config_filename,
         config_payload,
         rank=rank,
         world_size=world_size,
         timeout_seconds=config_timeout,
+        provenance_mode=provenance_mode,
+        attempt_id=attempt_id,
     )
-    # Accelerator is instantiated later in the trainer, so the hash-qualified
-    # ready marker above is the required pre-process-group barrier.  If a caller
-    # initialized torch.distributed early, preserve a real collective barrier too.
+    # Accelerator is instantiated later in the trainer, so the ready marker
+    # above is the required pre-process-group barrier.  If a caller initialized
+    # torch.distributed early, preserve a real collective barrier too.
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
-    logger.info(
-        "Resolved config barrier passed: rank=%d world_size=%d sha256=%s",
-        rank,
-        world_size,
-        config_sha256,
-    )
+    if provenance_mode == "sha256":
+        logger.info(
+            "Resolved config barrier passed: rank=%d world_size=%d sha256=%s",
+            rank,
+            world_size,
+            config_identity,
+        )
+    else:
+        logger.info(
+            "Resolved config barrier passed: rank=%d world_size=%d "
+            "provenance_mode=stat_cmp attempt_id=%s path=%s bytes=%d",
+            rank,
+            world_size,
+            attempt_id,
+            Path(cfg.output_dir) / config_filename,
+            len(config_payload),
+        )
 
     model_device = _resolve_train_device()
     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
@@ -510,7 +567,7 @@ def run_training(cfg: DictConfig):
     trainer._finish_wandb()
     trainer.publish_training_terminal_artifacts(
         config_relative_path=config_filename,
-        config_sha256=config_sha256,
+        config_sha256=config_identity,
     )
 
 def run_inference(cfg: DictConfig):

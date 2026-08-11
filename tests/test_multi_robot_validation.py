@@ -1,8 +1,10 @@
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from fastwam.models.wan22.fastwam_multi_robot import FastWAMMultiRobot
 from fastwam.trainer import Wan22Trainer
 
 
@@ -15,6 +17,10 @@ def _sample(num_agents: int, *, include_gaussian: bool = True):
         "agent_ids": torch.arange(num_agents),
         "action_is_pad": torch.zeros(num_agents, 5, dtype=torch.bool),
         "image_is_pad": torch.zeros(1, dtype=torch.bool),
+        "b4_target_action_phase": torch.zeros(num_agents, 5, dtype=torch.long),
+        "b4_gripper_closed_target": torch.zeros(num_agents, 5),
+        "b4_gripper_event_target": torch.zeros(num_agents, 5, dtype=torch.long),
+        "b4_stable_contact_proxy": torch.zeros(num_agents, 5),
         "context": torch.randn(6, 16),
         "context_mask": torch.ones(6, dtype=torch.bool),
         "prompt": f"coordinate {num_agents} robots",
@@ -40,6 +46,13 @@ def test_multi_robot_eval_batching_preserves_native_agent_fields(num_agents):
     assert batched["agent_ids"].shape == (1, num_agents)
     assert batched["action_is_pad"].shape == (1, num_agents, 5)
     assert batched["image_is_pad"].shape == (1, 1)
+    for field in (
+        "b4_target_action_phase",
+        "b4_gripper_closed_target",
+        "b4_gripper_event_target",
+        "b4_stable_contact_proxy",
+    ):
+        assert batched[field].shape == (1, num_agents, 5)
     assert batched["context"].shape == (1, 6, 16)
     assert batched["context_mask"].shape == (1, 6)
     assert batched["agent_gaussian"].shape == (1, num_agents, 13, 28, 40)
@@ -47,6 +60,36 @@ def test_multi_robot_eval_batching_preserves_native_agent_fields(num_agents):
     assert batched["agent_count"].tolist() == [num_agents]
     assert batched["prompt"] == [source["prompt"]]
     assert batched["task_name"] == [source["task_name"]]
+
+
+def test_b4_eval_batching_passes_the_model_input_shape_gate():
+    source = _sample(3, include_gaussian=False)
+    batched = Wan22Trainer._to_batched_multi_robot_eval_sample(source)
+    model = SimpleNamespace(
+        action_expert=SimpleNamespace(
+            action_dim=3,
+            state_dim=4,
+            agent_encoding_mode="geometry",
+            agent_geometry_dim=7,
+            enable_gaussian=False,
+        ),
+        video_expert=SimpleNamespace(fuse_vae_embedding_in_latents=False),
+        training_mode="action_only_cache",
+        device=torch.device("cpu"),
+        torch_dtype=torch.float32,
+        b4_aux_loss_enabled=True,
+        _encode_video_latents=lambda video, tiled=False: video,
+    )
+
+    inputs = FastWAMMultiRobot.build_inputs(model, batched)
+
+    for field in (
+        "b4_target_action_phase",
+        "b4_gripper_closed_target",
+        "b4_gripper_event_target",
+        "b4_stable_contact_proxy",
+    ):
+        assert inputs[field].shape == (1, 3, 5)
 
 
 class _Dataset:

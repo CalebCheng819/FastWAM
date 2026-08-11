@@ -29,15 +29,33 @@ offline_eval_num_samples: 0
 
 # training
 gradient_accumulation_steps: 1
+# Optional deterministic B4 schedule treatment.  Zero preserves the original
+# task/count-balanced sampler; the committed B4 task selects the audited 50/50
+# original/target-action-phase mixture without increasing epoch token exposure.
+phase_balanced_fraction: 0.0
 mixed_precision: "bf16" # one of: [no, fp16, bf16]
 seed: 42
 max_grad_norm: 1.0
 weight_decay: 0.0
 resume: null
+# Explicit cross-treatment initialization contract.  Ordinary checkpoints keep
+# strict treatment matching; a task must opt in and declare the exact native-v2
+# source metadata before the trainer may initialize from different treatment
+# weights with a fresh optimizer/scheduler/step state.
+weights_only_warm_start:
+  enabled: false
+  expected_source_training_mode: null
+  expected_source_trainable_scope: null
+  expected_source_state_kind: full
 # Full-state directories without the v1 scientific run contract are refused
 # before Accelerator mutates model/optimizer state.  Set true only for an
 # explicitly audited legacy recovery; formal runs keep this false.
 allow_legacy_resume: false
+# Research-artifact provenance policy.  ``sha256`` preserves the historical
+# contracts.  ``stat_cmp`` records paths, sizes, mtimes, and counts directly
+# and uses bytewise readback for copied artifacts; it is reserved for runs such
+# as B4 that intentionally avoid creating a new provenance hash chain.
+provenance_mode: sha256
 trainable_scope: dit
 # `auto` preserves the historical behavior: full weights for a fully trainable
 # DiT and a base-dependent sparse delta for a staged action/hub-only treatment.

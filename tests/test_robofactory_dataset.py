@@ -17,8 +17,10 @@ from fastwam.datasets.gaussian_cache import (
 )
 from fastwam.datasets.gaussian_cache.selection import write_normalized_selection_index
 from fastwam.datasets.robofactory_multi_robot import (
+    B4_TARGET_ACTION_PHASE_NAMES,
     RoboFactoryMultiRobotDataset,
     compute_robofactory_stats,
+    derive_b4_target_action_proxies,
     gaussian_source_identity_sha256,
 )
 
@@ -183,12 +185,120 @@ def test_robofactory_hdf5_adapter_returns_native_agent_axis(tmp_path, num_agents
         torch.ones(num_agents),
     )
     assert sample["action_is_pad"].shape == (num_agents, 32)
+    assert sample["b4_target_action_phase"].shape == (num_agents, 32)
+    assert sample["b4_target_action_phase"].dtype == torch.int64
+    assert sample["b4_gripper_closed_target"].shape == (num_agents, 32)
+    assert sample["b4_gripper_closed_target"].dtype == torch.float32
+    assert sample["b4_gripper_event_target"].shape == (num_agents, 32)
+    assert sample["b4_gripper_event_target"].dtype == torch.int64
+    assert sample["b4_stable_contact_proxy"].shape == (num_agents, 32)
+    assert sample["b4_stable_contact_proxy"].dtype == torch.float32
     assert sample["agent_ids"].tolist() == list(range(num_agents))
     assert sample["agent_count"] == num_agents
     assert "agent_mask" not in sample
     if num_agents > 1:
         assert torch.allclose(sample["action"][1], torch.full((32, 8), 2.0))
     assert sample["context"].shape == (128, 16)
+
+
+def test_b4_target_action_proxy_semantics_are_explicit_and_auditable():
+    raw_gripper = torch.tensor(
+        [1.0, 0.9, 0.7, 0.7, -0.9, -0.9, -0.9, -0.9, -0.9, -0.7]
+    )
+
+    proxy = derive_b4_target_action_proxies(raw_gripper)
+
+    assert proxy["phase"].tolist() == [0, 1, 1, 0, 1, 0, 0, 0, 2, 3]
+    assert proxy["event_target"].tolist() == [0, 1, 1, 0, 1, 0, 0, 0, 0, 2]
+    assert proxy["closed_target"].tolist() == [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
+    assert proxy["stable_closed_proxy"].tolist() == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+
+
+def test_b4_targets_use_t_plus_h_and_follow_native_agent_order(tmp_path):
+    task_name = "Synthetic2RobotTask-rf"
+    instruction = "two robots complete the synthetic task"
+    stats_path, cache_dir = _write_demo(
+        tmp_path,
+        task_name=task_name,
+        num_agents=2,
+        instruction=instruction,
+    )
+    commands_by_agent = {
+        0: np.asarray(
+            [1.0, 0.9, 0.7, 0.7, -0.9, -0.9, -0.9, -0.9, -0.9, -0.7]
+            + [-0.7] * 30,
+            dtype=np.float32,
+        ),
+        1: np.asarray(
+            [-0.9] * 8 + [-0.7, -0.5, -0.3, -0.1, 0.1] + [0.1] * 27,
+            dtype=np.float32,
+        ),
+    }
+    h5_path = tmp_path / task_name / "motionplanning" / "demo.h5"
+    with h5py.File(h5_path, "r+") as handle:
+        for agent_idx, commands in commands_by_agent.items():
+            handle[f"traj_0/actions/panda-{agent_idx}"][:, 7] = commands
+
+    dataset = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        window_stride=4,
+        val_set_proportion=0.0,
+        is_training_set=True,
+        randomize_agent_order=True,
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={task_name: instruction},
+    )
+    target_index = next(
+        index for index, entry in enumerate(dataset.entries) if entry["start"] == 8
+    )
+    dataset.set_epoch(7)
+    sample = dataset[target_index]
+
+    assert sample["agent_count"] == 2
+    assert sample["action"].shape == (2, 32, 8)
+    assert "agent_mask" not in sample
+    for slot, original_agent_id in enumerate(sample["agent_ids"].tolist()):
+        expected = derive_b4_target_action_proxies(commands_by_agent[original_agent_id])
+        assert torch.equal(sample["b4_target_action_phase"][slot], expected["phase"][8:40])
+        assert torch.equal(
+            sample["b4_gripper_closed_target"][slot],
+            expected["closed_target"][8:40],
+        )
+        assert torch.equal(
+            sample["b4_gripper_event_target"][slot],
+            expected["event_target"][8:40],
+        )
+        assert torch.equal(
+            sample["b4_stable_contact_proxy"][slot],
+            expected["stable_closed_proxy"][8:40],
+        )
+        assert torch.equal(
+            sample["action"][slot, :, 7],
+            torch.from_numpy(commands_by_agent[original_agent_id][8:40]),
+        )
+
+    expected_phase_names = {
+        B4_TARGET_ACTION_PHASE_NAMES[int(phase_id)]
+        for original_agent_id in range(2)
+        for phase_id in torch.unique(
+            derive_b4_target_action_proxies(commands_by_agent[original_agent_id])["phase"][
+                8:40
+            ]
+        ).tolist()
+    }
+    assert set(dataset.get_b4_phase_labels(target_index)) == expected_phase_names
+    assert dataset.b4_proxy_schema == {
+        "source": "raw_target_action_last_dimension",
+        "is_contact_ground_truth": False,
+        "target_index_semantics": "phase[t+h]",
+        "phase_names": list(B4_TARGET_ACTION_PHASE_NAMES),
+        "gripper_event_names": ["none", "closing", "opening"],
+        "event_delta_threshold": 0.05,
+        "closed_command_threshold": -0.8,
+        "stable_steps": 4,
+    }
 
 
 def test_action_only_dataset_reads_only_observation_frame(tmp_path):
@@ -392,6 +502,58 @@ def test_gaussian_cache_manifest_and_source_identities_are_pinned(tmp_path):
             gaussian_cache_expected_source_identity_sha256="0" * 64,
             instruction_map={task_name: instruction},
         )
+
+
+def test_gaussian_cache_stat_cmp_preflight_does_not_hash_provenance_files(
+    tmp_path, monkeypatch
+):
+    task_name = "Synthetic2RobotTask-rf"
+    instruction = "two robots complete the synthetic task"
+    stats_path, text_cache_dir = _write_demo(
+        tmp_path,
+        task_name=task_name,
+        num_agents=2,
+        instruction=instruction,
+    )
+    gaussian_cache_dir = _write_compact_gaussian_cache(
+        tmp_path,
+        task_name=task_name,
+        num_agents=2,
+        selection_mode="index",
+    )
+
+    import fastwam.datasets.gaussian_cache.manifest as manifest_module
+    import fastwam.datasets.gaussian_cache.provider as provider_module
+    import fastwam.datasets.robofactory_multi_robot as dataset_module
+
+    class ForbiddenHashlib:
+        @staticmethod
+        def sha256(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("stat_cmp manifest preflight must not hash files")
+
+    def _forbid_sha256_file(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("stat_cmp dataset preflight must not hash files")
+
+    monkeypatch.setattr(manifest_module, "hashlib", ForbiddenHashlib)
+    monkeypatch.setattr(provider_module, "sha256_file", _forbid_sha256_file)
+    monkeypatch.setattr(dataset_module, "sha256_file", _forbid_sha256_file)
+
+    dataset = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        load_future_video=False,
+        video_size=(32, 32),
+        val_set_proportion=0.0,
+        is_training_set=True,
+        randomize_agent_order=False,
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(text_cache_dir),
+        gaussian_cache_dir=str(gaussian_cache_dir),
+        gaussian_cache_verify="stat_cmp",
+        instruction_map={task_name: instruction},
+    )
+    assert dataset[0]["agent_gaussian"].shape == (2, 13, 28, 40)
 
 
 def test_gaussian_cache_rejects_nonfinite_frame_values(tmp_path):

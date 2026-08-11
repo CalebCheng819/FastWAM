@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import re
 import shutil
+import stat
 import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -394,14 +396,22 @@ class GaussianCacheBuilder:
         self._finished = False
 
     @staticmethod
-    def _validate_sources(sources: Sequence[Mapping[str, Any]]) -> None:
+    def _validate_sources(
+        sources: Sequence[Mapping[str, Any]],
+        *,
+        validate_hash_fields: bool = True,
+    ) -> None:
         seen: set[str] = set()
         for record in sources:
             path = normalize_source_path(str(record["path"]))
             if path in seen:
                 raise ValueError(f"Duplicate source HDF5 record: {path}")
             seen.add(path)
-            if int(record["bytes"]) < 0 or not _SHA256_RE.fullmatch(str(record["sha256"])):
+            if int(record["bytes"]) < 0:
+                raise ValueError(f"Invalid source record: {record}")
+            if validate_hash_fields and not _SHA256_RE.fullmatch(
+                str(record["sha256"])
+            ):
                 raise ValueError(f"Invalid source record: {record}")
 
     def append_stream(
@@ -550,7 +560,11 @@ def seal_manifest(
     return complete
 
 
-def validate_manifest_structure(manifest: Mapping[str, Any]) -> GaussianCacheSchema:
+def validate_manifest_structure(
+    manifest: Mapping[str, Any],
+    *,
+    validate_hash_fields: bool = True,
+) -> GaussianCacheSchema:
     manifest_version = int(manifest.get("manifest_version", -1))
     if manifest_version not in {1, 2}:
         raise ValueError(f"Unsupported manifest_version={manifest.get('manifest_version')!r}")
@@ -558,10 +572,19 @@ def validate_manifest_structure(manifest: Mapping[str, Any]) -> GaussianCacheSch
     sources = manifest.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("Manifest must contain at least one source HDF5 record")
-    GaussianCacheBuilder._validate_sources(sources)
+    GaussianCacheBuilder._validate_sources(
+        sources,
+        validate_hash_fields=validate_hash_fields,
+    )
     selection = manifest.get("selection")
     if not isinstance(selection, Mapping) or selection.get("mode") not in {"all", "index"}:
         raise ValueError("Manifest selection.mode must be 'all' or 'index'")
+    if not validate_hash_fields:
+        selected_key_count = int(selection.get("selected_key_count", -1))
+        if selected_key_count <= 0:
+            raise ValueError("Manifest selection.selected_key_count must be positive")
+        if selection.get("mode") == "index":
+            normalize_source_path(str(selection.get("index_filename", "")))
     producer = manifest.get("producer")
     if producer is not None and not isinstance(producer, Mapping):
         raise TypeError("Manifest producer provenance must be a mapping")
@@ -610,8 +633,10 @@ def validate_manifest_structure(manifest: Mapping[str, Any]) -> GaussianCacheSch
             raise ValueError(f"Shard exceeds 4 GiB: {record}")
         if not bool(record.get("final")) and size < MIN_SHARD_BYTES:
             raise ValueError(f"Non-final shard is smaller than 1 GiB: {record}")
-        if record.get("immutable") is not True or not _SHA256_RE.fullmatch(str(record["sha256"])):
-            raise ValueError(f"Shard lacks immutable/checksum provenance: {record}")
+        if record.get("immutable") is not True:
+            raise ValueError(f"Shard lacks immutable provenance: {record}")
+        if validate_hash_fields and not _SHA256_RE.fullmatch(str(record["sha256"])):
+            raise ValueError(f"Shard lacks checksum provenance: {record}")
     for part_index, records in sorted(shard_groups.items()):
         final_positions = [index for index, record in enumerate(records) if bool(record.get("final"))]
         if final_positions != [len(records) - 1]:
@@ -690,24 +715,114 @@ def validate_manifest_structure(manifest: Mapping[str, Any]) -> GaussianCacheSch
     return schema
 
 
-def load_manifest(cache_root: str | Path, *, require_complete: bool = True) -> dict[str, Any]:
+def _open_regular_file(path: str | Path) -> int:
+    source = Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise RuntimeError(f"Gaussian cache path must not be a symlink: {source}") from error
+        raise
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise RuntimeError(f"Gaussian cache path is not a regular file: {source}")
+    return descriptor
+
+
+def regular_file_stat(path: str | Path) -> dict[str, int]:
+    """Return the non-digest contract for one regular, non-symlink file."""
+
+    descriptor = _open_regular_file(path)
+    try:
+        metadata = os.fstat(descriptor)
+        return {
+            "bytes": int(metadata.st_size),
+            "mtime_ns": int(metadata.st_mtime_ns),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def read_regular_file_snapshot(path: str | Path) -> tuple[bytes, dict[str, int]]:
+    """Read one stable regular file without following a final-component symlink."""
+
+    source = Path(path)
+    descriptor = _open_regular_file(source)
+    try:
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+            raise RuntimeError(f"Gaussian cache file changed while being read: {source}")
+        if len(payload) != after.st_size:
+            raise RuntimeError(f"Gaussian cache file changed while being read: {source}")
+        return payload, {
+            "bytes": int(after.st_size),
+            "mtime_ns": int(after.st_mtime_ns),
+        }
+    finally:
+        os.close(descriptor)
+
+
+def load_manifest(
+    cache_root: str | Path,
+    *,
+    require_complete: bool = True,
+    provenance_mode: str = "sha256",
+) -> dict[str, Any]:
     root = Path(cache_root)
     manifest_path = root / MANIFEST_FILENAME
     complete_path = root / COMPLETE_FILENAME
-    if require_complete and not complete_path.is_file():
-        raise FileNotFoundError(f"Gaussian cache is incomplete: missing {complete_path}")
-    manifest_payload = manifest_path.read_bytes()
+    provenance_mode = str(provenance_mode).strip().lower()
+    if provenance_mode not in {"sha256", "stat_cmp"}:
+        raise ValueError(
+            "provenance_mode must be 'sha256' or 'stat_cmp', "
+            f"got {provenance_mode!r}"
+        )
+    if provenance_mode == "stat_cmp":
+        try:
+            manifest_payload, _ = read_regular_file_snapshot(manifest_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Gaussian cache manifest is missing: {manifest_path}") from None
+    else:
+        if require_complete and not complete_path.is_file():
+            raise FileNotFoundError(f"Gaussian cache is incomplete: missing {complete_path}")
+        manifest_payload = manifest_path.read_bytes()
     manifest = json.loads(manifest_payload)
-    validate_manifest_structure(manifest)
+    validate_manifest_structure(
+        manifest,
+        validate_hash_fields=provenance_mode == "sha256",
+    )
     if require_complete:
-        complete = json.loads(complete_path.read_text(encoding="utf-8"))
+        if provenance_mode == "stat_cmp":
+            try:
+                complete_payload, _ = read_regular_file_snapshot(complete_path)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f"Gaussian cache is incomplete: missing {complete_path}"
+                ) from None
+            complete = json.loads(complete_payload)
+        else:
+            complete = json.loads(complete_path.read_text(encoding="utf-8"))
         if complete.get("complete") is not True:
             raise ValueError(f"Invalid Gaussian cache COMPLETE marker: {complete_path}")
         if complete.get("schema_name") != SCHEMA_NAME or complete.get("schema_version") != SCHEMA_VERSION:
             raise ValueError("COMPLETE marker schema does not match canonical cache v1")
-        actual_sha256 = hashlib.sha256(manifest_payload).hexdigest()
-        if complete.get("manifest_sha256") != actual_sha256:
-            raise ValueError("COMPLETE marker manifest checksum mismatch")
+        if provenance_mode == "sha256":
+            actual_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+            if complete.get("manifest_sha256") != actual_sha256:
+                raise ValueError("COMPLETE marker manifest checksum mismatch")
+        elif complete.get("manifest") != MANIFEST_FILENAME:
+            raise ValueError("COMPLETE marker manifest path mismatch")
         if int(complete.get("manifest_bytes", -1)) != len(manifest_payload):
             raise ValueError("COMPLETE marker manifest byte count mismatch")
         if int(complete.get("total_frames", -1)) != int(manifest["total_frames"]):

@@ -100,6 +100,45 @@ def resolve_task_ids(dataset: Sized) -> Optional[tuple[str, ...]]:
     return tuple(_coerce_task_id(task_id, index) for index, task_id in enumerate(raw_task_ids))
 
 
+def _coerce_phase_labels(raw_labels, index: int) -> tuple[str, ...]:
+    if isinstance(raw_labels, str):
+        raw_labels = (raw_labels,)
+    try:
+        labels = tuple(sorted({str(label).strip() for label in raw_labels}))
+    except TypeError as exc:
+        raise ValueError(
+            f"B4 phase labels at index {index} must be an iterable of strings"
+        ) from exc
+    if not labels or any(not label for label in labels):
+        raise ValueError(f"B4 phase labels at index {index} cannot be empty")
+    return labels
+
+
+def resolve_b4_phase_labels(dataset: Sized) -> Optional[tuple[tuple[str, ...], ...]]:
+    """Resolve per-window target-action proxy labels without loading samples."""
+
+    labels_source = getattr(dataset, "b4_phase_labels", None)
+    if labels_source is not None:
+        raw_labels = labels_source() if callable(labels_source) else labels_source
+        try:
+            raw_labels = list(raw_labels)
+        except TypeError as exc:
+            raise TypeError("`dataset.b4_phase_labels` must be iterable") from exc
+    else:
+        getter = getattr(dataset, "get_b4_phase_labels", None)
+        if not callable(getter):
+            return None
+        raw_labels = [getter(index) for index in range(len(dataset))]
+    if len(raw_labels) != len(dataset):
+        raise ValueError(
+            "B4 phase-label metadata length must match the dataset: "
+            f"labels={len(raw_labels)} dataset={len(dataset)}"
+        )
+    return tuple(
+        _coerce_phase_labels(labels, index) for index, labels in enumerate(raw_labels)
+    )
+
+
 class ResumableEpochSampler(Sampler[int]):
     """Deterministic sample sampler for ordinary fixed-shape datasets."""
 
@@ -160,6 +199,12 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
     aligned to ``num_processes * gradient_accumulation_steps`` so Accelerate's
     ``BatchSamplerShard(even_batches=False)`` gives every rank the same number
     of micro-steps and every epoch ends on an optimizer-step boundary.
+
+    With ``phase_balanced_fraction=0.5``, exactly half of every rank's epoch
+    retains the original task/count schedule.  The other half keeps the same
+    task/count allocation but chooses, with replacement, from each window's
+    multi-label target-action phase/event-proxy strata.  This never introduces
+    fixed-capacity agent slots or mixes native agent counts within a batch.
     """
 
     def __init__(
@@ -174,6 +219,8 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
         action_horizon: Optional[int] = None,
         agent_action_token_budget: Optional[int] = None,
         gradient_accumulation_steps: int = 1,
+        b4_phase_labels: Optional[Sequence[Sequence[str]]] = None,
+        phase_balanced_fraction: float = 0.0,
     ):
         self.dataset = dataset
         self.seed = int(seed)
@@ -183,6 +230,7 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
         self.epoch = 0
         self.resume_batch_offset = 0
         self.drop_last = False
+        self.phase_balanced_fraction = float(phase_balanced_fraction)
 
         if (
             self.reference_batch_size <= 0
@@ -192,6 +240,11 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             raise ValueError(
                 "`batch_size`, `num_processes`, and `gradient_accumulation_steps` "
                 "must be positive."
+            )
+        if self.phase_balanced_fraction not in (0.0, 0.5):
+            raise ValueError(
+                "phase_balanced_fraction currently supports only 0.0 or the "
+                "audited B4 50/50 mixture (0.5)"
             )
 
         resolved_counts = resolve_agent_counts(dataset) if agent_counts is None else tuple(agent_counts)
@@ -225,6 +278,28 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             _coerce_task_id(task_id, index)
             for index, task_id in enumerate(resolved_task_ids)
         )
+        if self.phase_balanced_fraction:
+            resolved_phase_labels = (
+                resolve_b4_phase_labels(dataset)
+                if b4_phase_labels is None
+                else tuple(b4_phase_labels)
+            )
+            if resolved_phase_labels is None:
+                raise TypeError(
+                    "B4 phase-balanced sampling requires `dataset.b4_phase_labels` "
+                    "or `dataset.get_b4_phase_labels(index)`."
+                )
+            if len(resolved_phase_labels) != len(dataset):
+                raise ValueError(
+                    "B4 phase-label metadata length must match the dataset: "
+                    f"labels={len(resolved_phase_labels)} dataset={len(dataset)}"
+                )
+            self.b4_phase_labels = tuple(
+                _coerce_phase_labels(labels, index)
+                for index, labels in enumerate(resolved_phase_labels)
+            )
+        else:
+            self.b4_phase_labels = None
         if not self.agent_counts:
             raise ValueError("Agent-count bucket batching requires a non-empty dataset.")
 
@@ -272,6 +347,16 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
         self._strata = {
             stratum: tuple(indices) for stratum, indices in sorted(strata.items())
         }
+        phase_strata: dict[tuple[int, str, str], list[int]] = defaultdict(list)
+        if self.b4_phase_labels is not None:
+            for index, (count, task_id, labels) in enumerate(
+                zip(self.agent_counts, self.task_ids, self.b4_phase_labels)
+            ):
+                for label in labels:
+                    phase_strata[(count, task_id, label)].append(index)
+        self._phase_strata = {
+            stratum: tuple(indices) for stratum, indices in sorted(phase_strata.items())
+        }
         self.observed_agent_counts = tuple(observed_counts)
 
         tasks_by_count: dict[int, list[str]] = defaultdict(list)
@@ -291,12 +376,25 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             for count, task_ids in self.tasks_by_agent_count.items()
         )
         global_step_width = self.num_processes * self.gradient_accumulation_steps
-        count_alignment = global_step_width // gcd(
-            len(self.observed_agent_counts), global_step_width
+        # B4 keeps the baseline epoch/token budget.  Align the total schedule
+        # so each (count, task) stratum can be split exactly in half and each
+        # source half consists of complete world-size blocks.  This prevents
+        # ranks from specializing into original-vs-phase sampling and avoids
+        # silently doubling optimizer steps per epoch.
+        schedule_width = global_step_width
+        stratum_divisor = 1
+        if self.phase_balanced_fraction:
+            schedule_width = lcm(schedule_width, 2 * self.num_processes)
+            stratum_divisor = 2
+        count_alignment = schedule_width // gcd(
+            len(self.observed_agent_counts), schedule_width
         )
         batches_per_count_alignment = lcm(
             count_alignment,
-            *(len(task_ids) for task_ids in self.tasks_by_agent_count.values()),
+            *(
+                stratum_divisor * len(task_ids)
+                for task_ids in self.tasks_by_agent_count.values()
+            ),
         )
         self.batches_per_agent_count = (
             ceil(minimum_batches_per_count / batches_per_count_alignment)
@@ -307,11 +405,39 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             for count, task_ids in self.tasks_by_agent_count.items()
             for task_id in task_ids
         }
-        self.global_batches_per_epoch = (
+        self.base_global_batches_per_epoch = (
             len(self.observed_agent_counts) * self.batches_per_agent_count
         )
-        if self.global_batches_per_epoch % global_step_width:
+        if self.base_global_batches_per_epoch % global_step_width:
             raise RuntimeError("Internal error: global batch schedule is not optimizer-step aligned.")
+        self.original_batches_per_stratum = {
+            stratum: (
+                batch_count // 2
+                if self.phase_balanced_fraction
+                else batch_count
+            )
+            for stratum, batch_count in self.batches_per_stratum.items()
+        }
+        self.phase_balanced_batches_per_stratum = {
+            stratum: (
+                batch_count - self.original_batches_per_stratum[stratum]
+                if self.phase_balanced_fraction
+                else 0
+            )
+            for stratum, batch_count in self.batches_per_stratum.items()
+        }
+        self.original_global_batches_per_epoch = sum(
+            self.original_batches_per_stratum.values()
+        )
+        self.phase_balanced_global_batches_per_epoch = sum(
+            self.phase_balanced_batches_per_stratum.values()
+        )
+        if self.phase_balanced_fraction and (
+            self.original_global_batches_per_epoch
+            != self.phase_balanced_global_batches_per_epoch
+        ):
+            raise RuntimeError("Internal error: B4 schedule is not an exact 50/50 split.")
+        self.global_batches_per_epoch = self.base_global_batches_per_epoch
         self.microbatches_per_process = self.global_batches_per_epoch // self.num_processes
         self.optimizer_steps_per_epoch = (
             self.microbatches_per_process // self.gradient_accumulation_steps
@@ -349,37 +475,128 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
     def resume_global_batch_offset(self) -> int:
         return self.resume_batch_offset * self.num_processes
 
-    def global_epoch_batches(self, epoch: Optional[int] = None) -> list[list[int]]:
-        """Materialize the deterministic global schedule before rank sharding."""
+    @staticmethod
+    def _sample_batches(
+        indices: Sequence[int],
+        *,
+        batch_count: int,
+        batch_size: int,
+        generator: torch.Generator,
+    ) -> list[list[int]]:
+        sample_target = int(batch_count) * int(batch_size)
+        sampled: list[int] = []
+        while len(sampled) < sample_target:
+            permutation = torch.randperm(len(indices), generator=generator).tolist()
+            sampled.extend(indices[position] for position in permutation)
+        sampled = sampled[:sample_target]
+        return [
+            sampled[start : start + batch_size]
+            for start in range(0, sample_target, batch_size)
+        ]
+
+    def _original_epoch_records(
+        self, generator: torch.Generator
+    ) -> list[tuple[str, Optional[str], list[int]]]:
+        batches: list[list[int]] = []
+        for stratum, indices in self._strata.items():
+            count, _ = stratum
+            batch_size = self.batch_size_by_agent_count[count]
+            batches.extend(
+                self._sample_batches(
+                    indices,
+                    batch_count=self.original_batches_per_stratum[stratum],
+                    batch_size=batch_size,
+                    generator=generator,
+                )
+            )
+        if len(batches) > 1:
+            batch_order = torch.randperm(len(batches), generator=generator).tolist()
+            batches = [batches[position] for position in batch_order]
+        return [("original", None, batch) for batch in batches]
+
+    def _phase_epoch_records(
+        self, generator: torch.Generator
+    ) -> list[tuple[str, Optional[str], list[int]]]:
+        records: list[tuple[str, Optional[str], list[int]]] = []
+        for stratum in self._strata:
+            count, task_id = stratum
+            labels = sorted(
+                label
+                for phase_count, phase_task, label in self._phase_strata
+                if phase_count == count and phase_task == task_id
+            )
+            if not labels:
+                raise RuntimeError(
+                    f"No B4 target-action phase labels for count/task stratum {stratum}"
+                )
+            label_schedule: list[str] = []
+            batch_target = self.phase_balanced_batches_per_stratum[stratum]
+            while len(label_schedule) < batch_target:
+                order = torch.randperm(len(labels), generator=generator).tolist()
+                label_schedule.extend(labels[position] for position in order)
+            for label in label_schedule[:batch_target]:
+                indices = self._phase_strata[(count, task_id, label)]
+                batch = self._sample_batches(
+                    indices,
+                    batch_count=1,
+                    batch_size=self.batch_size_by_agent_count[count],
+                    generator=generator,
+                )[0]
+                records.append(("phase_balanced", label, batch))
+        if len(records) > 1:
+            order = torch.randperm(len(records), generator=generator).tolist()
+            records = [records[position] for position in order]
+        return records
+
+    def global_epoch_schedule(
+        self, epoch: Optional[int] = None
+    ) -> list[tuple[str, Optional[str], list[int]]]:
+        """Return auditable ``(source, selected_label, batch)`` records."""
 
         epoch = self.epoch if epoch is None else int(epoch)
         generator = torch.Generator(device="cpu")
         generator.manual_seed(self.seed + epoch)
-        batches: list[list[int]] = []
-
-        for stratum, indices in self._strata.items():
-            count, _ = stratum
-            batch_size = self.batch_size_by_agent_count[count]
-            sample_target = self.batches_per_stratum[stratum] * batch_size
-            sampled: list[int] = []
-            while len(sampled) < sample_target:
-                permutation = torch.randperm(len(indices), generator=generator).tolist()
-                sampled.extend(indices[position] for position in permutation)
-            sampled = sampled[:sample_target]
-            batches.extend(
-                sampled[start : start + batch_size]
-                for start in range(0, sample_target, batch_size)
-            )
-
-        if len(batches) > 1:
-            batch_order = torch.randperm(len(batches), generator=generator).tolist()
-            batches = [batches[position] for position in batch_order]
-        if len(batches) != self.global_batches_per_epoch:
+        original = self._original_epoch_records(generator)
+        if len(original) != self.original_global_batches_per_epoch:
             raise RuntimeError(
-                "Internal error: materialized schedule length mismatch: "
-                f"got={len(batches)} expected={self.global_batches_per_epoch}"
+                "Internal error: original schedule length mismatch: "
+                f"got={len(original)} expected={self.original_global_batches_per_epoch}"
             )
-        return batches
+        if not self.phase_balanced_fraction:
+            return original
+
+        phase_balanced = self._phase_epoch_records(generator)
+        if len(phase_balanced) != self.phase_balanced_global_batches_per_epoch:
+            raise RuntimeError(
+                "Internal error: phase-balanced schedule length mismatch: "
+                "got="
+                f"{len(phase_balanced)} "
+                f"expected={self.phase_balanced_global_batches_per_epoch}"
+            )
+        # Merge complete rank-width blocks. Every rank therefore receives one
+        # original and one phase-balanced microbatch per pair of blocks, rather
+        # than specializing odd/even ranks into different sampling treatments.
+        records: list[tuple[str, Optional[str], list[int]]] = []
+        for start in range(0, len(original), self.num_processes):
+            original_block = original[start : start + self.num_processes]
+            phase_block = phase_balanced[start : start + self.num_processes]
+            if int(torch.randint(0, 2, (1,), generator=generator).item()):
+                records.extend(phase_block)
+                records.extend(original_block)
+            else:
+                records.extend(original_block)
+                records.extend(phase_block)
+        if len(records) != self.global_batches_per_epoch:
+            raise RuntimeError(
+                "Internal error: mixed schedule length mismatch: "
+                f"got={len(records)} expected={self.global_batches_per_epoch}"
+            )
+        return records
+
+    def global_epoch_batches(self, epoch: Optional[int] = None) -> list[list[int]]:
+        """Materialize the deterministic global schedule before rank sharding."""
+
+        return [record[2] for record in self.global_epoch_schedule(epoch)]
 
     def schedule_fingerprint(self, epoch: Optional[int] = None) -> str:
         epoch = self.epoch if epoch is None else int(epoch)
@@ -390,7 +607,8 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             "gradient_accumulation_steps": self.gradient_accumulation_steps,
             "agent_action_token_budget": self.agent_action_token_budget,
             "action_horizon": self.action_horizon,
-            "batches": self.global_epoch_batches(epoch),
+            "phase_balanced_fraction": self.phase_balanced_fraction,
+            "schedule": self.global_epoch_schedule(epoch),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

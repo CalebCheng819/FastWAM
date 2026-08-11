@@ -1,0 +1,74 @@
+# @package _global_
+
+# B4 starts from the completed VG1/HUB1/GAU1 joint-model weights, then performs
+# a fresh-optimizer action-only fine-tune.  The video expert is frozen; Hub and
+# Gaussian-conditioned action modules remain in the trainable action scope.
+defaults:
+  - robofactory_multi_robot_vg1_hub1_gau1_224_1e-4
+  - _self_
+
+trainable_scope: action
+learning_rate: 1.0e-5
+max_steps: 2500
+save_every: 1250
+eval_every: 1250
+offline_eval_num_samples: 12
+phase_balanced_fraction: 0.5
+provenance_mode: stat_cmp
+
+# This is intentionally a weight-only warm start.  The trainer loads the file
+# before optimizer/ZeRO construction and starts optimizer, scheduler, epoch,
+# and global_step from zero.
+resume: ${oc.env:FASTWAM_B4_BASE_CHECKPOINT}
+weights_only_warm_start:
+  enabled: true
+  expected_source_training_mode: joint
+  expected_source_trainable_scope: dit
+  expected_source_state_kind: full
+
+data:
+  train:
+    load_future_video: false
+    # B4 binds the existing audited cache by path, bytes, mtime, schema and
+    # counts. Historical digest fields remain opaque and are never recomputed.
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+  val:
+    load_future_video: false
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+
+model:
+  training_mode: action_only_cache
+  loss:
+    lambda_video: 0.0
+    lambda_action: 1.0
+    b4:
+      enabled: true
+      lambda_arm_huber: 1.0
+      lambda_gripper_event: 2.0
+      lambda_contact_intent_proxy: 1.0
+      arm_huber_beta: 0.1
+      first_steps: 5
+      first_steps_weight: 2.0
+      gripper_dim: 7
+      gripper_action_mean: 0.24164481092854787
+      gripper_action_std: 0.9469631616807775
+      event_delta_threshold: 0.05
+      stable_closed_command_threshold: -0.8
+      closed_command_threshold: 0.0
+      stable_steps: 4
+      event_temperature: 0.05
+      closed_temperature: 0.1
+      background_weight: 0.25
+
+# `lambda_contact_intent_proxy` supervises a stable closed-gripper command
+# heuristic derived from actions.  RoboFactory H5 has no measured contact
+# sensor, so this treatment must never be reported as a true contact loss.
+wandb:
+  group: robofactory-multirobot-b4-phase-gripper-contact-proxy
+  name: fastwam-robofactory-b4-vg1hub1gau1-actft-s42-24g-r1

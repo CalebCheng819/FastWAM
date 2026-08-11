@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from fastwam.trainer import Wan22Trainer
 
@@ -68,6 +69,111 @@ def test_post_prepare_file_resume_fails_if_preload_was_skipped(tmp_path):
         trainer._resume_training_state_after_prepare()
 
 
+class _WarmStartModel:
+    def __init__(self):
+        self.loads = []
+
+    def _load_checkpoint_with_role(self, path, **kwargs):
+        self.loads.append((str(path), kwargs))
+
+
+def _write_native_v2_source_checkpoint(
+    path: Path,
+    *,
+    training_mode: str = "joint",
+    trainable_scope: str = "dit",
+) -> None:
+    torch.save(
+        {
+            "format": "fastwam_multi_robot_v2",
+            "state_kind": "full",
+            "training_mode": training_mode,
+            "trainable_scope": trainable_scope,
+            "base_checkpoint": None,
+            "mot": {"tiny_weight": torch.ones(1)},
+        },
+        path,
+    )
+
+
+def _explicit_warm_start_trainer(checkpoint: Path):
+    trainer = _trainer(checkpoint, model=_WarmStartModel())
+    trainer.checkpoint_state_kind = "full"
+    trainer.weights_only_warm_start_enabled = True
+    trainer.weights_only_warm_start_expected_source_training_mode = "joint"
+    trainer.weights_only_warm_start_expected_source_trainable_scope = "dit"
+    trainer.weights_only_warm_start_expected_source_state_kind = "full"
+    return trainer
+
+
+def test_explicit_cross_treatment_warm_start_uses_strict_native_loader(
+    tmp_path, monkeypatch
+):
+    checkpoint = tmp_path / "joint-full.pt"
+    _write_native_v2_source_checkpoint(checkpoint)
+    trainer = _explicit_warm_start_trainer(checkpoint)
+    original_torch_load = torch.load
+    load_calls = []
+
+    def _recording_torch_load(*args, **kwargs):
+        load_calls.append((args, kwargs))
+        return original_torch_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", _recording_torch_load)
+
+    trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer._weight_checkpoint_loaded_before_prepare is True
+    assert len(load_calls) == 1
+    assert Path(load_calls[0][0][0]) == checkpoint.resolve()
+    assert load_calls[0][1] == {
+        "map_location": "meta",
+        "weights_only": True,
+        "mmap": True,
+    }
+    assert trainer.model.loads == [
+        (
+            str(checkpoint.resolve()),
+            {
+                "optimizer": None,
+                "load_role": "base_dependency",
+                "active_paths": set(),
+                "validate_trainable_scope": False,
+            },
+        )
+    ]
+    trainer._resume_training_state_after_prepare()
+    assert len(trainer.model.loads) == 1
+
+
+def test_explicit_warm_start_rejects_wrong_source_treatment_before_load(tmp_path):
+    checkpoint = tmp_path / "action-full.pt"
+    _write_native_v2_source_checkpoint(
+        checkpoint,
+        training_mode="action_only_cache",
+        trainable_scope="action",
+    )
+    trainer = _explicit_warm_start_trainer(checkpoint)
+
+    with pytest.raises(ValueError, match="source metadata mismatch"):
+        trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == []
+    assert trainer._weight_checkpoint_loaded_before_prepare is False
+
+
+def test_explicit_warm_start_rejects_full_state_directory(tmp_path):
+    state_dir = tmp_path / "step_001250"
+    state_dir.mkdir()
+    trainer = _explicit_warm_start_trainer(state_dir)
+
+    with pytest.raises(ValueError, match="not a full-state resume directory"):
+        trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == []
+    assert trainer._weight_checkpoint_loaded_before_prepare is False
+
+
 class _StateAccelerator:
     def __init__(self, model=None):
         self.loads = []
@@ -123,6 +229,49 @@ def test_missing_full_state_contract_fails_before_accelerator_mutation(tmp_path)
     trainer.accelerator = _StateAccelerator()
 
     with pytest.raises(RuntimeError, match="lacks the required run_contract"):
+        trainer.load_training_state(str(state_dir))
+
+    assert trainer.accelerator.loads == []
+
+
+def test_data_schedule_mismatch_fails_before_accelerator_mutation(tmp_path):
+    state_dir = tmp_path / "step_000123"
+    state_dir.mkdir()
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.allow_legacy_resume = False
+    trainer.accelerator = _StateAccelerator()
+    trainer._uses_agent_count_batch_sampler = True
+    trainer.phase_balanced_fraction = 0.5
+    trainer.train_sampler = SimpleNamespace(
+        schedule_fingerprint=lambda epoch: f"schedule-epoch-{epoch}",
+        agent_action_token_budget=128,
+        gradient_accumulation_steps=1,
+        num_processes=24,
+        global_batches_per_epoch=240,
+        optimizer_steps_per_epoch=10,
+        phase_balanced_fraction=0.5,
+        original_global_batches_per_epoch=120,
+        phase_balanced_global_batches_per_epoch=120,
+    )
+    trainer._validate_training_state_contract = lambda payload, state_file: None
+    trainer._validate_resumable_terminal_evidence = (
+        lambda payload, state_file: ({}, [])
+    )
+    saved_schedule = trainer._data_schedule_contract(epoch=0)
+    saved_schedule["phase_balanced_global_batches_per_epoch"] = 119
+    (state_dir / "trainer_state.json").write_text(
+        json.dumps(
+            {
+                "global_step": 123,
+                "epoch": 0,
+                "batch_in_epoch": 0,
+                "data_schedule": saved_schedule,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="before accelerator.load_state"):
         trainer.load_training_state(str(state_dir))
 
     assert trainer.accelerator.loads == []
@@ -225,6 +374,153 @@ def test_weights_checkpoint_is_strongly_read_back_and_complete_last(
 
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         trainer._save_weights_checkpoint("step_000031")
+
+
+def test_stat_cmp_checkpoint_publication_uses_bytewise_readback_without_hash(
+    tmp_path,
+    monkeypatch,
+):
+    class _SavingModel:
+        def save_checkpoint(
+            self,
+            path,
+            optimizer=None,
+            step=None,
+            checkpoint_state_kind=None,
+        ):
+            Path(path).write_bytes(b"b4-stat-cmp-self-contained-weights")
+
+    weights_dir = tmp_path / "weights"
+    weights_dir.mkdir()
+    monkeypatch.setenv("FASTWAM_WEIGHT_STAGING_DIR", str(tmp_path / "staging"))
+    model = _SavingModel()
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.model = model
+    trainer.accelerator = _StateAccelerator(model)
+    trainer.weights_dir = str(weights_dir)
+    trainer.checkpoint_state_kind = "full"
+    trainer.global_step = 31
+    trainer.provenance_mode = "stat_cmp"
+
+    def unexpected_hash(*_args, **_kwargs):
+        pytest.fail("stat_cmp publication must not compute a checkpoint hash")
+
+    trainer._sha256_regular_file = unexpected_hash
+    checkpoint = Path(trainer._save_weights_checkpoint("step_000031"))
+
+    manifest = json.loads(
+        (weights_dir / "step_000031.pt.manifest.json").read_text(encoding="utf-8")
+    )
+    complete = json.loads(
+        (weights_dir / "step_000031.pt.COMPLETE").read_text(encoding="utf-8")
+    )
+    assert checkpoint.read_bytes() == b"b4-stat-cmp-self-contained-weights"
+    assert manifest["schema_version"] == 2
+    assert manifest["path"] == str(checkpoint.resolve())
+    assert manifest["bytes"] == checkpoint.stat().st_size
+    assert manifest["mtime_ns"] == checkpoint.stat().st_mtime_ns
+    assert manifest["file_count"] == 1
+    assert manifest["verification"] == "stat+bytewise-cmp"
+    assert complete["schema_version"] == 2
+    assert complete["checkpoint_bytes"] == checkpoint.stat().st_size
+    assert complete["checkpoint_mtime_ns"] == checkpoint.stat().st_mtime_ns
+    assert complete["file_count"] == 1
+    assert complete["verification"] == "stat+bytewise-cmp"
+    assert "sha256" not in json.dumps({"manifest": manifest, "complete": complete})
+
+
+def test_stat_cmp_dataset_and_run_contracts_do_not_compute_hashes(
+    tmp_path,
+    monkeypatch,
+):
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    source = dataset_root / "n2" / "episode.h5"
+    source.parent.mkdir()
+    source.write_bytes(b"h5-payload")
+    stats = dataset_root / "stats.json"
+    stats.write_text('{"schema":"test"}\n', encoding="utf-8")
+
+    class _Dataset:
+        root_dir = dataset_root
+        _stats_path = stats
+        _stats_metadata = {"schema_name": "test-stats"}
+        entries = [
+            {"path": str(source), "source_path": "n2/episode.h5", "start_step": 0},
+            {"path": str(source), "source_path": "n2/episode.h5", "start_step": 1},
+        ]
+
+        def __len__(self):
+            return 2
+
+    def unexpected_hash(*_args, **_kwargs):
+        pytest.fail("stat_cmp run contracts must not compute provenance hashes")
+
+    monkeypatch.setattr(
+        Wan22Trainer,
+        "_canonical_json_sha256",
+        staticmethod(unexpected_hash),
+    )
+    monkeypatch.setattr(Wan22Trainer, "_sha256_file", staticmethod(unexpected_hash))
+
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.provenance_mode = "stat_cmp"
+    dataset_contract = trainer._dataset_contract(_Dataset())
+    assert dataset_contract["source_inventory"] == [
+        {
+            "path": "n2/episode.h5",
+            "bytes": source.stat().st_size,
+            "mtime_ns": source.stat().st_mtime_ns,
+        }
+    ]
+    assert dataset_contract["source_inventory_count"] == 1
+    assert dataset_contract["source_inventory_total_bytes"] == source.stat().st_size
+    assert dataset_contract["window_index_count"] == 2
+    assert dataset_contract["window_index_counts_by_source"] == {"n2/episode.h5": 2}
+    assert dataset_contract["normalization"]["bytes"] == stats.stat().st_size
+    assert dataset_contract["normalization"]["mtime_ns"] == stats.stat().st_mtime_ns
+    assert "sha256" not in json.dumps(dataset_contract)
+
+    model = torch.nn.Linear(2, 2)
+    model.training_mode = "action_only_cache"
+    model._multi_robot_architecture_metadata = lambda: {
+        "hub_enabled": True,
+        "enable_gaussian": True,
+    }
+    trainer.model = model
+    trainer.accelerator = SimpleNamespace(
+        unwrap_model=lambda wrapped: wrapped,
+        num_processes=24,
+    )
+    trainer.trainable_scope = "action"
+    trainer.checkpoint_state_kind = "full"
+    trainer._dataset_run_contract = {"train": dataset_contract, "val": dataset_contract}
+    trainer.learning_rate = 1.0e-5
+    trainer.weight_decay = 0.0
+    trainer.max_steps = 2500
+    trainer.batch_size = 1
+    trainer.agent_action_token_budget = 128
+    trainer.phase_balanced_fraction = 0.5
+    trainer.gradient_accumulation_steps = 1
+    trainer.mixed_precision = "bf16"
+    trainer.max_grad_norm = 1.0
+    trainer.seed = 42
+    trainer.cfg = SimpleNamespace(lr_scheduler_type="cosine")
+    trainer._resolved_config_contract = lambda: {
+        "learning_rate": 1.0e-5,
+        "max_steps": 2500,
+    }
+    trainer._git_commit = lambda: "a" * 40
+
+    run_contract = trainer._training_state_contract()
+    assert run_contract["contract_version"] == 2
+    assert run_contract["provenance_mode"] == "stat_cmp"
+    assert run_contract["resolved_config"] == {
+        "learning_rate": 1.0e-5,
+        "max_steps": 2500,
+    }
+    assert "trainable_parameters_sha256" not in run_contract
+    assert "resolved_config_sha256" not in run_contract
 
 
 def test_checkpoint_publication_wait_uses_regular_complete_file(tmp_path):

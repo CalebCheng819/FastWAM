@@ -101,7 +101,16 @@ class Wan22Trainer:
                 "`agent_action_token_budget` must be positive when enabled, "
                 f"got {self.agent_action_token_budget}"
             )
-        
+        self.phase_balanced_fraction = float(
+            cfg.get("phase_balanced_fraction", 0.0)
+        )
+        if self.phase_balanced_fraction not in (0.0, 0.5):
+            raise ValueError(
+                "`phase_balanced_fraction` currently supports only 0.0 or "
+                "the audited B4 50/50 mixture (0.5), got "
+                f"{self.phase_balanced_fraction}"
+            )
+
         self.resume = cfg.resume
         self.trainable_scope = str(cfg.get("trainable_scope", "dit")).strip().lower()
         requested_checkpoint_state_kind = str(
@@ -125,12 +134,97 @@ class Wan22Trainer:
                 "checkpoint_state_kind='sparse_delta' is invalid when "
                 "trainable_scope='dit'"
             )
+        warm_start_cfg = cfg.get("weights_only_warm_start", {})
+        self.weights_only_warm_start_enabled = bool(
+            warm_start_cfg.get("enabled", False)
+        )
+        self.weights_only_warm_start_expected_source_training_mode = (
+            None
+            if warm_start_cfg.get("expected_source_training_mode") is None
+            else str(
+                warm_start_cfg.get("expected_source_training_mode")
+            ).strip().lower()
+        )
+        self.weights_only_warm_start_expected_source_trainable_scope = (
+            None
+            if warm_start_cfg.get("expected_source_trainable_scope") is None
+            else str(
+                warm_start_cfg.get("expected_source_trainable_scope")
+            ).strip().lower()
+        )
+        self.weights_only_warm_start_expected_source_state_kind = str(
+            warm_start_cfg.get("expected_source_state_kind", "full")
+        ).strip().lower()
+        if self.weights_only_warm_start_enabled:
+            if self.weights_only_warm_start_expected_source_training_mode not in {
+                "action_only_cache",
+                "joint",
+            }:
+                raise ValueError(
+                    "Enabled weights_only_warm_start requires an exact "
+                    "expected_source_training_mode of 'joint' or "
+                    "'action_only_cache', got "
+                    f"{self.weights_only_warm_start_expected_source_training_mode!r}"
+                )
+            if self.weights_only_warm_start_expected_source_trainable_scope not in {
+                "hub_io",
+                "action",
+                "dit",
+            }:
+                raise ValueError(
+                    "Enabled weights_only_warm_start requires an exact "
+                    "expected_source_trainable_scope of 'hub_io', 'action', or "
+                    "'dit', got "
+                    f"{self.weights_only_warm_start_expected_source_trainable_scope!r}"
+                )
+            if self.weights_only_warm_start_expected_source_state_kind != "full":
+                raise ValueError(
+                    "weights_only_warm_start only accepts a self-contained native-v2 "
+                    "source with expected_source_state_kind='full', got "
+                    f"{self.weights_only_warm_start_expected_source_state_kind!r}"
+                )
+            if self.checkpoint_state_kind != "full":
+                raise ValueError(
+                    "weights_only_warm_start requires checkpoint_state_kind='full' "
+                    "so the new treatment never publishes a base-dependent delta"
+                )
         self.allow_legacy_resume = bool(cfg.get("allow_legacy_resume", False))
         self.save_training_state_enabled = bool(cfg.get("save_training_state", True))
         self.seal_training_state = bool(cfg.get("seal_training_state", False))
         self.save_final_checkpoint_enabled = bool(cfg.get("save_final_checkpoint", True))
         self.seal_training_run = bool(cfg.get("seal_training_run", False))
         self.terminal_rehash_weights = bool(cfg.get("terminal_rehash_weights", True))
+        self.provenance_mode = str(
+            cfg.get("provenance_mode", "sha256")
+        ).strip().lower()
+        if self.provenance_mode not in {"sha256", "stat_cmp"}:
+            raise ValueError(
+                "`provenance_mode` must be one of ['sha256', 'stat_cmp'], got "
+                f"{self.provenance_mode!r}"
+            )
+        if self.provenance_mode == "stat_cmp":
+            incompatible_seals = {
+                "seal_training_state": self.seal_training_state,
+                "seal_training_run": self.seal_training_run,
+                "terminal_rehash_weights": self.terminal_rehash_weights,
+            }
+            enabled_seals = [
+                name for name, enabled in incompatible_seals.items() if enabled
+            ]
+            if enabled_seals:
+                raise ValueError(
+                    "provenance_mode='stat_cmp' cannot enable hash-based seals: "
+                    f"{enabled_seals}"
+                )
+            if self.checkpoint_state_kind != "full":
+                raise ValueError(
+                    "provenance_mode='stat_cmp' requires checkpoint_state_kind='full' "
+                    "so resume never depends on a hash-addressed sparse base"
+                )
+        # The native checkpoint loader runs before Accelerator/DeepSpeed
+        # wrapping, so pass the already validated publication policy directly
+        # to the model without adding it to the scientific architecture config.
+        self.model._checkpoint_provenance_mode = self.provenance_mode
         self.formal_n4_fullmodel_gate = bool(
             cfg.get("formal_n4_fullmodel_gate", False)
         )
@@ -874,11 +968,20 @@ class Wan22Trainer:
                 action_horizon=getattr(dataset, "action_horizon", None),
                 agent_action_token_budget=self.agent_action_token_budget,
                 gradient_accumulation_steps=self.gradient_accumulation_steps,
+                phase_balanced_fraction=self.phase_balanced_fraction,
             )
+            if getattr(self, "provenance_mode", "sha256") == "stat_cmp":
+                schedule_evidence_name = "schedule_exact_record_count"
+                schedule_evidence = self.train_sampler.global_batches_per_epoch
+            else:
+                schedule_evidence_name = "schedule_sha256"
+                schedule_evidence = self.train_sampler.schedule_fingerprint()
             logger.info(
                 "Using hierarchical task/count-balanced batching: counts=%s tasks_by_count=%s "
                 "batch_sizes=%s token_budget=%s global_batches=%d local_microbatches=%d "
-                "optimizer_steps=%d schedule_sha256=%s",
+                "optimizer_steps=%d phase_balanced_fraction=%.1f "
+                "original_global_batches=%d phase_balanced_global_batches=%d "
+                "%s=%s",
                 self.train_sampler.observed_agent_counts,
                 self.train_sampler.tasks_by_agent_count,
                 self.train_sampler.batch_size_by_agent_count,
@@ -886,7 +989,11 @@ class Wan22Trainer:
                 self.train_sampler.global_batches_per_epoch,
                 self.train_sampler.microbatches_per_process,
                 self.train_sampler.optimizer_steps_per_epoch,
-                self.train_sampler.schedule_fingerprint(),
+                self.train_sampler.phase_balanced_fraction,
+                self.train_sampler.original_global_batches_per_epoch,
+                self.train_sampler.phase_balanced_global_batches_per_epoch,
+                schedule_evidence_name,
+                schedule_evidence,
             )
             return DataLoader(
                 dataset,
@@ -900,6 +1007,11 @@ class Wan22Trainer:
             raise ValueError(
                 "`agent_action_token_budget` is enabled, but the dataset does not expose "
                 "agent-count metadata."
+            )
+        if self.phase_balanced_fraction:
+            raise ValueError(
+                "`phase_balanced_fraction` is enabled, but the dataset does not expose "
+                "the variable-agent task/count and B4 phase metadata it requires."
             )
         self._uses_agent_count_batch_sampler = False
         self.train_sampler = ResumableEpochSampler(
@@ -1053,16 +1165,18 @@ class Wan22Trainer:
                 digest.update(block)
         return digest.hexdigest()
 
-    @classmethod
-    def _dataset_contract(cls, dataset):
-        """Build a stable scientific identity without hashing the full HDF5 corpus."""
+    def _dataset_contract(self, dataset):
+        """Build the configured scientific data-identity contract."""
 
         if dataset is None:
             return None
+        provenance_mode = getattr(self, "provenance_mode", "sha256")
         contract = {
             "class": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
             "length": int(len(dataset)),
         }
+        if provenance_mode == "stat_cmp":
+            contract["provenance_mode"] = provenance_mode
         scalar_attributes = (
             "num_frames",
             "action_horizon",
@@ -1116,9 +1230,18 @@ class Wan22Trainer:
                         }
                     )
             contract["source_inventory_count"] = len(source_inventory)
-            contract["source_inventory_sha256"] = cls._canonical_json_sha256(
-                source_inventory
-            )
+            if provenance_mode == "stat_cmp":
+                # The directly inspectable inventory is intentionally retained
+                # rather than replaced with a digest.  It is small (one row per
+                # source HDF5 file) and makes path/size/mtime drift explicit.
+                contract["source_inventory"] = source_inventory
+                contract["source_inventory_total_bytes"] = sum(
+                    item["bytes"] for item in source_inventory
+                )
+            else:
+                contract["source_inventory_sha256"] = self._canonical_json_sha256(
+                    source_inventory
+                )
 
         entries = getattr(dataset, "entries", None)
         if entries is not None:
@@ -1133,18 +1256,40 @@ class Wan22Trainer:
                         if key != "path"
                     }
                 )
-            contract["window_index_sha256"] = cls._canonical_json_sha256(
-                normalized_entries
-            )
+            if provenance_mode == "stat_cmp":
+                entry_counts_by_source = {}
+                for entry in normalized_entries:
+                    source_path = str(entry.get("source_path", "<unknown>"))
+                    entry_counts_by_source[source_path] = (
+                        entry_counts_by_source.get(source_path, 0) + 1
+                    )
+                contract["window_index_count"] = len(normalized_entries)
+                contract["window_index_counts_by_source"] = dict(
+                    sorted(entry_counts_by_source.items())
+                )
+            else:
+                contract["window_index_sha256"] = self._canonical_json_sha256(
+                    normalized_entries
+                )
 
         stats_path = getattr(dataset, "_stats_path", None)
         if stats_path is not None:
             stats_path = Path(stats_path).expanduser().resolve()
-            contract["normalization"] = {
+            normalization = {
                 "path": str(stats_path),
-                "sha256": cls._sha256_file(stats_path),
                 "schema": getattr(dataset, "_stats_metadata", None),
             }
+            if provenance_mode == "stat_cmp":
+                stat_result = stats_path.stat()
+                normalization.update(
+                    {
+                        "bytes": int(stat_result.st_size),
+                        "mtime_ns": int(stat_result.st_mtime_ns),
+                    }
+                )
+            else:
+                normalization["sha256"] = self._sha256_file(stats_path)
+            contract["normalization"] = normalization
         return contract
 
     @staticmethod
@@ -1172,6 +1317,7 @@ class Wan22Trainer:
         for key in (
             "output_dir",
             "resume",
+            "weights_only_warm_start",
             "num_workers",
             "log_every",
             "save_every",
@@ -1183,6 +1329,7 @@ class Wan22Trainer:
             "save_final_checkpoint",
             "seal_training_run",
             "terminal_rehash_weights",
+            "provenance_mode",
             "allow_legacy_resume",
             "process_group_timeout_seconds",
             "checkpoint_io_timeout_seconds",
@@ -1238,13 +1385,13 @@ class Wan22Trainer:
                         "_resume_base_checkpoint_provenance",
                         None,
                     )
-        return {
-            "contract_version": 1,
+        provenance_mode = getattr(self, "provenance_mode", "sha256")
+        contract = {
+            "contract_version": 2 if provenance_mode == "stat_cmp" else 1,
             "state_kind": "accelerate_full_state",
             "treatment": treatment,
             "multi_robot_architecture": architecture,
             "trainable_parameters": trainable,
-            "trainable_parameters_sha256": self._canonical_json_sha256(trainable),
             "base_checkpoint": base_checkpoint,
             "dataset": self._dataset_run_contract,
             "optimization": {
@@ -1257,15 +1404,28 @@ class Wan22Trainer:
                 "warmup_steps": int(self.max_steps * 0.05),
                 "batch_size": self.batch_size,
                 "agent_action_token_budget": self.agent_action_token_budget,
+                "phase_balanced_fraction": self.phase_balanced_fraction,
                 "gradient_accumulation_steps": self.gradient_accumulation_steps,
                 "world_size": int(self.accelerator.num_processes),
                 "mixed_precision": self.mixed_precision,
                 "max_grad_norm": self.max_grad_norm,
                 "seed": self.seed,
             },
-            "resolved_config_sha256": self._canonical_json_sha256(config_contract),
             "code_commit": self._git_commit(),
         }
+        if provenance_mode == "stat_cmp":
+            # Keep the exact JSON-compatible structures in the trainer state;
+            # resume compares them recursively without computing a digest.
+            contract["provenance_mode"] = provenance_mode
+            contract["resolved_config"] = config_contract
+        else:
+            contract["trainable_parameters_sha256"] = self._canonical_json_sha256(
+                trainable
+            )
+            contract["resolved_config_sha256"] = self._canonical_json_sha256(
+                config_contract
+            )
+        return contract
 
     @staticmethod
     def _contract_mismatches(saved, current, *, prefix: str = "", limit: int = 32):
@@ -1453,9 +1613,18 @@ class Wan22Trainer:
 
         resume = self.resume
         if not resume:
+            if getattr(self, "weights_only_warm_start_enabled", False):
+                raise ValueError(
+                    "weights_only_warm_start.enabled=true requires a resume checkpoint file"
+                )
             return
-        resume_path = Path(str(resume))
+        resume_path = Path(str(resume)).expanduser()
         if resume_path.is_dir():
+            if getattr(self, "weights_only_warm_start_enabled", False):
+                raise ValueError(
+                    "weights_only_warm_start requires a .pt weight file, not a "
+                    f"full-state resume directory: {resume_path}"
+                )
             return
         if not resume_path.exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
@@ -1463,6 +1632,20 @@ class Wan22Trainer:
             raise ValueError(
                 f"Resume path must be a checkpoint file or state directory: {resume}"
             )
+        if getattr(self, "weights_only_warm_start_enabled", False):
+            if resume_path.suffix.lower() != ".pt":
+                raise ValueError(
+                    "weights_only_warm_start requires a native-v2 .pt weight file, got "
+                    f"{resume_path}"
+                )
+            self._load_explicit_weights_only_warm_start(resume_path)
+            self._weight_checkpoint_loaded_before_prepare = True
+            logger.warning(
+                "Loaded explicit cross-treatment weights-only warm start before "
+                "ZeRO master construction; optimizer, scheduler, epoch, and step "
+                "start from zero."
+            )
+            return
         logger.info(
             "Loading weight checkpoint before optimizer/DeepSpeed initialization: %s",
             resume,
@@ -1472,6 +1655,91 @@ class Wan22Trainer:
         logger.warning(
             "Loaded .pt weights before ZeRO master construction; "
             "optimizer/scheduler/step are intentionally not restored."
+        )
+
+    def _load_explicit_weights_only_warm_start(self, checkpoint_path: Path) -> None:
+        """Initialize from an explicitly declared native-v2 full checkpoint.
+
+        This is the only supported cross-treatment checkpoint path.  A cheap
+        meta-device read validates the source treatment before the model's
+        strict architecture/tensor loader performs the real load.  Calling the
+        native loader as a ``base_dependency`` intentionally skips only target
+        treatment equality; native format, architecture, state kind, tensor
+        keys, shapes, and dtypes remain strict.
+        """
+
+        resolved_path = checkpoint_path.expanduser().resolve(strict=True)
+        payload = torch.load(
+            resolved_path,
+            map_location="meta",
+            weights_only=True,
+            mmap=True,
+        )
+        if not isinstance(payload, dict):
+            raise TypeError(
+                "weights_only_warm_start checkpoint payload must be a mapping: "
+                f"{resolved_path}"
+            )
+        expected = {
+            "format": "fastwam_multi_robot_v2",
+            "state_kind": getattr(
+                self,
+                "weights_only_warm_start_expected_source_state_kind",
+                None,
+            ),
+            "training_mode": getattr(
+                self,
+                "weights_only_warm_start_expected_source_training_mode",
+                None,
+            ),
+            "trainable_scope": getattr(
+                self,
+                "weights_only_warm_start_expected_source_trainable_scope",
+                None,
+            ),
+        }
+        mismatches = {
+            key: {"expected": value, "observed": payload.get(key)}
+            for key, value in expected.items()
+            if payload.get(key) != value
+        }
+        if mismatches:
+            raise ValueError(
+                "weights_only_warm_start source metadata mismatch: "
+                f"{mismatches} in {resolved_path}"
+            )
+        if "mot" not in payload or "mot_trainable" in payload:
+            raise ValueError(
+                "weights_only_warm_start requires exactly a self-contained native-v2 "
+                f"full `mot` state: {resolved_path}"
+            )
+        if payload.get("base_checkpoint") is not None:
+            raise ValueError(
+                "weights_only_warm_start full source must declare "
+                f"base_checkpoint=null: {resolved_path}"
+            )
+        del payload
+
+        loader = getattr(self.model, "_load_checkpoint_with_role", None)
+        if not callable(loader):
+            raise TypeError(
+                "weights_only_warm_start requires the native FastWAM multi-robot "
+                "strict checkpoint loader"
+            )
+        loader(
+            str(resolved_path),
+            optimizer=None,
+            load_role="base_dependency",
+            active_paths=set(),
+            validate_trainable_scope=False,
+        )
+        logger.info(
+            "Validated explicit weights-only warm start: path=%s "
+            "source_training_mode=%s source_trainable_scope=%s source_state_kind=%s",
+            resolved_path,
+            self.weights_only_warm_start_expected_source_training_mode,
+            self.weights_only_warm_start_expected_source_trainable_scope,
+            self.weights_only_warm_start_expected_source_state_kind,
         )
 
     def _resume_training_state_after_prepare(self):
@@ -1629,6 +1897,10 @@ class Wan22Trainer:
             "agent_gaussian": 4,
             "action_is_pad": 2,
             "image_is_pad": 1,
+            "b4_target_action_phase": 2,
+            "b4_gripper_closed_target": 2,
+            "b4_gripper_event_target": 2,
+            "b4_stable_contact_proxy": 2,
         }
         missing = sorted(set(required_tensor_ranks) - set(sample))
         if missing:
@@ -1660,11 +1932,27 @@ class Wan22Trainer:
             raise ValueError(f"Invalid multi-robot action shape: {tuple(action.shape)}")
         if batched["agent_state"].shape[1] != num_agents:
             raise ValueError("agent_state and action agent axes differ in eval sample")
-        for key in ("agent_geometry", "agent_ids", "agent_gaussian", "action_is_pad"):
+        for key in (
+            "agent_geometry",
+            "agent_ids",
+            "agent_gaussian",
+            "action_is_pad",
+            "b4_target_action_phase",
+            "b4_gripper_closed_target",
+            "b4_gripper_event_target",
+            "b4_stable_contact_proxy",
+        ):
             if key in batched and batched[key].shape[1] != num_agents:
                 raise ValueError(f"{key} and action agent axes differ in eval sample")
-        if "action_is_pad" in batched and batched["action_is_pad"].shape[2] != horizon:
-            raise ValueError("action_is_pad and action horizon axes differ in eval sample")
+        for key in (
+            "action_is_pad",
+            "b4_target_action_phase",
+            "b4_gripper_closed_target",
+            "b4_gripper_event_target",
+            "b4_stable_contact_proxy",
+        ):
+            if key in batched and batched[key].shape[2] != horizon:
+                raise ValueError(f"{key} and action horizon axes differ in eval sample")
 
         agent_count = sample.get("agent_count", num_agents)
         if isinstance(agent_count, torch.Tensor):
@@ -2140,7 +2428,12 @@ class Wan22Trainer:
             with staged.open("rb") as handle:
                 os.fsync(handle.fileno())
             expected_bytes = staged.stat().st_size
-            expected_sha256 = self._sha256_regular_file(staged)
+            provenance_mode = getattr(self, "provenance_mode", "sha256")
+            expected_sha256 = (
+                self._sha256_regular_file(staged)
+                if provenance_mode == "sha256"
+                else None
+            )
 
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -2154,51 +2447,99 @@ class Wan22Trainer:
                 # still leave an unsealed file, which a retry refuses to replace.
                 destination.unlink(missing_ok=True)
                 raise
-            actual_bytes = destination.stat().st_size
-            actual_sha256 = self._sha256_regular_file(destination)
-            if (actual_bytes, actual_sha256) != (expected_bytes, expected_sha256):
+            destination_stat = destination.stat()
+            actual_bytes = destination_stat.st_size
+            if provenance_mode == "stat_cmp":
+                actual_sha256 = None
+                strong_readback_ok = (
+                    actual_bytes == expected_bytes
+                    and self._regular_files_bytewise_equal(staged, destination)
+                )
+            else:
+                actual_sha256 = self._sha256_regular_file(destination)
+                strong_readback_ok = (actual_bytes, actual_sha256) == (
+                    expected_bytes,
+                    expected_sha256,
+                )
+            if not strong_readback_ok:
+                if provenance_mode == "sha256":
+                    raise RuntimeError(
+                        "Published weights checkpoint failed strong readback: "
+                        f"expected=({expected_bytes},{expected_sha256}) "
+                        f"actual=({actual_bytes},{actual_sha256}) path={destination}"
+                    )
                 raise RuntimeError(
-                    "Published weights checkpoint failed strong readback: "
-                    f"expected=({expected_bytes},{expected_sha256}) "
-                    f"actual=({actual_bytes},{actual_sha256}) path={destination}"
+                    "Published weights checkpoint failed bytewise readback: "
+                    f"expected_bytes={expected_bytes} actual_bytes={actual_bytes} "
+                    f"path={destination}"
                 )
 
             manifest = {
                 "schema_name": "fastwam-weights-checkpoint",
-                "schema_version": 1,
+                "schema_version": 2 if provenance_mode == "stat_cmp" else 1,
                 "filename": destination.name,
                 "bytes": actual_bytes,
-                "sha256": actual_sha256,
                 "global_step": int(self.global_step),
                 "checkpoint_state_kind": self.checkpoint_state_kind,
             }
+            if provenance_mode == "stat_cmp":
+                manifest.update(
+                    {
+                        "path": str(destination.resolve()),
+                        "mtime_ns": int(destination_stat.st_mtime_ns),
+                        "file_count": 1,
+                        "verification": "stat+bytewise-cmp",
+                    }
+                )
+            else:
+                manifest["sha256"] = actual_sha256
             manifest_bytes = (
                 json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
             ).encode("utf-8")
             self._publish_exclusive_bytes(manifest_path, manifest_bytes)
-            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            if provenance_mode == "stat_cmp":
+                manifest_stat = manifest_path.stat()
+                complete = {
+                    "schema_name": "fastwam-weights-checkpoint-complete",
+                    "schema_version": 2,
+                    "manifest_filename": manifest_path.name,
+                    "manifest_bytes": int(manifest_stat.st_size),
+                    "manifest_mtime_ns": int(manifest_stat.st_mtime_ns),
+                    "checkpoint_filename": destination.name,
+                    "checkpoint_bytes": int(actual_bytes),
+                    "checkpoint_mtime_ns": int(destination_stat.st_mtime_ns),
+                    "file_count": 1,
+                    "verification": "stat+bytewise-cmp",
+                }
+            else:
+                manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+                complete = {
+                    "schema_name": "fastwam-weights-checkpoint-complete",
+                    "schema_version": 1,
+                    "manifest_filename": manifest_path.name,
+                    "manifest_sha256": manifest_sha256,
+                    "checkpoint_sha256": actual_sha256,
+                }
             complete_bytes = (
-                json.dumps(
-                    {
-                        "schema_name": "fastwam-weights-checkpoint-complete",
-                        "schema_version": 1,
-                        "manifest_filename": manifest_path.name,
-                        "manifest_sha256": manifest_sha256,
-                        "checkpoint_sha256": actual_sha256,
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n"
+                json.dumps(complete, sort_keys=True, separators=(",", ":")) + "\n"
             ).encode("utf-8")
             self._publish_exclusive_bytes(complete_path, complete_bytes)
-            logger.info(
-                "Sealed weights checkpoint: path=%s bytes=%d sha256=%s manifest=%s",
-                destination,
-                actual_bytes,
-                actual_sha256,
-                manifest_path,
-            )
+            if provenance_mode == "stat_cmp":
+                logger.info(
+                    "Published weights checkpoint: path=%s bytes=%d "
+                    "verification=stat+bytewise-cmp manifest=%s",
+                    destination,
+                    actual_bytes,
+                    manifest_path,
+                )
+            else:
+                logger.info(
+                    "Sealed weights checkpoint: path=%s bytes=%d sha256=%s manifest=%s",
+                    destination,
+                    actual_bytes,
+                    actual_sha256,
+                    manifest_path,
+                )
             return str(destination)
         except BaseException:
             # The three paths were verified absent and are created exclusively
@@ -2218,6 +2559,36 @@ class Wan22Trainer:
             for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _regular_files_bytewise_equal(
+        source: Path,
+        destination: Path,
+        *,
+        chunk_bytes: int = 8 * 1024 * 1024,
+    ) -> bool:
+        """Compare two regular files without producing a persistent digest."""
+
+        if (
+            source.is_symlink()
+            or destination.is_symlink()
+            or not source.is_file()
+            or not destination.is_file()
+        ):
+            return False
+        if source.stat().st_size != destination.stat().st_size:
+            return False
+        with (
+            source.open("rb") as source_handle,
+            destination.open("rb") as destination_handle,
+        ):
+            while True:
+                source_block = source_handle.read(chunk_bytes)
+                destination_block = destination_handle.read(chunk_bytes)
+                if source_block != destination_block:
+                    return False
+                if not source_block:
+                    return True
 
     @staticmethod
     def _publish_exclusive_bytes(path: Path, payload: bytes) -> None:
@@ -2330,15 +2701,98 @@ class Wan22Trainer:
             "run_contract": self._training_state_contract(),
         }
         if self._uses_agent_count_batch_sampler:
-            payload["data_schedule"] = {
-                "fingerprint": self.train_sampler.schedule_fingerprint(self.epoch),
-                "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
-                "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
-                "num_processes": self.train_sampler.num_processes,
-                "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
-                "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
-            }
+            payload["data_schedule"] = self._data_schedule_contract(self.epoch)
         publish_exclusive_json(state_file, payload)
+
+    def _data_schedule_contract(self, epoch: int) -> dict[str, object]:
+        """Describe the exact rank-aligned schedule used for an epoch."""
+
+        provenance_mode = getattr(self, "provenance_mode", "sha256")
+        contract = {
+            "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
+            "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
+            "num_processes": self.train_sampler.num_processes,
+            "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
+            "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
+            "phase_balanced_fraction": self.train_sampler.phase_balanced_fraction,
+            "original_global_batches_per_epoch": (
+                self.train_sampler.original_global_batches_per_epoch
+            ),
+            "phase_balanced_global_batches_per_epoch": (
+                self.train_sampler.phase_balanced_global_batches_per_epoch
+            ),
+        }
+        if provenance_mode == "stat_cmp":
+            contract["provenance_mode"] = provenance_mode
+            contract["epoch"] = int(epoch)
+            contract["exact_schedule"] = [
+                {
+                    "source": source,
+                    "phase": phase,
+                    "indices": list(indices),
+                }
+                for source, phase, indices in self.train_sampler.global_epoch_schedule(
+                    int(epoch)
+                )
+            ]
+            contract["schedule_record_count"] = len(contract["exact_schedule"])
+        else:
+            contract["fingerprint"] = self.train_sampler.schedule_fingerprint(
+                int(epoch)
+            )
+        return contract
+
+    def _validate_data_schedule_compatibility(
+        self,
+        payload: dict,
+        *,
+        state_file: Path,
+    ) -> None:
+        """Reject schedule drift before Accelerate mutates training state."""
+
+        if not self._uses_agent_count_batch_sampler:
+            return
+        saved_schedule = payload.get("data_schedule")
+        if saved_schedule is None:
+            if self.phase_balanced_fraction:
+                raise RuntimeError(
+                    "B4 full-state resume lacks the required data_schedule contract "
+                    f"and is refused before accelerator.load_state: {state_file}"
+                )
+            logger.warning(
+                "Trainer state predates data-schedule contracts; resume "
+                "compatibility cannot be verified: %s",
+                state_file,
+            )
+            return
+        if not isinstance(saved_schedule, dict):
+            raise TypeError(f"data_schedule must be a mapping: {state_file}")
+        saved_schedule = dict(saved_schedule)
+        if not self.phase_balanced_fraction:
+            # Pre-B4 trainer states already carried the deterministic schedule
+            # fingerprint and totals.  Interpret their absent B4 fields as the
+            # original-only schedule so the default 0.0 treatment remains
+            # backward compatible; B4 (0.5) never takes this migration path.
+            saved_schedule.setdefault("phase_balanced_fraction", 0.0)
+            saved_schedule.setdefault(
+                "original_global_batches_per_epoch",
+                saved_schedule.get("global_batches_per_epoch"),
+            )
+            saved_schedule.setdefault("phase_balanced_global_batches_per_epoch", 0)
+        current_schedule = self._data_schedule_contract(
+            int(payload.get("epoch", 0))
+        )
+        mismatches = {
+            key: (saved_schedule.get(key), current_value)
+            for key, current_value in current_schedule.items()
+            if saved_schedule.get(key) != current_value
+        }
+        if mismatches:
+            raise RuntimeError(
+                "Cannot resume with a different deterministic data schedule "
+                "before accelerator.load_state: "
+                f"{mismatches}"
+            )
 
     @staticmethod
     def _seal_training_state_tree(state_path: str) -> dict:
@@ -2450,6 +2904,10 @@ class Wan22Trainer:
             ) = self._validate_resumable_terminal_evidence(
                 payload, state_file=state_file
             )
+            self._validate_data_schedule_compatibility(
+                payload,
+                state_file=state_file,
+            )
         elif not self.allow_legacy_resume:
             raise RuntimeError(
                 "Full-state resume is missing trainer_state.json and is refused before "
@@ -2469,32 +2927,6 @@ class Wan22Trainer:
                 self.epoch = int(payload["epoch"])
                 self.batch_in_epoch = int(payload["batch_in_epoch"])
                 self._set_train_data_epoch(self.epoch)
-                if self._uses_agent_count_batch_sampler:
-                    saved_schedule = payload.get("data_schedule")
-                    if saved_schedule is None:
-                        logger.warning(
-                            "Trainer state predates data-schedule fingerprints; "
-                            "resume compatibility cannot be verified."
-                        )
-                    else:
-                        current_schedule = {
-                            "fingerprint": self.train_sampler.schedule_fingerprint(self.epoch),
-                            "agent_action_token_budget": self.train_sampler.agent_action_token_budget,
-                            "gradient_accumulation_steps": self.train_sampler.gradient_accumulation_steps,
-                            "num_processes": self.train_sampler.num_processes,
-                            "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
-                            "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
-                        }
-                        mismatches = {
-                            key: (saved_schedule.get(key), current_value)
-                            for key, current_value in current_schedule.items()
-                            if saved_schedule.get(key) != current_value
-                        }
-                        if mismatches:
-                            raise RuntimeError(
-                                "Cannot resume with a different deterministic data schedule: "
-                                f"{mismatches}"
-                            )
                 self.train_sampler.set_resume_batch_offset(self.batch_in_epoch)
                 if self._uses_agent_count_batch_sampler:
                     logger.info(

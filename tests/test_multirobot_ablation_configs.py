@@ -11,6 +11,7 @@ TEST_GAUSSIAN_CACHE_DIR = "/cpfs/test/robofactory/compact-gaussian-v1"
 TEST_GAUSSIAN_MANIFEST_SHA256 = "1" * 64
 TEST_GAUSSIAN_SELECTION_SHA256 = "2" * 64
 TEST_GAUSSIAN_SOURCE_IDENTITY_SHA256 = "3" * 64
+TEST_B4_BASE_CHECKPOINT = "/oss/test/fastwam-vg1hub1gau1-step-005000.pt"
 
 ARMS = {
     "robofactory_multi_robot_vg0_hub0_gau0_224_1e-4": {
@@ -369,3 +370,90 @@ def test_n4_fullmodel_gate_profile_composes_exact_cardinality_scope(monkeypatch)
     assert cfg["agent_action_token_budget"] == 128
     assert cfg["data"]["train"]["required_agent_counts"] == [4]
     assert cfg["data"]["val"]["required_agent_counts"] == [4]
+
+
+def test_b4_24gpu_profile_is_action_only_weight_warm_start(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    for name in (
+        "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FASTWAM_B4_BASE_CHECKPOINT", TEST_B4_BASE_CHECKPOINT)
+    cfg = _compose_arm(
+        "robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5",
+        "+scale=robofactory_multi_robot_24gpu_b4",
+    )
+
+    assert cfg["resume"] == TEST_B4_BASE_CHECKPOINT
+    assert cfg["weights_only_warm_start"] == {
+        "enabled": True,
+        "expected_source_training_mode": "joint",
+        "expected_source_trainable_scope": "dit",
+        "expected_source_state_kind": "full",
+    }
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["action_dit_config"]["hub_enabled"] is True
+    assert cfg["model"]["action_dit_config"]["enable_gaussian"] is True
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["lambda_action"] == 1.0
+    assert cfg["model"]["loss"]["b4"] == {
+        "enabled": True,
+        "lambda_arm_huber": 1.0,
+        "lambda_gripper_event": 2.0,
+        "lambda_contact_intent_proxy": 1.0,
+        "arm_huber_beta": 0.1,
+        "first_steps": 5,
+        "first_steps_weight": 2.0,
+        "gripper_dim": 7,
+        "gripper_action_mean": 0.24164481092854787,
+        "gripper_action_std": 0.9469631616807775,
+        "event_delta_threshold": 0.05,
+        "stable_closed_command_threshold": -0.8,
+        "closed_command_threshold": 0.0,
+        "stable_steps": 4,
+        "event_temperature": 0.05,
+        "closed_temperature": 0.1,
+        "background_weight": 0.25,
+    }
+    assert cfg["phase_balanced_fraction"] == 0.5
+    assert cfg["learning_rate"] == 1.0e-5
+    assert cfg["max_steps"] == 2500
+    assert cfg["save_every"] == 1250
+    assert cfg["eval_every"] == 1250
+    assert cfg["offline_eval_num_samples"] == 12
+    assert cfg["gradient_accumulation_steps"] == 1
+    assert cfg["checkpoint_state_kind"] == "full"
+    assert cfg["provenance_mode"] == "stat_cmp"
+    assert cfg["save_training_state"] is True
+    assert cfg["seal_training_state"] is False
+    assert cfg["seal_training_run"] is False
+    assert cfg["terminal_rehash_weights"] is False
+
+    for split in ("train", "val"):
+        assert cfg["data"][split]["required_agent_counts"] == [2, 3, 4]
+        assert cfg["data"][split]["load_future_video"] is False
+        assert cfg["data"][split]["gaussian_cache_verify"] == "stat_cmp"
+        assert cfg["data"][split]["gaussian_cache_expected_manifest_sha256"] is None
+        assert cfg["data"][split]["gaussian_cache_expected_selection_sha256"] is None
+        assert (
+            cfg["data"][split]["gaussian_cache_expected_source_identity_sha256"]
+            is None
+        )
+        assert "max_agents" not in cfg["data"][split]
+
+
+def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):
+    _set_gaussian_env(monkeypatch)
+    cfg = _compose_arm("robofactory_multi_robot_vg1_hub1_gau1_224_1e-4")
+
+    assert cfg["phase_balanced_fraction"] == 0.0
+    assert cfg["provenance_mode"] == "sha256"
+    assert cfg["weights_only_warm_start"] == {
+        "enabled": False,
+        "expected_source_training_mode": None,
+        "expected_source_trainable_scope": None,
+        "expected_source_state_kind": "full",
+    }

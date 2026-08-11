@@ -11,16 +11,26 @@ from fastwam.utils.samplers import (
     ResumableAgentCountBatchSampler,
     ResumableEpochSampler,
     resolve_agent_counts,
+    resolve_b4_phase_labels,
     resolve_task_ids,
 )
 
 
 class _AgentCountsDataset(torch.utils.data.Dataset):
-    def __init__(self, agent_counts, task_ids, action_horizon=4, treatment="control"):
+    def __init__(
+        self,
+        agent_counts,
+        task_ids,
+        action_horizon=4,
+        treatment="control",
+        b4_phase_labels=None,
+    ):
         self.agent_counts = tuple(agent_counts)
         self.task_ids = tuple(task_ids)
         self.action_horizon = int(action_horizon)
         self.treatment = treatment
+        if b4_phase_labels is not None:
+            self.b4_phase_labels = tuple(tuple(labels) for labels in b4_phase_labels)
 
     def __len__(self):
         return len(self.agent_counts)
@@ -116,6 +126,119 @@ def test_resolve_agent_counts_and_task_ids_support_sequence_getter_and_entries()
     assert resolve_task_ids(entries_dataset) == ("one", "two")
     assert resolve_agent_counts(_GenericDataset(3)) is None
     assert resolve_task_ids(_GenericDataset(3)) is None
+
+
+def test_resolve_b4_phase_labels_preserves_multilabel_windows():
+    dataset = _AgentCountsDataset(
+        [2, 2, 3],
+        ["a", "a", "b"],
+        b4_phase_labels=[
+            ("neutral", "closing"),
+            ("stable_closed_command_proxy",),
+            ("opening", "neutral"),
+        ],
+    )
+
+    assert resolve_b4_phase_labels(dataset) == (
+        ("closing", "neutral"),
+        ("stable_closed_command_proxy",),
+        ("neutral", "opening"),
+    )
+
+
+def test_b4_sampler_is_exact_per_rank_50_50_and_multilabel_balanced():
+    records = (
+        [(2, "n2-a", ("neutral",))] * 3
+        + [(2, "n2-a", ("closing", "neutral"))] * 2
+        + [(2, "n2-a", ("stable_closed_command_proxy",))] * 2
+        + [(2, "n2-a", ("opening", "neutral"))] * 2
+        + [(3, "n3-a", ("neutral",))] * 3
+        + [(3, "n3-a", ("closing", "neutral"))] * 2
+        + [(3, "n3-a", ("stable_closed_command_proxy",))] * 2
+        + [(3, "n3-a", ("opening", "neutral"))] * 2
+    )
+    dataset = _AgentCountsDataset(
+        [count for count, _, _ in records],
+        [task for _, task, _ in records],
+        action_horizon=4,
+        b4_phase_labels=[labels for _, _, labels in records],
+    )
+    sampler = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        agent_action_token_budget=24,
+        gradient_accumulation_steps=2,
+        phase_balanced_fraction=0.5,
+    )
+    baseline_sampler = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        agent_action_token_budget=24,
+        gradient_accumulation_steps=2,
+    )
+    schedule = sampler.global_epoch_schedule()
+
+    assert sampler.global_batches_per_epoch == baseline_sampler.global_batches_per_epoch
+    assert sampler.optimizer_steps_per_epoch == baseline_sampler.optimizer_steps_per_epoch
+    assert len(schedule) == sampler.base_global_batches_per_epoch
+    assert Counter(source for source, _, _ in schedule) == {
+        "original": sampler.base_global_batches_per_epoch // 2,
+        "phase_balanced": sampler.base_global_batches_per_epoch // 2,
+    }
+    for stratum, batch_count in sampler.batches_per_stratum.items():
+        assert batch_count % 2 == 0
+        assert sampler.original_batches_per_stratum[stratum] == batch_count // 2
+        assert sampler.phase_balanced_batches_per_stratum[stratum] == batch_count // 2
+    selected_labels = Counter(
+        (dataset.agent_counts[batch[0]], label)
+        for source, label, batch in schedule
+        if source == "phase_balanced"
+    )
+    for count in (2, 3):
+        frequencies = [
+            selected_labels[(count, label)]
+            for label in (
+                "neutral",
+                "closing",
+                "stable_closed_command_proxy",
+                "opening",
+            )
+        ]
+        assert max(frequencies) - min(frequencies) <= 1
+    for source, label, batch in schedule:
+        count = dataset.agent_counts[batch[0]]
+        assert {dataset.agent_counts[index] for index in batch} == {count}
+        assert len(batch) * count * dataset.action_horizon <= 24
+        if source == "phase_balanced":
+            assert all(label in dataset.b4_phase_labels[index] for index in batch)
+
+    for rank in range(2):
+        rank_records = schedule[rank::2]
+        assert Counter(source for source, _, _ in rank_records) == {
+            "original": len(rank_records) // 2,
+            "phase_balanced": len(rank_records) // 2,
+        }
+
+    replay = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        agent_action_token_budget=24,
+        gradient_accumulation_steps=2,
+        phase_balanced_fraction=0.5,
+    )
+    assert replay.global_epoch_schedule() == schedule
+    replay.set_resume_batch_offset(2)
+    full_rank_zero = [batch for _, _, batch in schedule][0::2]
+    resumed_rank_zero = list(
+        BatchSamplerShard(replay, 2, 0, split_batches=False, even_batches=False)
+    )
+    assert resumed_rank_zero == full_rank_zero[2:]
 
 
 def test_hierarchical_balance_and_real_token_budget_batches():
@@ -305,6 +428,158 @@ def test_trainer_step_estimate_uses_aligned_optimizer_steps():
     trainer.num_epochs = 3
 
     assert trainer._estimate_total_train_steps() == sampler.optimizer_steps_per_epoch * 3
+
+
+def test_trainer_build_loader_enables_b4_phase_balanced_sampler():
+    records = (
+        [(2, "n2-a", ("neutral",))] * 2
+        + [(2, "n2-a", ("closing",))] * 2
+        + [(2, "n2-a", ("stable_closed_command_proxy",))] * 2
+        + [(2, "n2-a", ("opening",))] * 2
+        + [(3, "n3-a", ("neutral",))] * 2
+        + [(3, "n3-a", ("closing",))] * 2
+        + [(3, "n3-a", ("stable_closed_command_proxy",))] * 2
+        + [(3, "n3-a", ("opening",))] * 2
+    )
+    dataset = _AgentCountsDataset(
+        [count for count, _, _ in records],
+        [task for _, task, _ in records],
+        action_horizon=4,
+        b4_phase_labels=[labels for _, _, labels in records],
+    )
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.seed = 31
+    trainer.batch_size = 1
+    trainer.num_workers = 0
+    trainer.accelerator = SimpleNamespace(num_processes=2)
+    trainer.agent_action_token_budget = 24
+    trainer.gradient_accumulation_steps = 2
+    trainer.phase_balanced_fraction = 0.5
+
+    loader = trainer._build_loader(dataset)
+
+    assert loader.batch_sampler is trainer.train_sampler
+    assert trainer.train_sampler.phase_balanced_fraction == 0.5
+    assert trainer.train_sampler.original_global_batches_per_epoch == (
+        trainer.train_sampler.phase_balanced_global_batches_per_epoch
+    )
+    schedule = trainer._data_schedule_contract(epoch=3)
+    assert schedule["phase_balanced_fraction"] == 0.5
+    assert schedule["original_global_batches_per_epoch"] == (
+        schedule["phase_balanced_global_batches_per_epoch"]
+    )
+
+
+def test_b4_stat_cmp_schedule_contract_records_exact_schedule_without_hash():
+    dataset = _AgentCountsDataset(
+        [2] * 8,
+        ["n2-a"] * 8,
+        action_horizon=4,
+        b4_phase_labels=[
+            ("neutral",),
+            ("neutral",),
+            ("closing",),
+            ("closing",),
+            ("stable_closed_command_proxy",),
+            ("stable_closed_command_proxy",),
+            ("opening",),
+            ("opening",),
+        ],
+    )
+    sampler = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        agent_action_token_budget=24,
+        gradient_accumulation_steps=2,
+        phase_balanced_fraction=0.5,
+    )
+    sampler.schedule_fingerprint = lambda *_args, **_kwargs: pytest.fail(
+        "stat_cmp schedule contracts must not compute a digest"
+    )
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.train_sampler = sampler
+    trainer.provenance_mode = "stat_cmp"
+
+    schedule = trainer._data_schedule_contract(epoch=3)
+
+    assert schedule["provenance_mode"] == "stat_cmp"
+    assert schedule["epoch"] == 3
+    assert schedule["schedule_record_count"] == sampler.global_batches_per_epoch
+    assert len(schedule["exact_schedule"]) == sampler.global_batches_per_epoch
+    assert all(
+        set(record) == {"source", "phase", "indices"}
+        for record in schedule["exact_schedule"]
+    )
+    assert "fingerprint" not in schedule
+
+
+def test_b4_schedule_drift_is_rejected_before_state_mutation(tmp_path):
+    dataset = _AgentCountsDataset(
+        [2] * 8,
+        ["n2-a"] * 8,
+        action_horizon=4,
+        b4_phase_labels=[
+            ("neutral",),
+            ("neutral",),
+            ("closing",),
+            ("closing",),
+            ("stable_closed_command_proxy",),
+            ("stable_closed_command_proxy",),
+            ("opening",),
+            ("opening",),
+        ],
+    )
+    sampler = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        agent_action_token_budget=24,
+        gradient_accumulation_steps=2,
+        phase_balanced_fraction=0.5,
+    )
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.train_sampler = sampler
+    trainer._uses_agent_count_batch_sampler = True
+    trainer.phase_balanced_fraction = 0.5
+    saved_schedule = trainer._data_schedule_contract(epoch=0)
+    saved_schedule["phase_balanced_fraction"] = 0.0
+
+    with pytest.raises(RuntimeError, match="before accelerator.load_state"):
+        trainer._validate_data_schedule_compatibility(
+            {"epoch": 0, "data_schedule": saved_schedule},
+            state_file=tmp_path / "trainer_state.json",
+        )
+
+
+def test_phase_zero_accepts_pre_b4_schedule_contract(tmp_path):
+    dataset = _imbalanced_dataset()
+    sampler = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        agent_action_token_budget=24,
+        gradient_accumulation_steps=2,
+    )
+    trainer = Wan22Trainer.__new__(Wan22Trainer)
+    trainer.train_sampler = sampler
+    trainer._uses_agent_count_batch_sampler = True
+    trainer.phase_balanced_fraction = 0.0
+    saved_schedule = trainer._data_schedule_contract(epoch=0)
+    for key in (
+        "phase_balanced_fraction",
+        "original_global_batches_per_epoch",
+        "phase_balanced_global_batches_per_epoch",
+    ):
+        saved_schedule.pop(key)
+
+    trainer._validate_data_schedule_compatibility(
+        {"epoch": 0, "data_schedule": saved_schedule},
+        state_file=tmp_path / "trainer_state.json",
+    )
 
 
 def test_performance_counts_use_real_dynamic_work():

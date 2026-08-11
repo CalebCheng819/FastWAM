@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 import threading
 import time
@@ -184,4 +185,125 @@ def test_ready_marker_reader_rejects_symlink(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="must not be a symlink"):
         module.publish_rank_zero_file(
             target, payload, rank=1, world_size=2, timeout_seconds=1
+        )
+
+
+def test_stat_cmp_barrier_uses_attempt_marker_and_never_hashes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    payload = b"model: fastwam-b4\n"
+
+    class ForbiddenHashlib:
+        @staticmethod
+        def sha256(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("stat_cmp must not calculate a SHA-256 digest")
+
+    monkeypatch.setattr(module, "hashlib", ForbiddenHashlib)
+    assert (
+        module.publish_rank_zero_file(
+            target,
+            payload,
+            rank=0,
+            world_size=2,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id="b4-attempt-17",
+        )
+        is None
+    )
+    assert (
+        module.publish_rank_zero_file(
+            target,
+            payload,
+            rank=1,
+            world_size=2,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id="b4-attempt-17",
+        )
+        is None
+    )
+
+    ready = tmp_path / ".config.yaml.ready.stat_cmp.b4-attempt-17"
+    marker = json.loads(ready.read_bytes())
+    assert set(marker) == {
+        "schema",
+        "attempt_id",
+        "path",
+        "bytes",
+        "mtime_ns",
+        "count",
+    }
+    assert marker == {
+        "schema": "fastwam-runtime-file-barrier-stat-cmp-v1",
+        "attempt_id": "b4-attempt-17",
+        "path": str(target.resolve()),
+        "bytes": len(payload),
+        "mtime_ns": target.stat().st_mtime_ns,
+        "count": 1,
+    }
+    assert "sha" not in ready.read_text(encoding="utf-8").lower()
+    assert target.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    "attempt_id",
+    [None, "", "../escape", "space is unsafe", "/absolute", "a" * 129],
+)
+def test_stat_cmp_barrier_rejects_unsafe_attempt_id(
+    tmp_path: Path, attempt_id: str | None
+) -> None:
+    module = _load_module()
+    with pytest.raises(ValueError, match="requires a safe non-empty attempt_id"):
+        module.publish_rank_zero_file(
+            tmp_path / "config.yaml",
+            b"seed: 42\n",
+            rank=0,
+            world_size=1,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id=attempt_id,
+        )
+
+
+def test_stat_cmp_barrier_same_attempt_fails_closed_on_payload_or_file_change(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    original = b"seed: 42\n"
+    module.publish_rank_zero_file(
+        target,
+        original,
+        rank=0,
+        world_size=1,
+        timeout_seconds=1,
+        provenance_mode="stat_cmp",
+        attempt_id="attempt-reuse",
+    )
+
+    with pytest.raises(RuntimeError, match="byte comparison mismatch"):
+        module.publish_rank_zero_file(
+            target,
+            b"seed: 43\n",
+            rank=0,
+            world_size=1,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id="attempt-reuse",
+        )
+
+    target.write_bytes(b"seed: 99\n")
+    with pytest.raises(RuntimeError, match="byte comparison mismatch"):
+        module.publish_rank_zero_file(
+            target,
+            original,
+            rank=1,
+            world_size=2,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id="attempt-reuse",
         )

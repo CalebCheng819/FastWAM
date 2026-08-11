@@ -31,6 +31,95 @@ DEFAULT_INSTRUCTIONS = {
 }
 
 
+# These labels describe target gripper *commands*, not measured contact or
+# task-semantic phases.  Keeping the vocabulary and thresholds explicit makes
+# every B4 label reproducible from ``actions/<agent>[t, 7]`` in the source HDF5.
+B4_TARGET_ACTION_PHASE_NAMES = (
+    "neutral",
+    "closing",
+    "stable_closed_command_proxy",
+    "opening",
+)
+B4_GRIPPER_EVENT_NAMES = ("none", "closing", "opening")
+
+
+def derive_b4_target_action_proxies(
+    gripper_commands: torch.Tensor | np.ndarray,
+    *,
+    event_delta_threshold: float = 0.05,
+    closed_command_threshold: float = -0.8,
+    stable_steps: int = 4,
+) -> dict[str, torch.Tensor]:
+    """Derive auditable B4 labels from raw target gripper commands.
+
+    Args:
+        gripper_commands: Raw (unnormalized) action dimension 7 with shape
+            ``[N, T]`` or ``[T]``.  Position ``t`` always labels target action
+            ``action[t]``; callers that slice a training window must include
+            enough preceding commands to preserve the delta/hold history.
+
+    Returns:
+        ``phase`` (int64): 0 neutral/unresolved steady, 1 closing transition,
+        2 stable-closed-command proxy, 3 opening transition.
+        ``closed_target`` (float32): command is non-positive.
+        ``event_target`` (int64): 0 none, 1 closing, 2 opening.
+        ``stable_closed_proxy`` (float32): ``stable_steps`` consecutive closed
+        and steady commands.  This is deliberately *not* a contact label.
+    """
+
+    event_delta_threshold = float(event_delta_threshold)
+    closed_command_threshold = float(closed_command_threshold)
+    stable_steps = int(stable_steps)
+    if not np.isfinite(event_delta_threshold) or event_delta_threshold <= 0.0:
+        raise ValueError("event_delta_threshold must be finite and positive")
+    if not np.isfinite(closed_command_threshold):
+        raise ValueError("closed_command_threshold must be finite")
+    if stable_steps < 1:
+        raise ValueError("stable_steps must be positive")
+
+    commands = torch.as_tensor(gripper_commands, dtype=torch.float32)
+    squeeze_agent_axis = commands.ndim == 1
+    if squeeze_agent_axis:
+        commands = commands.unsqueeze(0)
+    if commands.ndim != 2:
+        raise ValueError(
+            f"gripper_commands must have shape [N,T] or [T], got {tuple(commands.shape)}"
+        )
+    if not bool(torch.isfinite(commands).all().item()):
+        raise ValueError("gripper_commands contains non-finite values")
+
+    delta = torch.zeros_like(commands)
+    if commands.shape[-1] > 1:
+        delta[:, 1:] = commands[:, 1:] - commands[:, :-1]
+    closing = delta < -event_delta_threshold
+    opening = delta > event_delta_threshold
+    closed = commands <= closed_command_threshold
+    steady = delta.abs() <= event_delta_threshold
+    stable_closed = closed & steady
+    for offset in range(1, stable_steps):
+        shifted = torch.zeros_like(stable_closed)
+        shifted[:, offset:] = closed[:, :-offset] & steady[:, :-offset]
+        stable_closed &= shifted
+
+    phase = torch.zeros_like(commands, dtype=torch.long)
+    phase[stable_closed] = 2
+    # A changing command is an event even while it crosses the closed threshold.
+    phase[closing] = 1
+    phase[opening] = 3
+    event = torch.zeros_like(commands, dtype=torch.long)
+    event[closing] = 1
+    event[opening] = 2
+    result = {
+        "phase": phase,
+        "closed_target": (commands <= 0.0).to(torch.float32),
+        "event_target": event,
+        "stable_closed_proxy": stable_closed.to(torch.float32),
+    }
+    if squeeze_agent_axis:
+        result = {key: value.squeeze(0) for key, value in result.items()}
+    return result
+
+
 def _plain_mapping(value: Optional[Mapping[str, str] | DictConfig]) -> dict[str, str]:
     if value is None:
         return dict(DEFAULT_INSTRUCTIONS)
@@ -149,6 +238,9 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         require_train_only_stats: bool = False,
         context_len: int = 128,
         instruction_map: Optional[Mapping[str, str] | DictConfig] = None,
+        b4_proxy_event_delta_threshold: float = 0.05,
+        b4_proxy_closed_command_threshold: float = -0.8,
+        b4_proxy_stable_steps: int = 4,
     ):
         self.root_dir = Path(root_dir).expanduser().resolve()
         if not self.root_dir.exists():
@@ -183,7 +275,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             if gaussian_cache_dir is None
             else Path(gaussian_cache_dir).expanduser().resolve()
         )
-        self.gaussian_cache_verify = str(gaussian_cache_verify)
+        self.gaussian_cache_verify = str(gaussian_cache_verify).strip().lower()
         self.gaussian_cache_expected_manifest_sha256 = _optional_sha256(
             gaussian_cache_expected_manifest_sha256,
             field="gaussian_cache_expected_manifest_sha256",
@@ -201,6 +293,18 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         self.require_train_only_stats = bool(require_train_only_stats)
         self.context_len = int(context_len)
         self.instruction_map = _plain_mapping(instruction_map)
+        self.b4_proxy_event_delta_threshold = float(b4_proxy_event_delta_threshold)
+        self.b4_proxy_closed_command_threshold = float(
+            b4_proxy_closed_command_threshold
+        )
+        self.b4_proxy_stable_steps = int(b4_proxy_stable_steps)
+        # Validate the public proxy parameters once, before opening source data.
+        derive_b4_target_action_proxies(
+            torch.zeros(1, 1),
+            event_delta_threshold=self.b4_proxy_event_delta_threshold,
+            closed_command_threshold=self.b4_proxy_closed_command_threshold,
+            stable_steps=self.b4_proxy_stable_steps,
+        )
         self._h5_handles: dict[str, h5py.File] = {}
         self._gaussian_cache: Optional[GaussianCache] = None
         self._text_context_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
@@ -216,6 +320,13 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         ):
             raise ValueError(
                 "Gaussian cache identity pins were configured without gaussian_cache_dir."
+            )
+        if self.gaussian_cache_verify == "stat_cmp" and any(
+            value is not None for value in gaussian_identity_pins
+        ):
+            raise ValueError(
+                "gaussian_cache_verify='stat_cmp' cannot honor SHA-256 identity pins; "
+                "leave all gaussian_cache_expected_*_sha256 fields unset"
             )
 
         if self.action_horizon <= 0 or self.action_horizon % self.action_video_freq_ratio:
@@ -258,6 +369,10 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             raise RuntimeError(f"No {split} windows found under {self.root_dir}")
         self.agent_counts = tuple(int(entry["agent_count"]) for entry in self.entries)
         self.task_ids = tuple(str(entry["task_name"]) for entry in self.entries)
+        self.b4_phase_labels = tuple(
+            tuple(str(label) for label in entry["b4_phase_labels"])
+            for entry in self.entries
+        )
         observed_agent_counts = set(self.agent_counts)
         if self.required_agent_counts is not None:
             declared_agent_counts = set(self.required_agent_counts)
@@ -372,12 +487,39 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                         continue
                     if length < self.action_horizon:
                         continue
+                    raw_gripper_commands = []
+                    for agent_name in agent_names:
+                        action_dataset = group[f"actions/{agent_name}"]
+                        if action_dataset.ndim != 2 or action_dataset.shape[1] < self.action_dim:
+                            raise ValueError(
+                                f"Expected actions/{agent_name} to be [T,D>={self.action_dim}], "
+                                f"got {tuple(action_dataset.shape)} in {h5_path}:{trajectory_name}"
+                            )
+                        if int(action_dataset.shape[0]) != length:
+                            raise ValueError(
+                                "All agents in a trajectory must have the same action length: "
+                                f"expected={length} got={action_dataset.shape[0]} "
+                                f"for {h5_path}:{trajectory_name}:{agent_name}"
+                            )
+                        raw_gripper_commands.append(
+                            np.asarray(action_dataset[:, self.action_dim - 1], dtype=np.float32)
+                        )
+                    trajectory_proxy = derive_b4_target_action_proxies(
+                        np.stack(raw_gripper_commands, axis=0),
+                        event_delta_threshold=self.b4_proxy_event_delta_threshold,
+                        closed_command_threshold=self.b4_proxy_closed_command_threshold,
+                        stable_steps=self.b4_proxy_stable_steps,
+                    )
+                    trajectory_phase = trajectory_proxy["phase"]
                     split_trajectory_count += 1
                     for start in range(
                         0,
                         length - self.action_horizon + 1,
                         self.window_stride,
                     ):
+                        target_phase_ids = torch.unique(
+                            trajectory_phase[:, start : start + self.action_horizon]
+                        ).tolist()
                         entries.append(
                             {
                                 "path": str(h5_path),
@@ -387,6 +529,10 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                                 "task_name": task_name,
                                 "agent_names": tuple(agent_names),
                                 "agent_count": agent_count,
+                                "b4_phase_labels": tuple(
+                                    B4_TARGET_ACTION_PHASE_NAMES[int(phase_id)]
+                                    for phase_id in sorted(target_phase_ids)
+                                ),
                             }
                         )
         self._source_metadata = {
@@ -618,6 +764,26 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
 
         return str(self.entries[index]["task_name"])
 
+    def get_b4_phase_labels(self, index: int) -> tuple[str, ...]:
+        """Return target-action proxy labels without loading a sample payload."""
+
+        return tuple(self.entries[index]["b4_phase_labels"])
+
+    @property
+    def b4_proxy_schema(self) -> dict[str, Any]:
+        """Machine-readable statement of the action-only B4 proxy semantics."""
+
+        return {
+            "source": "raw_target_action_last_dimension",
+            "is_contact_ground_truth": False,
+            "target_index_semantics": "phase[t+h]",
+            "phase_names": list(B4_TARGET_ACTION_PHASE_NAMES),
+            "gripper_event_names": list(B4_GRIPPER_EVENT_NAMES),
+            "event_delta_threshold": self.b4_proxy_event_delta_threshold,
+            "closed_command_threshold": self.b4_proxy_closed_command_threshold,
+            "stable_steps": self.b4_proxy_stable_steps,
+        }
+
     @staticmethod
     def _articulation_name(agent_name: str) -> str:
         """Map ``panda-i`` action/state names to RoboFactory articulation names."""
@@ -677,7 +843,8 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
     def _preflight_gaussian_cache(self) -> None:
         cache = self._get_gaussian_cache()
         manifest = cache.manifest
-        if self.gaussian_cache_expected_manifest_sha256 is not None:
+        stat_cmp = self.gaussian_cache_verify == "stat_cmp"
+        if not stat_cmp and self.gaussian_cache_expected_manifest_sha256 is not None:
             actual_manifest_sha256 = sha256_file(
                 self.gaussian_cache_dir / "manifest.json"
             )
@@ -689,7 +856,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                 )
         selection = manifest.get("selection", {})
         actual_selection_sha256 = None
-        if selection.get("mode") == "index":
+        if not stat_cmp and selection.get("mode") == "index":
             selection_path = self.gaussian_cache_dir / str(
                 selection.get("index_filename", "")
             )
@@ -704,14 +871,14 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                     f"declared={selection.get('index_sha256')!r} "
                     f"actual={actual_selection_sha256} path={selection_path}"
                 )
-        if self.gaussian_cache_expected_selection_sha256 is not None:
+        if not stat_cmp and self.gaussian_cache_expected_selection_sha256 is not None:
             if actual_selection_sha256 != self.gaussian_cache_expected_selection_sha256:
                 raise ValueError(
                     "Gaussian cache selection identity mismatch: "
                     f"expected={self.gaussian_cache_expected_selection_sha256} "
                     f"actual={actual_selection_sha256!r} root={self.gaussian_cache_dir}"
                 )
-        if self.gaussian_cache_expected_source_identity_sha256 is not None:
+        if not stat_cmp and self.gaussian_cache_expected_source_identity_sha256 is not None:
             actual_source_identity_sha256 = gaussian_source_identity_sha256(
                 manifest.get("sources", [])
             )
@@ -767,6 +934,18 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             (num_agents, self.agent_geometry_dim), dtype=torch.float32
         )
         agent_ids = torch.empty((num_agents,), dtype=torch.long)
+        b4_target_action_phase = torch.empty(
+            (num_agents, self.action_horizon), dtype=torch.long
+        )
+        b4_gripper_closed_target = torch.empty(
+            (num_agents, self.action_horizon), dtype=torch.float32
+        )
+        b4_gripper_event_target = torch.empty(
+            (num_agents, self.action_horizon), dtype=torch.long
+        )
+        b4_stable_contact_proxy = torch.empty(
+            (num_agents, self.action_horizon), dtype=torch.float32
+        )
         ordered_agent_names: list[str] = []
 
         order = torch.arange(num_agents)
@@ -784,12 +963,33 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             original_index = int(original_index_tensor)
             agent_name = agent_names[original_index]
             ordered_agent_names.append(agent_name)
+            action_dataset = group[f"actions/{agent_name}"]
             raw_action = torch.from_numpy(
                 np.asarray(
-                    group[f"actions/{agent_name}"][start : start + self.action_horizon],
+                    action_dataset[start : start + self.action_horizon],
                     dtype=np.float32,
                 )
             )
+            history_start = max(0, start - self.b4_proxy_stable_steps)
+            raw_gripper_history = np.asarray(
+                action_dataset[
+                    history_start : start + self.action_horizon,
+                    self.action_dim - 1,
+                ],
+                dtype=np.float32,
+            )
+            proxy = derive_b4_target_action_proxies(
+                raw_gripper_history,
+                event_delta_threshold=self.b4_proxy_event_delta_threshold,
+                closed_command_threshold=self.b4_proxy_closed_command_threshold,
+                stable_steps=self.b4_proxy_stable_steps,
+            )
+            target_offset = start - history_start
+            target_slice = slice(target_offset, target_offset + self.action_horizon)
+            b4_target_action_phase[slot] = proxy["phase"][target_slice]
+            b4_gripper_closed_target[slot] = proxy["closed_target"][target_slice]
+            b4_gripper_event_target[slot] = proxy["event_target"][target_slice]
+            b4_stable_contact_proxy[slot] = proxy["stable_closed_proxy"][target_slice]
             qpos = np.asarray(group[f"obs/agent/{agent_name}/qpos"][start], dtype=np.float32)
             qvel = np.asarray(group[f"obs/agent/{agent_name}/qvel"][start], dtype=np.float32)
             raw_state = torch.from_numpy(np.concatenate([qpos, qvel], axis=0))
@@ -831,6 +1031,12 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             "agent_state": agent_state,
             "agent_geometry": agent_geometry,
             "agent_ids": agent_ids,
+            "b4_target_action_phase": b4_target_action_phase,
+            "b4_gripper_closed_target": b4_gripper_closed_target,
+            "b4_gripper_event_target": b4_gripper_event_target,
+            # The name is retained for the B4 objective, but the value is only
+            # a sustained closed-command proxy (see ``b4_proxy_schema``).
+            "b4_stable_contact_proxy": b4_stable_contact_proxy,
             "action_is_pad": torch.zeros(
                 (num_agents, self.action_horizon), dtype=torch.bool
             ),

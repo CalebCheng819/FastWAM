@@ -281,6 +281,74 @@ def test_immutable_manifest_reader_preflight_and_pickle(tmp_path):
     assert result["source_checksums_verified"] is True
 
 
+def test_stat_cmp_cache_treats_historical_hashes_as_opaque_and_never_hashes(
+    tmp_path, monkeypatch
+):
+    _, cache_root, _ = _build_cache(tmp_path)
+    manifest_path = cache_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["sources"][0]["sha256"] = "not-a-current-source-digest"
+    manifest["shards"][0]["sha256"] = "not-a-current-shard-digest"
+    payload = (
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    complete_path = cache_root / "COMPLETE"
+    complete = json.loads(complete_path.read_text(encoding="utf-8"))
+    complete["manifest_bytes"] = len(payload)
+
+    manifest_path.chmod(0o640)
+    manifest_path.write_bytes(payload)
+    complete_path.chmod(0o640)
+    complete_path.write_bytes(
+        (json.dumps(complete, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+    )
+
+    import fastwam.datasets.gaussian_cache.manifest as manifest_module
+    import fastwam.datasets.gaussian_cache.provider as provider_module
+
+    class ForbiddenHashlib:
+        @staticmethod
+        def sha256(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("stat_cmp cache open must not calculate a digest")
+
+    def _forbid_sha256_file(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("stat_cmp cache open must not hash cache files")
+
+    monkeypatch.setattr(manifest_module, "hashlib", ForbiddenHashlib)
+    monkeypatch.setattr(provider_module, "sha256_file", _forbid_sha256_file)
+
+    cache = GaussianCache.open(cache_root, verify="stat_cmp")
+    key = FrameKey("demo.h5", "traj_0", 2, "panda-1")
+    assert float(cache.get_frame(key)[0, 0, 0]) == 12.0
+    assert cache.manifest["sources"][0]["sha256"] == "not-a-current-source-digest"
+    assert cache.manifest["shards"][0]["sha256"] == "not-a-current-shard-digest"
+    contract_text = json.dumps(cache.stat_contract, sort_keys=True)
+    assert "sha256" not in contract_text.lower()
+    assert "digest" not in contract_text.lower()
+    assert cache.stat_contract["selected_key_count"] == 6
+    assert cache.stat_contract["shard_count"] == 1
+    assert cache.stat_contract["file_count"] == 3
+    assert all(
+        set(record) == {"path", "bytes", "mtime_ns"}
+        for record in cache.stat_contract["files"]
+    )
+
+
+def test_stat_cmp_cache_fails_closed_on_shard_byte_count_change(tmp_path):
+    _, cache_root, manifest = _build_cache(tmp_path)
+    shard_path = cache_root / manifest["shards"][0]["path"]
+    shard_path.chmod(0o640)
+    with shard_path.open("ab") as shard_file:
+        shard_file.write(b"x")
+
+    with pytest.raises(ValueError, match="shard byte count mismatch"):
+        GaussianCache.open(cache_root, verify="stat_cmp")
+
+
 def test_uploaded_shard_gets_exactly_one_strong_readback(tmp_path, monkeypatch):
     import fastwam.datasets.gaussian_cache.manifest as manifest_module
 

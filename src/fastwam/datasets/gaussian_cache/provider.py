@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import json
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -13,8 +14,20 @@ import numpy as np
 import torch
 from typing_extensions import Self
 
-from .manifest import load_manifest, sha256_file
-from .schema import FrameKey, GaussianCacheSchema
+from .manifest import (
+    load_manifest,
+    read_regular_file_snapshot,
+    regular_file_stat,
+    sha256_file,
+)
+from .schema import (
+    COMPLETE_FILENAME,
+    MANIFEST_FILENAME,
+    FrameKey,
+    GaussianCacheSchema,
+    normalize_source_path,
+)
+from .selection import expand_selection_record
 
 
 class MissingGaussianFramesError(KeyError):
@@ -81,7 +94,12 @@ class GaussianCache:
     into DataLoader workers and reopen shards lazily in each worker.
     """
 
-    VERIFY_MODES: ClassVar[set[str]] = {"none", "manifest", "checksums"}
+    VERIFY_MODES: ClassVar[set[str]] = {
+        "none",
+        "manifest",
+        "checksums",
+        "stat_cmp",
+    }
 
     def __init__(
         self,
@@ -98,7 +116,11 @@ class GaussianCache:
         self.max_open_shards = int(max_open_shards)
         if self.max_open_shards <= 0:
             raise ValueError("max_open_shards must be positive")
-        self.manifest = load_manifest(self.cache_root, require_complete=True)
+        self.manifest = load_manifest(
+            self.cache_root,
+            require_complete=True,
+            provenance_mode="stat_cmp" if verify == "stat_cmp" else "sha256",
+        )
         self.schema = GaussianCacheSchema.from_dict(self.manifest["schema"])
         self._shards = {str(record["id"]): dict(record) for record in self.manifest["shards"]}
         self._streams: dict[tuple[str, str, str], _StreamIndex] = {}
@@ -110,8 +132,15 @@ class GaussianCache:
             )
             self._streams[key] = _StreamIndex(record)
         self._arrays: OrderedDict[str, np.memmap] = OrderedDict()
+        self._stat_cmp_shards: dict[str, dict[str, int]] = {}
+        self.stat_contract: dict[str, Any] | None = None
         if verify != "none":
-            self._verify_shards(checksums=verify == "checksums")
+            self._verify_shards(
+                checksums=verify == "checksums",
+                stat_cmp=verify == "stat_cmp",
+            )
+        if verify == "stat_cmp":
+            self._build_stat_cmp_contract()
 
     @classmethod
     def open(
@@ -127,15 +156,112 @@ class GaussianCache:
             max_open_shards=max_open_shards,
         )
 
-    def _verify_shards(self, *, checksums: bool) -> None:
+    def _cache_file(self, relative_path: str) -> Path:
+        normalized = normalize_source_path(relative_path)
+        path = self.cache_root / normalized
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Missing Gaussian cache file: {path}") from None
+        if resolved != path:
+            raise RuntimeError(f"Gaussian cache path must not contain symlinks: {path}")
+        try:
+            resolved.relative_to(self.cache_root)
+        except ValueError:
+            raise RuntimeError(f"Gaussian cache path escapes cache root: {path}") from None
+        return path
+
+    def _verify_shards(self, *, checksums: bool, stat_cmp: bool = False) -> None:
         for shard_id, record in self._shards.items():
-            path = self.cache_root / str(record["path"])
-            if not path.is_file():
-                raise FileNotFoundError(f"Missing Gaussian cache shard {shard_id}: {path}")
-            if path.stat().st_size != int(record["bytes"]):
+            path = (
+                self._cache_file(str(record["path"]))
+                if stat_cmp
+                else self.cache_root / str(record["path"])
+            )
+            if stat_cmp:
+                metadata = regular_file_stat(path)
+            else:
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"Missing Gaussian cache shard {shard_id}: {path}"
+                    )
+                metadata = {
+                    "bytes": int(path.stat().st_size),
+                    "mtime_ns": int(path.stat().st_mtime_ns),
+                }
+            if metadata["bytes"] != int(record["bytes"]):
                 raise ValueError(f"Gaussian cache shard byte count mismatch: {path}")
             if checksums and sha256_file(path) != str(record["sha256"]):
                 raise ValueError(f"Gaussian cache shard SHA-256 mismatch: {path}")
+            if stat_cmp:
+                self._stat_cmp_shards[shard_id] = metadata
+
+    def _load_stat_cmp_selection(self, path: Path) -> tuple[list[FrameKey], dict[str, int]]:
+        payload, metadata = read_regular_file_snapshot(path)
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError(f"Invalid Gaussian selection JSONL encoding: {path}") from error
+        keys: set[FrameKey] = set()
+        for line_number, raw_line in enumerate(text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, Mapping):
+                    raise TypeError("record is not a JSON object")
+                keys.update(expand_selection_record(record))
+            except Exception as error:
+                raise ValueError(
+                    f"Invalid Gaussian selection JSONL at {path}:{line_number}: {error}"
+                ) from error
+        if not keys:
+            raise ValueError(f"Gaussian selection JSONL contains no keys: {path}")
+        return sorted(keys), metadata
+
+    def _build_stat_cmp_contract(self) -> None:
+        records: list[dict[str, Any]] = []
+        for filename in (MANIFEST_FILENAME, COMPLETE_FILENAME):
+            path = self._cache_file(filename)
+            metadata = regular_file_stat(path)
+            records.append({"path": filename, **metadata})
+        for shard_id, record in sorted(self._shards.items()):
+            records.append(
+                {
+                    "path": str(record["path"]),
+                    **self._stat_cmp_shards[shard_id],
+                }
+            )
+
+        selection = self.manifest["selection"]
+        selected_key_count = int(selection["selected_key_count"])
+        if selection["mode"] == "index":
+            selection_path = self._cache_file(str(selection["index_filename"]))
+            selection_keys, metadata = self._load_stat_cmp_selection(selection_path)
+            if len(selection_keys) != selected_key_count:
+                raise ValueError(
+                    "Gaussian cache selection index count mismatch: "
+                    f"declared={selected_key_count} actual={len(selection_keys)} "
+                    f"path={selection_path}"
+                )
+            self.preflight_keys(selection_keys)
+            records.append({"path": str(selection["index_filename"]), **metadata})
+        elif selected_key_count != int(self.manifest["total_frames"]):
+            raise ValueError(
+                "Gaussian cache all-selection count does not equal total_frames: "
+                f"selected={selected_key_count} total={self.manifest['total_frames']}"
+            )
+
+        self.stat_contract = {
+            "provenance_mode": "stat_cmp",
+            "cache_root": str(self.cache_root),
+            "schema": self.schema.to_dict(),
+            "selected_key_count": selected_key_count,
+            "shard_count": len(self._shards),
+            "file_count": len(records),
+            "files": records,
+        }
 
     def _coerce_key(self, key: FrameKey | Mapping[str, Any]) -> FrameKey:
         return key if isinstance(key, FrameKey) else FrameKey.from_mapping(key)
@@ -182,6 +308,12 @@ class GaussianCache:
             self._close_memmap(evicted)
         record = self._shards[shard_id]
         path = self.cache_root / str(record["path"])
+        if self.verify == "stat_cmp":
+            observed = regular_file_stat(path)
+            if observed != self._stat_cmp_shards[shard_id]:
+                raise RuntimeError(
+                    f"Gaussian cache shard stat comparison mismatch: {path}"
+                )
         array = np.memmap(
             path,
             mode="r",

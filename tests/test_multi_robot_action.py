@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -274,7 +276,9 @@ def test_gaussian_enabled_requires_exact_shape_and_disabled_ignores_field():
     assert torch.equal(disabled_without["tokens"], disabled_with["tokens"])
 
 
-def _bare_multi_robot_model_for_input_validation(*, enable_gaussian):
+def _bare_multi_robot_model_for_input_validation(
+    *, enable_gaussian, b4_aux_loss_enabled=False
+):
     model = FastWAMMultiRobot.__new__(FastWAMMultiRobot)
     torch.nn.Module.__init__(model)
     model.action_expert = _tiny_action_expert(enable_gaussian=enable_gaussian)
@@ -283,12 +287,14 @@ def _bare_multi_robot_model_for_input_validation(*, enable_gaussian):
     model.training_mode = "action_only_cache"
     model.device = torch.device("cpu")
     model.torch_dtype = torch.float32
+    model.b4_aux_loss_enabled = b4_aux_loss_enabled
     model._encode_video_latents = lambda video, tiled=False: video
     return model
 
 
-def _multi_robot_sample_for_input_validation(*, include_gaussian):
-    num_agents = 2
+def _multi_robot_sample_for_input_validation(
+    *, include_gaussian, num_agents=2, include_b4_targets=False
+):
     sample = {
         "video": torch.randn(1, 3, 1, 16, 16),
         "action": torch.randn(1, num_agents, 5, 3),
@@ -301,6 +307,23 @@ def _multi_robot_sample_for_input_validation(*, include_gaussian):
     if include_gaussian:
         sample["agent_gaussian"] = torch.randn(
             1, num_agents, 13, 28, 40, dtype=torch.float16
+        )
+    if include_b4_targets:
+        sample.update(
+            {
+                "b4_target_action_phase": torch.zeros(
+                    1, num_agents, 5, dtype=torch.long
+                ),
+                "b4_gripper_closed_target": torch.zeros(
+                    1, num_agents, 5, dtype=torch.float32
+                ),
+                "b4_gripper_event_target": torch.zeros(
+                    1, num_agents, 5, dtype=torch.long
+                ),
+                "b4_stable_contact_proxy": torch.zeros(
+                    1, num_agents, 5, dtype=torch.float32
+                ),
+            }
         )
     return sample
 
@@ -322,6 +345,367 @@ def test_build_inputs_requires_gaussian_only_for_enabled_ablation():
         _multi_robot_sample_for_input_validation(include_gaussian=False)
     )
     assert disabled_inputs["agent_gaussian"] is None
+
+
+@pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
+def test_build_inputs_requires_b4_targets_only_when_enabled(num_agents):
+    enabled = _bare_multi_robot_model_for_input_validation(
+        enable_gaussian=False, b4_aux_loss_enabled=True
+    )
+    without_targets = _multi_robot_sample_for_input_validation(
+        include_gaussian=False, num_agents=num_agents
+    )
+    with pytest.raises(ValueError, match="Missing multi-robot sample fields.*b4_"):
+        enabled.build_inputs(without_targets)
+
+    sample = _multi_robot_sample_for_input_validation(
+        include_gaussian=False,
+        num_agents=num_agents,
+        include_b4_targets=True,
+    )
+    sample["b4_gripper_closed_target"][:, :, 0] = torch.arange(
+        num_agents
+    ).remainder(2)
+    inputs = enabled.build_inputs(sample)
+    for field in (
+        "b4_target_action_phase",
+        "b4_gripper_closed_target",
+        "b4_gripper_event_target",
+        "b4_stable_contact_proxy",
+    ):
+        assert inputs[field].shape == (1, num_agents, 5)
+        assert torch.equal(inputs[field].cpu(), sample[field])
+
+    disabled = _bare_multi_robot_model_for_input_validation(
+        enable_gaussian=False, b4_aux_loss_enabled=False
+    )
+    disabled_inputs = disabled.build_inputs(without_targets)
+    assert not any(key.startswith("b4_") for key in disabled_inputs)
+
+
+class _UnitWeightScheduler:
+    num_train_timesteps = 1000
+
+    @staticmethod
+    def training_weight(timestep):
+        return torch.ones_like(timestep, dtype=torch.float32)
+
+
+def _bare_b4_loss_model(
+    *,
+    enabled=True,
+    lambda_arm_huber=1.0,
+    lambda_gripper_event=1.0,
+    lambda_contact_intent_proxy=1.0,
+    first_steps=5,
+    first_steps_weight=1.0,
+):
+    model = FastWAMMultiRobot.__new__(FastWAMMultiRobot)
+    torch.nn.Module.__init__(model)
+    model.train_action_scheduler = _UnitWeightScheduler()
+    model.b4_aux_loss_enabled = enabled
+    model.b4_arm_huber_loss_weight = lambda_arm_huber
+    model.b4_gripper_event_loss_weight = lambda_gripper_event
+    model.b4_contact_intent_proxy_loss_weight = lambda_contact_intent_proxy
+    model.b4_arm_huber_beta = 1.0
+    model.b4_first_steps = first_steps
+    model.b4_first_steps_weight = first_steps_weight
+    model.b4_gripper_dim = 2
+    model.b4_gripper_action_mean = 0.0
+    model.b4_gripper_action_std = 1.0
+    model.b4_event_delta_threshold = 0.05
+    model.b4_stable_closed_command_threshold = -0.8
+    model.b4_closed_command_threshold = 0.0
+    model.b4_stable_steps = 4
+    model.b4_event_temperature = 0.05
+    model.b4_closed_temperature = 0.1
+    model.b4_background_weight = 0.25
+    return model
+
+
+def _b4_targets_for_action(action):
+    gripper = action[..., -1]
+    delta = torch.zeros_like(gripper)
+    if gripper.shape[-1] > 1:
+        delta[..., 1:] = gripper[..., 1:] - gripper[..., :-1]
+    event = torch.zeros_like(gripper, dtype=torch.long)
+    event[delta < -0.05] = 1
+    event[delta > 0.05] = 2
+
+    closed = gripper <= -0.8
+    steady = delta.abs() <= 0.05
+    stable_closed = closed & steady
+    for offset in range(1, 4):
+        shifted = torch.zeros_like(stable_closed)
+        shifted[..., offset:] = closed[..., :-offset] & steady[..., :-offset]
+        stable_closed &= shifted
+    stable = stable_closed.float()
+
+    phase = torch.zeros_like(event)
+    phase[event == 1] = 1
+    phase[stable == 1] = 2
+    phase[event == 2] = 3
+    return {
+        "action": action,
+        "action_is_pad": torch.zeros_like(gripper, dtype=torch.bool),
+        "b4_target_action_phase": phase,
+        "b4_gripper_closed_target": (gripper <= 0.0).float(),
+        "b4_gripper_event_target": event,
+        "b4_stable_contact_proxy": stable,
+    }
+
+
+def test_b4_x0_reconstruction_matches_continuous_flow_identity():
+    torch.manual_seed(401)
+    model = _bare_b4_loss_model()
+    noisy_action = torch.randn(2, 3, 6, 3)
+    pred_velocity = torch.randn_like(noisy_action)
+    timestep = torch.tensor([0.0, 750.0])
+    expected = noisy_action - torch.tensor([0.0, 0.75]).view(2, 1, 1, 1) * pred_velocity
+    actual = model._reconstruct_b4_action_x0(
+        noisy_action=noisy_action,
+        pred_action_velocity=pred_velocity,
+        timestep_action=timestep,
+    )
+    assert torch.allclose(actual, expected)
+
+
+def test_b4_gripper_losses_use_explicit_denormalization_statistics():
+    model = _bare_b4_loss_model()
+    model.b4_gripper_action_mean = 0.24164481092854787
+    model.b4_gripper_action_std = 0.9469631616807775
+    action = torch.zeros(1, 1, 6, 3)
+    inputs = _b4_targets_for_action(action)
+    # Normalized zero maps to a positive raw command with the pinned unified
+    # train-only statistics, so its direct closed-command target is false.
+    inputs["b4_gripper_closed_target"].zero_()
+    timestep = torch.tensor([500.0])
+
+    constant = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=torch.zeros_like(action),
+        timestep_action=timestep,
+    )
+    expected_closed = torch.nn.functional.binary_cross_entropy_with_logits(
+        torch.tensor(-model.b4_gripper_action_mean / model.b4_closed_temperature),
+        torch.tensor(0.0),
+    )
+    assert torch.allclose(constant["closed_command_raw"], expected_closed)
+
+    desired_x0 = torch.zeros_like(action)
+    desired_x0[..., -1] = torch.arange(6, dtype=action.dtype) * 0.1
+    ramp = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=-2.0 * desired_x0,
+        timestep_action=timestep,
+    )
+    expected_raw_delta = torch.tensor(0.1 * model.b4_gripper_action_std)
+    expected_transition = torch.nn.functional.smooth_l1_loss(
+        expected_raw_delta,
+        torch.tensor(0.0),
+        beta=model.b4_event_delta_threshold,
+    )
+    assert torch.allclose(ramp["transition_raw"], expected_transition)
+
+
+def test_b4_default_off_preserves_original_flow_objective():
+    torch.manual_seed(403)
+    model = _bare_b4_loss_model(enabled=False)
+    pred_action = torch.randn(2, 3, 6, 3)
+    target_velocity = torch.randn_like(pred_action)
+    timestep = torch.tensor([250.0, 750.0])
+    inputs = {
+        "action": torch.randn_like(pred_action),
+        "action_is_pad": torch.zeros(2, 3, 6, dtype=torch.bool),
+    }
+    expected = model._multi_action_loss(
+        pred_action=pred_action,
+        target_action=target_velocity,
+        timestep_action=timestep,
+        action_is_pad=inputs["action_is_pad"],
+    )
+    actual, metrics = model._multi_action_objective(
+        inputs=inputs,
+        noisy_action=torch.randn_like(pred_action),
+        pred_action=pred_action,
+        target_action=target_velocity,
+        timestep_action=timestep,
+    )
+    assert torch.equal(actual, expected)
+    assert metrics == {}
+
+
+@pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
+def test_b4_arm_huber_uses_normalized_x0_and_first_five_weight(num_agents):
+    model = _bare_b4_loss_model(first_steps=5, first_steps_weight=3.0)
+    action = torch.zeros(1, num_agents, 6, 3)
+    inputs = _b4_targets_for_action(action)
+    timestep = torch.tensor([500.0])
+
+    early_velocity = torch.zeros_like(action)
+    early_velocity[:, :, 0, 0] = -2.0
+    late_velocity = torch.zeros_like(action)
+    late_velocity[:, :, 5, 0] = -2.0
+    early = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=early_velocity,
+        timestep_action=timestep,
+    )["arm_huber"]
+    late = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=late_velocity,
+        timestep_action=timestep,
+    )["arm_huber"]
+
+    token_huber = torch.tensor(0.25)
+    denominator = 5 * 3.0 + 1.0
+    assert torch.allclose(early, 3.0 * token_huber / denominator)
+    assert torch.allclose(late, token_huber / denominator)
+    assert torch.allclose(early / late, torch.tensor(3.0))
+
+
+@pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
+def test_b4_gripper_event_and_contact_intent_proxy_prefer_matching_commands(
+    num_agents,
+):
+    model = _bare_b4_loss_model(first_steps_weight=2.0)
+    action = torch.zeros(1, num_agents, 6, 3)
+    action[..., -1] = -1.0
+    inputs = _b4_targets_for_action(action)
+    timestep = torch.tensor([500.0])
+
+    matching_velocity = torch.zeros_like(action)
+    mismatching_velocity = torch.zeros_like(action)
+    mismatching_velocity[..., -1] = -4.0
+    mismatching_velocity.requires_grad_()
+    matching = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=matching_velocity,
+        timestep_action=timestep,
+    )
+    mismatching = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=mismatching_velocity,
+        timestep_action=timestep,
+    )
+
+    assert matching["gripper_event"] < mismatching["gripper_event"]
+    assert matching["contact_intent_proxy"] < mismatching["contact_intent_proxy"]
+    (mismatching["gripper_event"] + mismatching["contact_intent_proxy"]).backward()
+    assert mismatching_velocity.grad is not None
+    assert torch.isfinite(mismatching_velocity.grad).all()
+    assert mismatching_velocity.grad.abs().sum() > 0
+
+
+def test_b4_objective_applies_all_three_auxiliary_coefficients():
+    model = _bare_b4_loss_model(
+        lambda_arm_huber=2.0,
+        lambda_gripper_event=3.0,
+        lambda_contact_intent_proxy=4.0,
+    )
+    action = torch.zeros(1, 2, 6, 3)
+    action[..., -1] = -1.0
+    inputs = _b4_targets_for_action(action)
+    pred_velocity = torch.zeros_like(action)
+    pred_velocity[..., 0] = -1.0
+    target_velocity = torch.ones_like(action)
+    timestep = torch.tensor([500.0])
+
+    auxiliary = model._b4_auxiliary_action_losses(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=pred_velocity,
+        timestep_action=timestep,
+    )
+    flow = model._multi_action_loss(
+        pred_action=pred_velocity,
+        target_action=target_velocity,
+        timestep_action=timestep,
+        action_is_pad=inputs["action_is_pad"],
+    )
+    objective, metrics = model._multi_action_objective(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=pred_velocity,
+        target_action=target_velocity,
+        timestep_action=timestep,
+    )
+    expected = (
+        flow
+        + 2.0 * auxiliary["arm_huber"]
+        + 3.0 * auxiliary["gripper_event"]
+        + 4.0 * auxiliary["contact_intent_proxy"]
+    )
+    assert torch.allclose(objective, expected)
+    assert torch.allclose(metrics["flow"], flow)
+    assert torch.allclose(metrics["arm_huber"], 2.0 * auxiliary["arm_huber"])
+    assert torch.allclose(
+        metrics["gripper_event"], 3.0 * auxiliary["gripper_event"]
+    )
+    assert torch.allclose(
+        metrics["contact_intent_proxy"],
+        4.0 * auxiliary["contact_intent_proxy"],
+    )
+
+
+def test_multi_robot_runtime_forwards_b4_loss_contract(monkeypatch):
+    from fastwam import runtime
+
+    captured = {}
+
+    def fake_from_pretrained(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        FastWAMMultiRobot,
+        "from_wan22_pretrained",
+        staticmethod(fake_from_pretrained),
+    )
+    result = runtime.create_multi_robot_fastwam(
+        model_id="unused",
+        tokenizer_model_id="unused",
+        video_dit_config={"text_dim": 16},
+        action_dit_config={},
+        video_scheduler={},
+        action_scheduler={
+            "train_shift": 5.0,
+            "infer_shift": 5.0,
+            "num_train_timesteps": 1000,
+        },
+        loss={
+            "b4": {
+                "enabled": True,
+                "lambda_arm_huber": 2.0,
+                "lambda_gripper_event": 3.0,
+                "lambda_contact_intent_proxy": 4.0,
+                "arm_huber_beta": 0.25,
+                "first_steps": 5,
+                "first_steps_weight": 2.5,
+                "gripper_dim": 7,
+                "gripper_action_mean": 0.24164481092854787,
+                "gripper_action_std": 0.9469631616807775,
+            }
+        },
+        device="cpu",
+    )
+    assert result is not None
+    assert captured["b4_aux_loss_enabled"] is True
+    assert captured["b4_arm_huber_loss_weight"] == 2.0
+    assert captured["b4_gripper_event_loss_weight"] == 3.0
+    assert captured["b4_contact_intent_proxy_loss_weight"] == 4.0
+    assert captured["b4_arm_huber_beta"] == 0.25
+    assert captured["b4_first_steps"] == 5
+    assert captured["b4_first_steps_weight"] == 2.5
+    assert captured["b4_gripper_dim"] == 7
+    assert captured["b4_gripper_action_mean"] == 0.24164481092854787
+    assert captured["b4_gripper_action_std"] == 0.9469631616807775
 
 
 def test_geometry_action_preprocessing_is_permutation_equivariant():
@@ -1032,6 +1416,110 @@ def test_native_v2_full_load_caches_its_sha256(tmp_path):
     assert target._loaded_base_checkpoint_sha256 == target._checkpoint_sha256(
         checkpoint
     )
+
+
+def test_native_v2_checkpoint_payload_is_memory_mapped(tmp_path, monkeypatch):
+    source = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    checkpoint = tmp_path / "full.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    target = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    original_torch_load = torch.load
+    load_calls = []
+
+    def _recording_torch_load(*args, **kwargs):
+        load_calls.append((args, kwargs))
+        return original_torch_load(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "load", _recording_torch_load)
+
+    target._load_checkpoint_with_role(
+        checkpoint,
+        load_role="base_dependency",
+        active_paths=set(),
+        validate_trainable_scope=False,
+    )
+
+    assert len(load_calls) == 1
+    assert Path(load_calls[0][0][0]) == checkpoint.resolve()
+    assert load_calls[0][1] == {
+        "map_location": "cpu",
+        "weights_only": True,
+        "mmap": True,
+    }
+
+
+def test_native_v2_stat_cmp_warm_start_never_hashes_and_records_receipt(
+    tmp_path, monkeypatch
+):
+    source = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    checkpoint = tmp_path / "full-stat-cmp.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    target = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    target._checkpoint_provenance_mode = "stat_cmp"
+
+    def _forbid_checkpoint_sha256(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("stat_cmp warm-start must not hash the checkpoint")
+
+    monkeypatch.setattr(target, "_checkpoint_sha256", _forbid_checkpoint_sha256)
+    target._load_checkpoint_with_role(
+        checkpoint,
+        load_role="base_dependency",
+        active_paths=set(),
+        validate_trainable_scope=False,
+    )
+
+    receipt = target._loaded_base_checkpoint_descriptor
+    checkpoint_stat = checkpoint.stat()
+    assert receipt == {
+        "provenance_mode": "stat_cmp",
+        "path": str(checkpoint.resolve()),
+        "bytes": checkpoint_stat.st_size,
+        "mtime_ns": checkpoint_stat.st_mtime_ns,
+        "count": 1,
+        "role": "base_dependency",
+    }
+    assert target._loaded_base_checkpoint_sha256 is None
+    assert torch.equal(
+        next(iter(target.mot.state_dict().values())),
+        next(iter(source.mot.state_dict().values())),
+    )
+
+
+def test_native_v2_stat_cmp_keeps_exact_shape_validation(tmp_path, monkeypatch):
+    source = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    payload = _native_full_payload(source)
+    key = next(name for name, value in payload["mot"].items() if value.numel() > 2)
+    payload["mot"][key] = payload["mot"][key].reshape(-1)[:1]
+    checkpoint = tmp_path / "full-stat-cmp-bad-shape.pt"
+    torch.save(payload, checkpoint)
+    target = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    target._checkpoint_provenance_mode = "stat_cmp"
+
+    def _forbid_checkpoint_sha256(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("stat_cmp warm-start must not hash the checkpoint")
+
+    monkeypatch.setattr(target, "_checkpoint_sha256", _forbid_checkpoint_sha256)
+    with pytest.raises(ValueError, match="shape_mismatches"):
+        target._load_checkpoint_with_role(
+            checkpoint,
+            load_role="base_dependency",
+            active_paths=set(),
+            validate_trainable_scope=False,
+        )
 
 
 @pytest.mark.parametrize("corruption", ["missing", "shape", "dtype"])

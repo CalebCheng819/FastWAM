@@ -1,0 +1,24 @@
+# @package _global_
+
+# B4 formal topology: three DLC pods x eight RTX 4090 GPUs.  The task profile
+# owns the 2500-step scientific schedule; this file owns only scale/checkpoint
+# policy and long multi-node watchdogs.
+gradient_accumulation_steps: 1
+checkpoint_state_kind: full
+save_training_state: true
+save_final_checkpoint: true
+provenance_mode: stat_cmp
+
+# B4 uses ordinary Git/run/checkpoint metadata.  Do not add state-tree seals,
+# run seals, or terminal rehashing to this treatment.
+seal_training_state: false
+seal_training_run: false
+terminal_rehash_weights: false
+
+process_group_timeout_seconds: 21600
+checkpoint_io_timeout_seconds: 21600
+
+# Deterministic held-out loss only; simulator task success remains a separate
+# closed-loop evaluation after training.
+eval_every: 1250
+offline_eval_num_samples: 12
