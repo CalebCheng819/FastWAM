@@ -427,7 +427,7 @@ class ControllerStateTest(unittest.TestCase):
         )
         expected_source = Path(
             "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
-            "fastwam-action-n234-formal-20260811-r6"
+            "fastwam-action-n234-formal-20260811-r7"
         )
         self.assertEqual(module.APPROVED_SOURCE_ROOT, expected_source)
         for retired in (retired_attempt, retired_job):

@@ -34,10 +34,10 @@ controller.CONTROL_ENTRYPOINT = "submit_from_ssh970_r7.sh"
 controller.SOURCE_PREFIX = Path(
     "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots"
 )
-# R7 can only use a future publication from the current reviewed tree.  R6 and
-# its source-r5 tree, ledger, tag, output, and failed job are permanently retired.
+# R7 can only use the replacement publication from the current reviewed tree.
+# The incomplete source-r6 publication and every earlier tree are retired.
 controller.APPROVED_SOURCE_ROOT = controller.SOURCE_PREFIX / (
-    "fastwam-action-n234-formal-20260811-r6"
+    "fastwam-action-n234-formal-20260811-r7"
 )
 controller.REAL_PREFLIGHT_REL = Path(
     ".research-workflow/experiments"
