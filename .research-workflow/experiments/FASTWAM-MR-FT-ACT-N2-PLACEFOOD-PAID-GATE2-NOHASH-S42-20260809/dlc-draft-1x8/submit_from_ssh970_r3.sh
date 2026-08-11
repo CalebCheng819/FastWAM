@@ -25,4 +25,5 @@ fi
 
 export FASTWAM_CONTROL_NODE=ssh970
 export FASTWAM_LOCK_FD=9
-exec "${CONTROL_PYTHON}" "${SCRIPT_DIR}/submit_gate2_r3.py" "$@"
+export PYTHONDONTWRITEBYTECODE=1
+exec "${CONTROL_PYTHON}" -B "${SCRIPT_DIR}/submit_gate2_r3.py" "$@"

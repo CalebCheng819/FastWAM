@@ -31,4 +31,5 @@ exec 9>"${LOCK_ROOT}/action-n234-formal-controller.lock"
 flock -n 9 || { echo "Error: another formal controller is active" >&2; exit 1; }
 export FASTWAM_CONTROL_NODE=ssh970
 export FASTWAM_LOCK_FD=9
-exec "${CONTROL_PYTHON}" -I "${SCRIPT_DIR}/controller.py" "$@"
+export PYTHONDONTWRITEBYTECODE=1
+exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/controller.py" "$@"

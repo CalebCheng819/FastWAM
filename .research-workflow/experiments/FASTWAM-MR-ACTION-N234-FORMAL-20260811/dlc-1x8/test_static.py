@@ -329,7 +329,8 @@ def main() -> None:
     assert f"CONTROL_PYTHON={control_python}" in wrapper
     assert 'realpath -e -- "${CONTROL_PYTHON}"' in wrapper
     assert "import alibabacloud_credentials,alibabacloud_pai_dlc20201203" in wrapper
-    assert 'exec "${CONTROL_PYTHON}" -I "${SCRIPT_DIR}/controller.py" "$@"' in wrapper
+    assert "export PYTHONDONTWRITEBYTECODE=1" in wrapper
+    assert 'exec "${CONTROL_PYTHON}" -B -I "${SCRIPT_DIR}/controller.py" "$@"' in wrapper
     assert "/usr/bin/python3" not in wrapper
     print("PASS: formal N=2/3/4 full-weight three-world launcher contract")
 

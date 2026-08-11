@@ -21,6 +21,7 @@ LAUNCHER = HERE / "submit_gate2.py"
 R3_LAUNCHER = HERE / "submit_gate2_r3.py"
 RUNTIME = HERE / "runtime.sh"
 PUBLISHER = HERE / "publish_gate2.py"
+R3_WRAPPER = HERE / "submit_from_ssh970_r3.sh"
 
 
 def load_launcher():
@@ -84,6 +85,14 @@ class ControllerStateTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_r3_wrapper_cannot_mutate_oss_source_with_bytecode(self) -> None:
+        wrapper = R3_WRAPPER.read_text(encoding="utf-8")
+        self.assertIn("export PYTHONDONTWRITEBYTECODE=1", wrapper)
+        self.assertIn(
+            'exec "${CONTROL_PYTHON}" -B "${SCRIPT_DIR}/submit_gate2_r3.py" "$@"',
+            wrapper,
+        )
 
     def test_durable_record_is_immutable_and_exact(self) -> None:
         path = self.module.prepared_binding_path()
