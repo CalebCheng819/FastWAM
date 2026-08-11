@@ -17,6 +17,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import uuid
 import zlib
@@ -29,7 +30,7 @@ CONTRACT = "action_only_native_agents_1x8_v1"
 PER_RUN_OSS_BUDGET_BYTES = 62 * 1024**3
 SUITE_OSS_BUDGET_BYTES = 190 * 1024**3
 PLATFORM_QUOTA_MAX_AGE = timedelta(hours=6)
-SUITE_ID = "FASTWAM-MR-ACTION-N234-FORMAL-R4-20260812"
+SUITE_ID = "FASTWAM-MR-ACTION-N234-FORMAL-R5-20260812"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
 REGION = "cn-beijing"
@@ -39,7 +40,7 @@ CONTROL_NODE = "ssh970"
 
 CONTROL_ANCHOR = Path("/run")
 LOCAL_CONTROL_ROOT = CONTROL_ANCHOR / "fastwam-dlc-submit-state/workspace-270969"
-CONTROL_LOCK_PATH = LOCAL_CONTROL_ROOT / "action-n234-formal-r4-controller.lock"
+CONTROL_LOCK_PATH = LOCAL_CONTROL_ROOT / "action-n234-formal-r5-controller.lock"
 DURABLE_CONTROL_ROOT = Path(
     "/oss-chengjuntao/artifacts/fastwam-dlc-submit-ledger/workspace-270969"
 )
@@ -48,10 +49,10 @@ SUITE_STORAGE_RESERVATION_PATH = (
 )
 SOURCE_PREFIX = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots")
 EXPECTED_SOURCE_ROOT = (
-    SOURCE_PREFIX / "fastwam-action-n234-formal-r4-20260812-r1"
+    SOURCE_PREFIX / "fastwam-action-n234-formal-r5-20260812-r1"
 )
 OUTPUT_PREFIX = Path(
-    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812"
+    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812"
 )
 OSS_ROOT = Path("/oss-chengjuntao")
 GAUSSIAN_PREFIX = Path(
@@ -143,27 +144,27 @@ MEMBER_RESERVATION_KEYS = {
 
 MEMBERS: dict[str, dict[str, Any]] = {
     "n2": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R4-20260812",
-        "run_id": "fastwam-act-n2-placefood-1k-s42-r4-20260812",
-        "display_name": "fw-act-n2-placefood-1k-s42-r4",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R5-20260812",
+        "run_id": "fastwam-act-n2-placefood-1k-s42-r5-20260812",
+        "display_name": "fw-act-n2-placefood-1k-s42-r5",
         "config": "robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 2,
         "tasks": ["PlaceFood-rf"],
     },
     "n3": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R4-20260812",
-        "run_id": "fastwam-act-n3-pool-1k-s42-r4-20260812",
-        "display_name": "fw-act-n3-pool-1k-s42-r4",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R5-20260812",
+        "run_id": "fastwam-act-n3-pool-1k-s42-r5-20260812",
+        "display_name": "fw-act-n3-pool-1k-s42-r5",
         "config": "robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 3,
         "tasks": ["ThreeRobotsPlaceShoes-rf", "ThreeRobotsStackCube-rf"],
     },
     "n4": {
-        "experiment_id": "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R4-20260812",
-        "run_id": "fastwam-act-n4-stackcube-1k-s42-r4-20260812",
-        "display_name": "fw-act-n4-stackcube-1k-s42-r4",
+        "experiment_id": "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R5-20260812",
+        "run_id": "fastwam-act-n4-stackcube-1k-s42-r5-20260812",
+        "display_name": "fw-act-n4-stackcube-1k-s42-r5",
         "config": "robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5",
         "config_file": "configs/task/robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5.yaml",
         "agent_count": 4,
@@ -183,6 +184,7 @@ DEFAULT_TEXT_CACHES = {
 
 TRUSTED_RUNTIME_B64_ENV = "FASTWAM_TRUSTED_RUNTIME_B64"
 TRUSTED_RUNTIME_BYTES_ENV = "FASTWAM_TRUSTED_RUNTIME_BYTES"
+HYDRA_TEXT_CACHE_MAP_ENV = "FASTWAM_TEXT_CACHE_MAP_HYDRA"
 TRUSTED_RUNTIME_LOCAL_PATH = "/tmp/fastwam-action-native-agents-runtime.sh"
 BOOTSTRAP_PATH = (
     "/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:"
@@ -213,6 +215,7 @@ BOOTSTRAP_ALLOWED_ENV = (
     "FASTWAM_SUITE_STORAGE_RESERVATION_PATH",
     "FASTWAM_TASK_CONFIG",
     "FASTWAM_TASKS_JSON",
+    "FASTWAM_TEXT_CACHE_MAP_HYDRA",
     "FASTWAM_TEXT_CACHE_MAP_JSON",
     "FASTWAM_TRUSTED_RUNTIME_B64",
     "FASTWAM_TRUSTED_RUNTIME_BYTES",
@@ -395,7 +398,7 @@ def require_controller_lock() -> None:
         path_metadata = os.lstat(CONTROL_LOCK_PATH)
     except OSError as error:
         raise RuntimeError(
-            f"R4 controller lock path is unavailable: {CONTROL_LOCK_PATH}"
+            f"R5 controller lock path is unavailable: {CONTROL_LOCK_PATH}"
         ) from error
     if (
         not stat.S_ISREG(descriptor_metadata.st_mode)
@@ -409,7 +412,7 @@ def require_controller_lock() -> None:
         descriptor_metadata.st_ino,
     ) != (path_metadata.st_dev, path_metadata.st_ino):
         raise RuntimeError(
-            f"file descriptor 9 is not the R4 controller lock: {CONTROL_LOCK_PATH}"
+            f"file descriptor 9 is not the R5 controller lock: {CONTROL_LOCK_PATH}"
         )
     fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
@@ -430,7 +433,7 @@ def canonical_direct_child(value: str, *, prefix: Path, label: str) -> Path:
 
 def canonical_expected_source_root(value: str, *, label: str) -> Path:
     if value != str(EXPECTED_SOURCE_ROOT):
-        raise ValueError(f"{label} must equal the frozen R4 source root")
+        raise ValueError(f"{label} must equal the frozen R5 source root")
     return canonical_direct_child(value, prefix=SOURCE_PREFIX, label=label)
 
 
@@ -1236,6 +1239,7 @@ def validate_inputs_binding(
         "FASTWAM_GAUSSIAN_CACHE_DIR",
         "FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR",
         "FASTWAM_TASKS_JSON",
+        HYDRA_TEXT_CACHE_MAP_ENV,
         "FASTWAM_TEXT_CACHE_MAP_JSON",
     }
     if any(type(envs.get(name)) is not str for name in required_envs):
@@ -1304,9 +1308,10 @@ def validate_inputs_binding(
         type(tasks) is not list
         or tasks != MEMBERS[member]["tasks"]
         or type(text_map) is not dict
-        or list(text_map) != sorted(text_map)
-        or set(text_map) != set(tasks)
+        or list(text_map) != tasks
         or any(type(task) is not str or type(text_map.get(task)) is not str for task in tasks)
+        or envs.get(HYDRA_TEXT_CACHE_MAP_ENV)
+        != encode_hydra_text_cache_map(member, text_map)
     ):
         raise RuntimeError("request task-to-text-cache scope mismatch")
     text_binding = require_exact_object(
@@ -1401,6 +1406,470 @@ def task_text_map(member: str, all_caches: dict[str, str]) -> dict[str, str]:
     return {task: all_caches[task] for task in MEMBERS[member]["tasks"]}
 
 
+HYDRA_DICT_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+HYDRA_PREFLIGHT_SCHEMA = "fastwam-formal-hydra-argv-preflight-v1"
+HYDRA_PREFLIGHT_RECEIPT_SCHEMA = "fastwam-formal-hydra-argv-preflight-receipt-v1"
+HYDRA_PREFLIGHT_TIMEOUT_SECONDS = 120
+
+
+def encode_hydra_text_cache_map(
+    member: str, text_map: dict[str, str]
+) -> str:
+    """Encode the typed mapping with Hydra grammar, never raw JSON syntax."""
+
+    if member not in MEMBERS or type(text_map) is not dict:
+        raise RuntimeError("cannot encode an unknown Hydra text-cache scope")
+    tasks = MEMBERS[member]["tasks"]
+    if list(text_map) != tasks:
+        raise RuntimeError("Hydra text-cache mapping order or task scope mismatch")
+    fields: list[str] = []
+    for task in tasks:
+        value = text_map.get(task)
+        if (
+            HYDRA_DICT_KEY_RE.fullmatch(task) is None
+            or type(value) is not str
+            or not value.isascii()
+            or any(ord(character) < 0x20 for character in value)
+        ):
+            raise RuntimeError("text-cache mapping is unsafe for Hydra grammar")
+        path = Path(value)
+        if not path.is_absolute() or not path.is_relative_to(OSS_ROOT):
+            raise RuntimeError("Hydra text-cache path must be an absolute OSS path")
+        # Hydra permits quoted values in a flow mapping, but rejects quoted
+        # mapping keys.  json.dumps is used only for the scalar value; the
+        # known task key remains an unquoted Hydra dictKey token.
+        fields.append(f"{task}:{json.dumps(value, ensure_ascii=True)}")
+    return "{" + ",".join(fields) + "}"
+
+
+def hydra_common_overrides(member: str, envs: dict[str, str]) -> list[str]:
+    """Return the exact deterministic override prefix used by every phase."""
+
+    if member not in MEMBERS or type(envs) is not dict:
+        raise RuntimeError("cannot build Hydra overrides for an unknown member")
+    required = {
+        "FASTWAM_AGENT_COUNT",
+        "FASTWAM_DATASET_ROOT",
+        "FASTWAM_GAUSSIAN_CACHE_DIR",
+        "FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR",
+        "FASTWAM_INITIAL_CHECKPOINT",
+        "FASTWAM_STATS_SOURCE",
+        "FASTWAM_TASK_CONFIG",
+        "FASTWAM_TASKS_JSON",
+        HYDRA_TEXT_CACHE_MAP_ENV,
+    }
+    if any(type(envs.get(name)) is not str for name in required):
+        raise RuntimeError("request lacks a Hydra override environment")
+    return [
+        f"task={envs['FASTWAM_TASK_CONFIG']}",
+        "max_steps=1000",
+        "save_every=500",
+        "eval_every=500",
+        "offline_eval_num_samples=32",
+        "seed=42",
+        "checkpoint_state_kind=full",
+        "seal_training_state=false",
+        "seal_training_run=false",
+        "terminal_rehash_weights=false",
+        "training_terminal_contract=null",
+        "training_run_profile=null",
+        "training_task_scope_receipt=null",
+        "wandb.enabled=false",
+        "+artifact_integrity_mode=metadata_no_hash",
+        "+model.checkpoint_integrity_mode=metadata_no_hash",
+        "+recovery_gate_stop_after_checkpoint_step=500",
+        f"data.train.root_dir={envs['FASTWAM_DATASET_ROOT']}",
+        f"data.val.root_dir={envs['FASTWAM_DATASET_ROOT']}",
+        "data.train.split_seed=42",
+        "data.val.split_seed=42",
+        f"data.train.required_agent_counts=[{envs['FASTWAM_AGENT_COUNT']}]",
+        f"data.val.required_agent_counts=[{envs['FASTWAM_AGENT_COUNT']}]",
+        f"data.train.required_tasks={envs['FASTWAM_TASKS_JSON']}",
+        f"data.val.required_tasks={envs['FASTWAM_TASKS_JSON']}",
+        f"data.train.pretrained_norm_stats={envs['FASTWAM_STATS_SOURCE']}",
+        f"data.val.pretrained_norm_stats={envs['FASTWAM_STATS_SOURCE']}",
+        "data.train.text_embedding_cache_dir=null",
+        "data.val.text_embedding_cache_dir=null",
+        "+data.train.text_embedding_cache_files="
+        + envs[HYDRA_TEXT_CACHE_MAP_ENV],
+        "+data.val.text_embedding_cache_files="
+        + envs[HYDRA_TEXT_CACHE_MAP_ENV],
+        "+data.train.integrity_mode=metadata_no_hash",
+        "+data.val.integrity_mode=metadata_no_hash",
+        f"data.train.gaussian_cache_dir={envs['FASTWAM_GAUSSIAN_CACHE_DIR']}",
+        f"data.val.gaussian_cache_dir={envs['FASTWAM_GAUSSIAN_CACHE_DIR']}",
+        "data.train.gaussian_cache_verify=manifest",
+        "data.val.gaussian_cache_verify=manifest",
+        "data.train.gaussian_cache_expected_manifest_sha256=null",
+        "data.train.gaussian_cache_expected_selection_sha256=null",
+        "data.train.gaussian_cache_expected_source_identity_sha256=null",
+        "data.val.gaussian_cache_expected_manifest_sha256=null",
+        "data.val.gaussian_cache_expected_selection_sha256=null",
+        "data.val.gaussian_cache_expected_source_identity_sha256=null",
+        "+data.train.gaussian_fallback_cache_dir="
+        + envs["FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR"],
+        "+data.val.gaussian_fallback_cache_dir="
+        + envs["FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR"],
+        "+data.train.gaussian_fallback_projection="
+        "opacity-aware-moment-matching-cell-mean-alpha-v2",
+        "+data.val.gaussian_fallback_projection="
+        "opacity-aware-moment-matching-cell-mean-alpha-v2",
+    ]
+
+
+def hydra_phase_overrides(
+    member: str, envs: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Return all three exact argv suffixes with deterministic relative paths."""
+
+    common = hydra_common_overrides(member, envs)
+    phases = [
+        (
+            "phase1_train_to_500",
+            [
+                "output_dir=../train",
+                "resume=null",
+                f"init_weights={envs['FASTWAM_INITIAL_CHECKPOINT']}",
+                "save_training_state=true",
+                "save_final_checkpoint=true",
+            ],
+            {
+                "output_dir": "../train",
+                "resume": None,
+                "init_weights": envs["FASTWAM_INITIAL_CHECKPOINT"],
+                "save_training_state": True,
+                "save_final_checkpoint": True,
+            },
+        ),
+        (
+            "phase2_resume_to_1000",
+            [
+                "output_dir=../train",
+                "resume=../train/checkpoints/state/step_000500",
+                "init_weights=null",
+                "save_training_state=true",
+                "save_final_checkpoint=true",
+            ],
+            {
+                "output_dir": "../train",
+                "resume": "../train/checkpoints/state/step_000500",
+                "init_weights": None,
+                "save_training_state": True,
+                "save_final_checkpoint": True,
+            },
+        ),
+        (
+            "phase3_fresh_load_step1000",
+            [
+                "output_dir=../fresh-load",
+                "resume=../train/checkpoints/state/step_001000",
+                "init_weights=null",
+                "save_training_state=false",
+                "save_final_checkpoint=false",
+            ],
+            {
+                "output_dir": "../fresh-load",
+                "resume": "../train/checkpoints/state/step_001000",
+                "init_weights": None,
+                "save_training_state": False,
+                "save_final_checkpoint": False,
+            },
+        ),
+    ]
+    return [
+        {"name": name, "overrides": common + suffix, "expected": expected}
+        for name, suffix, expected in phases
+    ]
+
+
+HYDRA_PREFLIGHT_PROGRAM = r'''import json
+import sys
+from pathlib import Path
+
+payload = json.load(sys.stdin)
+if set(payload) != {
+    "schema", "member", "agent_count", "tasks", "text_map", "paths", "phases"
+}:
+    raise RuntimeError("Hydra preflight payload schema mismatch")
+if payload["schema"] != "fastwam-formal-hydra-argv-preflight-v1":
+    raise RuntimeError("Hydra preflight payload version mismatch")
+if payload["member"] not in {"n2", "n3", "n4"}:
+    raise RuntimeError("Hydra preflight member is invalid")
+if (
+    isinstance(payload["agent_count"], bool)
+    or not isinstance(payload["agent_count"], int)
+    or not isinstance(payload["tasks"], list)
+    or not payload["tasks"]
+    or any(not isinstance(task, str) or not task for task in payload["tasks"])
+    or not isinstance(payload["text_map"], dict)
+    or list(payload["text_map"]) != payload["tasks"]
+    or any(
+        not isinstance(payload["text_map"].get(task), str)
+        for task in payload["tasks"]
+    )
+):
+    raise RuntimeError("Hydra preflight task scope is invalid")
+source = Path(sys.argv[1]).resolve(strict=True)
+config_dir = (source / "configs").resolve(strict=True)
+sys.path.insert(0, str((source / "src").resolve(strict=True)))
+
+from fastwam.utils.config_resolvers import register_default_resolvers
+from hydra import compose, initialize_config_dir
+from omegaconf import DictConfig, ListConfig, OmegaConf
+
+register_default_resolvers()
+
+def plain(cfg, path):
+    value = OmegaConf.select(cfg, path)
+    if isinstance(value, (DictConfig, ListConfig)):
+        return OmegaConf.to_container(value, resolve=True)
+    return value
+
+def expect(cfg, path, expected):
+    observed = plain(cfg, path)
+    if type(observed) is not type(expected) or observed != expected:
+        raise RuntimeError(
+            f"composed Hydra field mismatch: {path}: {observed!r} != {expected!r}"
+        )
+
+paths = payload["paths"]
+if set(paths) != {"dataset", "stats", "initial_checkpoint", "gaussian", "fallback"}:
+    raise RuntimeError("Hydra preflight path schema mismatch")
+phases = payload["phases"]
+if not isinstance(phases, list) or [item.get("name") for item in phases] != [
+    "phase1_train_to_500", "phase2_resume_to_1000", "phase3_fresh_load_step1000"
+]:
+    raise RuntimeError("Hydra preflight phase sequence mismatch")
+
+receipts = []
+for phase in phases:
+    if set(phase) != {"name", "overrides", "expected"}:
+        raise RuntimeError("Hydra preflight phase schema mismatch")
+    with initialize_config_dir(
+        version_base="1.3", config_dir=str(config_dir), job_name="formal-r5-preflight"
+    ):
+        cfg = compose(
+            config_name="train",
+            overrides=phase["overrides"],
+            return_hydra_config=True,
+        )
+    # Every runtime phase executes from LOCAL_SOURCE and deliberately uses
+    # relative sibling paths for train/fresh-load.  Bind the Hydra working
+    # directory contract as part of the same real compose, rather than merely
+    # trusting the checked-in YAML text.
+    expect(cfg, "hydra.job.chdir", False)
+    expect(cfg, "hydra.run.dir", ".")
+    expect(cfg, "hydra.output_subdir", None)
+    for split in ("train", "val"):
+        expect(cfg, f"data.{split}.root_dir", paths["dataset"])
+        expect(cfg, f"data.{split}.split_seed", 42)
+        expect(cfg, f"data.{split}.required_agent_counts", [payload["agent_count"]])
+        expect(cfg, f"data.{split}.required_tasks", payload["tasks"])
+        expect(cfg, f"data.{split}.pretrained_norm_stats", paths["stats"])
+        expect(cfg, f"data.{split}.text_embedding_cache_dir", None)
+        mapping = OmegaConf.select(cfg, f"data.{split}.text_embedding_cache_files")
+        if not isinstance(mapping, DictConfig):
+            raise RuntimeError(
+                f"composed Hydra text-cache mapping is not DictConfig: {split}"
+            )
+        if OmegaConf.to_container(mapping, resolve=True) != payload["text_map"]:
+            raise RuntimeError(f"composed Hydra text-cache mapping mismatch: {split}")
+        expect(cfg, f"data.{split}.integrity_mode", "metadata_no_hash")
+        expect(cfg, f"data.{split}.gaussian_cache_dir", paths["gaussian"])
+        expect(cfg, f"data.{split}.gaussian_cache_verify", "manifest")
+        expect(cfg, f"data.{split}.gaussian_cache_expected_manifest_sha256", None)
+        expect(cfg, f"data.{split}.gaussian_cache_expected_selection_sha256", None)
+        expect(cfg, f"data.{split}.gaussian_cache_expected_source_identity_sha256", None)
+        expect(cfg, f"data.{split}.gaussian_fallback_cache_dir", paths["fallback"])
+        expect(
+            cfg,
+            f"data.{split}.gaussian_fallback_projection",
+            "opacity-aware-moment-matching-cell-mean-alpha-v2",
+        )
+    for path, expected in {
+        "max_steps": 1000,
+        "save_every": 500,
+        "eval_every": 500,
+        "offline_eval_num_samples": 32,
+        "seed": 42,
+        "checkpoint_state_kind": "full",
+        "seal_training_state": False,
+        "seal_training_run": False,
+        "terminal_rehash_weights": False,
+        "training_terminal_contract": None,
+        "training_run_profile": None,
+        "training_task_scope_receipt": None,
+        "wandb.enabled": False,
+        "artifact_integrity_mode": "metadata_no_hash",
+        "model.checkpoint_integrity_mode": "metadata_no_hash",
+        "recovery_gate_stop_after_checkpoint_step": 500,
+        "trainable_scope": "action",
+        "model.training_mode": "action_only_cache",
+        "model.action_dit_config.hub_enabled": True,
+        "model.action_dit_config.enable_gaussian": True,
+        "model.loss.lambda_video": 0.0,
+        "model.loss.lambda_action": 1.0,
+        "data.train.load_future_video": False,
+        "data.val.load_future_video": False,
+    }.items():
+        expect(cfg, path, expected)
+    for path, expected in phase["expected"].items():
+        expect(cfg, path, expected)
+    receipts.append({"name": phase["name"], "mapping_type": "DictConfig"})
+
+print(json.dumps({
+    "schema": "fastwam-formal-hydra-argv-preflight-receipt-v1",
+    "member": payload["member"],
+    "phases": receipts,
+}, sort_keys=True, separators=(",", ":")))
+'''
+
+
+def validate_pinned_python() -> None:
+    """Bind the logical venv executable to its frozen regular target."""
+
+    try:
+        resolved_python = PINNED_PYTHON.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(
+            f"pinned CPFS Python cannot be resolved: {PINNED_PYTHON}"
+        ) from error
+    if (
+        not PINNED_PYTHON.is_symlink()
+        or resolved_python != PINNED_PYTHON_TARGET
+        or PINNED_PYTHON_TARGET.is_symlink()
+        or not PINNED_PYTHON_TARGET.is_file()
+        or not os.access(PINNED_PYTHON_TARGET, os.X_OK)
+    ):
+        raise RuntimeError(
+            "pinned CPFS Python logical path or resolved executable target mismatch: "
+            f"{PINNED_PYTHON} -> {resolved_python}"
+        )
+
+
+def validate_hydra_argv_preflight(
+    member: str,
+    request: dict[str, Any],
+    *,
+    source_root: Path | None = None,
+    phase_overrides: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compose the exact worker argv in memory without importing the trainer."""
+
+    if member not in MEMBERS or type(request) is not dict:
+        raise RuntimeError("invalid Hydra preflight member or request")
+    envs = request.get("Envs")
+    if type(envs) is not dict:
+        raise RuntimeError("Hydra preflight request environments are missing")
+    expected_phases = hydra_phase_overrides(member, envs)
+    phases = expected_phases if phase_overrides is None else phase_overrides
+    if not strict_value_equal(phases, expected_phases):
+        raise RuntimeError("runtime Hydra argv differs from the controller contract")
+    try:
+        tasks = json.loads(envs["FASTWAM_TASKS_JSON"])
+        text_map = json.loads(envs["FASTWAM_TEXT_CACHE_MAP_JSON"])
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Hydra preflight task scope is invalid JSON") from error
+    if (
+        type(tasks) is not list
+        or tasks != MEMBERS[member]["tasks"]
+        or type(text_map) is not dict
+        or list(text_map) != tasks
+        or envs.get(HYDRA_TEXT_CACHE_MAP_ENV)
+        != encode_hydra_text_cache_map(member, text_map)
+    ):
+        raise RuntimeError("Hydra preflight task-to-cache mapping is not canonical")
+    if source_root is None:
+        source = canonical_expected_source_root(
+            envs.get("FASTWAM_SOURCE_ROOT"), label="Hydra preflight source"
+        )
+    else:
+        source = Path(source_root)
+        try:
+            resolved_source = source.resolve(strict=True)
+        except OSError as error:
+            raise RuntimeError("Hydra preflight staged source is unavailable") from error
+        if (
+            not source.is_absolute()
+            or source.is_symlink()
+            or not source.is_dir()
+            or resolved_source != source
+        ):
+            raise RuntimeError("Hydra preflight staged source is not canonical")
+    validate_pinned_python()
+    payload = {
+        "schema": HYDRA_PREFLIGHT_SCHEMA,
+        "member": member,
+        "agent_count": MEMBERS[member]["agent_count"],
+        "tasks": tasks,
+        "text_map": text_map,
+        "paths": {
+            "dataset": envs["FASTWAM_DATASET_ROOT"],
+            "stats": envs["FASTWAM_STATS_SOURCE"],
+            "initial_checkpoint": envs["FASTWAM_INITIAL_CHECKPOINT"],
+            "gaussian": envs["FASTWAM_GAUSSIAN_CACHE_DIR"],
+            "fallback": envs["FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR"],
+        },
+        "phases": phases,
+    }
+    child_env = {
+        "PATH": BOOTSTRAP_PATH,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+    }
+    child_env.update(
+        {
+            name: value
+            for name, value in envs.items()
+            if type(value) is str and name != TRUSTED_RUNTIME_B64_ENV
+        }
+    )
+    try:
+        result = subprocess.run(
+            [
+                str(PINNED_PYTHON),
+                "-B",
+                "-I",
+                "-c",
+                HYDRA_PREFLIGHT_PROGRAM,
+                str(source),
+            ],
+            # Preserve the task-declared mapping order all the way into the
+            # child; the child checks it before Hydra sees any override.
+            input=json.dumps(payload, separators=(",", ":")),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=source,
+            env=child_env,
+            timeout=HYDRA_PREFLIGHT_TIMEOUT_SECONDS,
+            check=False,
+            close_fds=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("Hydra compose preflight could not run") from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-4000:]
+        raise RuntimeError(
+            f"Hydra compose preflight failed for {member}: {detail}"
+        )
+    try:
+        receipt = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Hydra compose preflight returned invalid JSON") from error
+    expected_receipt = {
+        "schema": HYDRA_PREFLIGHT_RECEIPT_SCHEMA,
+        "member": member,
+        "phases": [
+            {"name": phase["name"], "mapping_type": "DictConfig"}
+            for phase in phases
+        ],
+    }
+    if not strict_value_equal(receipt, expected_receipt):
+        raise RuntimeError("Hydra compose preflight receipt mismatch")
+    return receipt
+
+
 def build_request(
     member: str,
     *,
@@ -1418,6 +1887,7 @@ def build_request(
     spec = MEMBERS[member]
     tasks = spec["tasks"]
     selected_text = task_text_map(member, text_caches)
+    hydra_text_map = encode_hydra_text_cache_map(member, selected_text)
     envs = {
         "FASTWAM_AGENT_COUNT": str(spec["agent_count"]),
         "FASTWAM_ARTIFACT_INTEGRITY_MODE": "metadata_no_hash",
@@ -1443,8 +1913,9 @@ def build_request(
         ),
         "FASTWAM_TASK_CONFIG": spec["config"],
         "FASTWAM_TASKS_JSON": json.dumps(tasks, separators=(",", ":")),
+        HYDRA_TEXT_CACHE_MAP_ENV: hydra_text_map,
         "FASTWAM_TEXT_CACHE_MAP_JSON": json.dumps(
-            selected_text, sort_keys=True, separators=(",", ":")
+            selected_text, separators=(",", ":")
         ),
         TRUSTED_RUNTIME_B64_ENV: base64.b64encode(trusted_runtime).decode("ascii"),
         TRUSTED_RUNTIME_BYTES_ENV: str(len(trusted_runtime)),
@@ -1647,6 +2118,7 @@ def validate_request(
         "FASTWAM_INITIAL_CHECKPOINT",
         "FASTWAM_SOURCE_ROOT",
         "FASTWAM_STATS_SOURCE",
+        HYDRA_TEXT_CACHE_MAP_ENV,
         "FASTWAM_TEXT_CACHE_MAP_JSON",
         TRUSTED_RUNTIME_B64_ENV,
         TRUSTED_RUNTIME_BYTES_ENV,
@@ -1667,7 +2139,7 @@ def validate_request(
     if type(source_literal) is not str:
         raise RuntimeError("source root must be a string")
     if source_literal != str(EXPECTED_SOURCE_ROOT):
-        raise RuntimeError("source root differs from the frozen R4 snapshot")
+        raise RuntimeError("source root differs from the frozen R5 snapshot")
     output_literal = envs.get("FASTWAM_OSS_OUTPUT_ROOT")
     if type(output_literal) is not str:
         raise RuntimeError("output root must be a string")
@@ -1681,10 +2153,14 @@ def validate_request(
     if (
         not strict_value_equal(tasks, spec["tasks"])
         or type(text_map) is not dict
-        or set(text_map) != set(tasks)
+        or list(text_map) != tasks
         or any(type(task) is not str or type(text_map.get(task)) is not str for task in tasks)
     ):
         raise RuntimeError("text-cache mapping must exactly match the member task scope")
+    if envs.get(HYDRA_TEXT_CACHE_MAP_ENV) != encode_hydra_text_cache_map(
+        member, text_map
+    ):
+        raise RuntimeError("Hydra text-cache mapping differs from its canonical JSON")
     for value in text_map.values():
         path = Path(value)
         if not path.is_absolute() or not path.is_relative_to(OSS_ROOT):
@@ -2142,25 +2618,9 @@ def prepare(args: argparse.Namespace) -> None:
         raise ValueError("--platform-oss-quota-evidence is required")
     if not args.platform_oss_observed_at.strip():
         raise ValueError("--platform-oss-observed-at is required")
-    # The venv entry point is intentionally a symlink.  Bind both the logical
-    # venv path (which selects that environment) and its exact regular CPFS
-    # interpreter target; merely accepting an arbitrary executable symlink
-    # would make the prepared runtime mutable by retargeting it.
-    try:
-        resolved_python = PINNED_PYTHON.resolve(strict=True)
-    except OSError as exc:
-        raise RuntimeError(f"pinned CPFS Python cannot be resolved: {PINNED_PYTHON}") from exc
-    if (
-        not PINNED_PYTHON.is_symlink()
-        or resolved_python != PINNED_PYTHON_TARGET
-        or PINNED_PYTHON_TARGET.is_symlink()
-        or not PINNED_PYTHON_TARGET.is_file()
-        or not os.access(PINNED_PYTHON_TARGET, os.X_OK)
-    ):
-        raise RuntimeError(
-            "pinned CPFS Python logical path or resolved executable target mismatch: "
-            f"{PINNED_PYTHON} -> {resolved_python}"
-        )
+    # Bind the logical venv entry point to its exact regular CPFS interpreter
+    # before any suite state can be published.
+    validate_pinned_python()
     source_commit = args.source_commit.strip().lower()
     if COMMIT_RE.fullmatch(source_commit) is None:
         raise ValueError("--source-commit must be a lowercase full 40-character Git object ID")
@@ -2232,6 +2692,14 @@ def prepare(args: argparse.Namespace) -> None:
         )
         for member in names
     }
+    # Still phase one: compose the exact three trainer argv vectors for every
+    # member against the frozen source/config tree.  This imports Hydra and the
+    # project's resolver only; scripts/train.py and the trainer are never
+    # imported or launched.  Any grammar, type, or semantic failure therefore
+    # occurs before an output parent, durable reservation, suite marker, or
+    # volatile local state is created.
+    for member, reservation in planned_reservations.items():
+        validate_hydra_argv_preflight(member, reservation["request"])
     for member, reservation in planned_reservations.items():
         validate_existing_member_state(member, reservation)
     suite_already_published = (
@@ -2741,6 +3209,7 @@ def require_n2_scientific_completion_for_downstream_submit(
         "FASTWAM_RUN_ID",
         "FASTWAM_TASK_CONFIG",
         "FASTWAM_TASKS_JSON",
+        HYDRA_TEXT_CACHE_MAP_ENV,
         "FASTWAM_TEXT_CACHE_MAP_JSON",
     }
     selected_envs = selected_request.get("Envs")
@@ -2832,6 +3301,10 @@ def submit(args: argparse.Namespace) -> None:
         member, reservation, require_output_absent=not already_latched
     )
     require_n2_scientific_completion_for_downstream_submit(member, reservation)
+    # Re-compose the immutable exact argv before loading the cloud SDK, listing
+    # jobs, creating a latch, or making any cloud mutation.  This closes the
+    # gap between prepare-time config validity and the live submit boundary.
+    validate_hydra_argv_preflight(member, request_body)
     client, models, runtime_cls = load_sdk()
     request = validate_request(member, request_body, sdk_models=models, live=True)
     if already_latched:

@@ -33,7 +33,7 @@ CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12
   || { echo "Error: pinned PAI SDK environment is incomplete" >&2; exit 1; }
 LOCK_ANCHOR="/run"
 LOCK_ROOT="/run/fastwam-dlc-submit-state/workspace-270969"
-LOCK_NAME="action-n234-formal-r4-controller.lock"
+LOCK_NAME="action-n234-formal-r5-controller.lock"
 
 # The pinned interpreter opens each component relative to an already validated
 # directory descriptor.  In particular, the lock is never opened by shell
@@ -98,7 +98,7 @@ def validate_lock(parent_fd, fd):
         or opened.st_uid != os.geteuid()
         or stat.S_IMODE(opened.st_mode) != 0o600
     ):
-        fail("unsafe R4 controller lock file")
+        fail("unsafe R5 controller lock file")
 
 
 normal_anchor = os.path.normpath(lock_anchor)
@@ -155,7 +155,7 @@ try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
             if error.errno in (errno.EACCES, errno.EAGAIN):
-                fail("another formal R4 controller is active")
+                fail("another formal R5 controller is active")
             raise
 
         # LOCK_TEST_REVALIDATION_POINT

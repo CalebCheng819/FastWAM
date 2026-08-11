@@ -26,7 +26,8 @@ required_env=(
   FASTWAM_RUN_ID
   FASTWAM_SOURCE_ROOT FASTWAM_STATS_SOURCE
   FASTWAM_SUITE_STORAGE_RESERVATION_PATH FASTWAM_TASK_CONFIG
-  FASTWAM_TASKS_JSON FASTWAM_TEXT_CACHE_MAP_JSON FASTWAM_VAE_SOURCE
+  FASTWAM_TASKS_JSON FASTWAM_TEXT_CACHE_MAP_HYDRA
+  FASTWAM_TEXT_CACHE_MAP_JSON FASTWAM_VAE_SOURCE
   NPROC_PER_NODE
 )
 for name in "${required_env[@]}"; do
@@ -38,9 +39,9 @@ done
 [[ "${NPROC_PER_NODE}" == 8 ]] || die "this runtime requires exactly eight ranks"
 [[ "${FASTWAM_MAX_OSS_PUBLISH_BYTES}" == $((62 * 1024 * 1024 * 1024)) ]] || die "per-run publication cap mismatch"
 [[ "${FASTWAM_MIN_TMP_FREE_BYTES}" == $((200 * 1024 * 1024 * 1024)) ]] || die "local scratch floor mismatch"
-[[ "${FASTWAM_OSS_OUTPUT_ROOT}" == /oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812/* ]] || die "durable output prefix mismatch"
+[[ "${FASTWAM_OSS_OUTPUT_ROOT}" == /oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/* ]] || die "durable output prefix mismatch"
 [[ -d "$(dirname -- "${FASTWAM_OSS_OUTPUT_ROOT}")" && ! -L "$(dirname -- "${FASTWAM_OSS_OUTPUT_ROOT}")" ]] || die "prepared durable output prefix is absent"
-[[ "${FASTWAM_SOURCE_ROOT}" == /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r4-20260812-r1 ]] || die "frozen R4 source mismatch"
+[[ "${FASTWAM_SOURCE_ROOT}" == /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r5-20260812-r1 ]] || die "frozen R5 source mismatch"
 [[ "${FASTWAM_PREPARED_RESERVATION_PATH}" == /oss-chengjuntao/* ]] || die "reservation must be on OSS"
 [[ "${FASTWAM_SUITE_STORAGE_RESERVATION_PATH}" == /oss-chengjuntao/* ]] || die "suite reservation must be on OSS"
 [[ "${FASTWAM_DATASET_ROOT}" == /oss-chengjuntao/* ]] || die "dataset must be sourced from OSS"
@@ -60,22 +61,22 @@ resolved_python="$(readlink -f -- "${FASTWAM_PYTHON}")" || die "cannot resolve p
 case "${FASTWAM_MEMBER}" in
   n2)
     expected_agents=2
-    expected_experiment=FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R4-20260812
-    expected_run=fastwam-act-n2-placefood-1k-s42-r4-20260812
+    expected_experiment=FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R5-20260812
+    expected_run=fastwam-act-n2-placefood-1k-s42-r5-20260812
     expected_config=robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5
     expected_tasks='["PlaceFood-rf"]'
     ;;
   n3)
     expected_agents=3
-    expected_experiment=FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R4-20260812
-    expected_run=fastwam-act-n3-pool-1k-s42-r4-20260812
+    expected_experiment=FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R5-20260812
+    expected_run=fastwam-act-n3-pool-1k-s42-r5-20260812
     expected_config=robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5
     expected_tasks='["ThreeRobotsPlaceShoes-rf","ThreeRobotsStackCube-rf"]'
     ;;
   n4)
     expected_agents=4
-    expected_experiment=FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R4-20260812
-    expected_run=fastwam-act-n4-stackcube-1k-s42-r4-20260812
+    expected_experiment=FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R5-20260812
+    expected_run=fastwam-act-n4-stackcube-1k-s42-r5-20260812
     expected_config=robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5
     expected_tasks='["FourRobotsStackCube-rf"]'
     ;;
@@ -133,7 +134,7 @@ tmp_available="$(df -PB1 /tmp | awk 'NR==2 {print $4}')"
 [[ "${tmp_available}" =~ ^[0-9]+$ ]] || die "cannot read local scratch capacity"
 (( tmp_available >= FASTWAM_MIN_TMP_FREE_BYTES )) || die "local scratch is below the 200 GiB floor"
 
-SCRATCH="$(mktemp -d /tmp/fastwam-action-n234-formal-r4.XXXXXX)"
+SCRATCH="$(mktemp -d /tmp/fastwam-action-n234-formal-r5.XXXXXX)"
 LOCAL_SOURCE="${SCRATCH}/source"
 TRAIN_OUTPUT="${SCRATCH}/train"
 VERIFY_OUTPUT="${SCRATCH}/fresh-load"
@@ -249,8 +250,8 @@ COMMON_OVERRIDES=(
   "data.val.pretrained_norm_stats=${FASTWAM_STATS_SOURCE}"
   "data.train.text_embedding_cache_dir=null"
   "data.val.text_embedding_cache_dir=null"
-  "+data.train.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_JSON}"
-  "+data.val.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_JSON}"
+  "+data.train.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_HYDRA}"
+  "+data.val.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_HYDRA}"
   "+data.train.integrity_mode=metadata_no_hash"
   "+data.val.integrity_mode=metadata_no_hash"
   "data.train.gaussian_cache_dir=${FASTWAM_GAUSSIAN_CACHE_DIR}"
@@ -268,6 +269,93 @@ COMMON_OVERRIDES=(
   "+data.train.gaussian_fallback_projection=opacity-aware-moment-matching-cell-mean-alpha-v2"
   "+data.val.gaussian_fallback_projection=opacity-aware-moment-matching-cell-mean-alpha-v2"
 )
+
+PHASE1_ARGV=(
+  "${COMMON_OVERRIDES[@]}"
+  "output_dir=../train"
+  "resume=null"
+  "init_weights=${FASTWAM_INITIAL_CHECKPOINT}"
+  "save_training_state=true"
+  "save_final_checkpoint=true"
+)
+PHASE2_ARGV=(
+  "${COMMON_OVERRIDES[@]}"
+  "output_dir=../train"
+  "resume=../train/checkpoints/state/step_000500"
+  "init_weights=null"
+  "save_training_state=true"
+  "save_final_checkpoint=true"
+)
+PHASE3_ARGV=(
+  "${COMMON_OVERRIDES[@]}"
+  "output_dir=../fresh-load"
+  "resume=../train/checkpoints/state/step_001000"
+  "init_weights=null"
+  "save_training_state=false"
+  "save_final_checkpoint=false"
+)
+readonly -a COMMON_OVERRIDES PHASE1_ARGV PHASE2_ARGV PHASE3_ARGV
+
+# Bind the worker's literal Bash argv vectors back to the frozen controller
+# contract, then ask Hydra itself to compose all three train configs in memory.
+# This runs before Accelerate or scripts/train.py and never imports the trainer.
+"${FASTWAM_PYTHON}" -B -I -S - \
+  "${SOURCE_CONTROLLER}" "${FASTWAM_MEMBER}" \
+  "${FASTWAM_PREPARED_RESERVATION_PATH}" "${LOCAL_SOURCE}" \
+  "${#PHASE1_ARGV[@]}" "${#PHASE2_ARGV[@]}" "${#PHASE3_ARGV[@]}" \
+  "${PHASE1_ARGV[@]}" "${PHASE2_ARGV[@]}" "${PHASE3_ARGV[@]}" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+(
+    controller_path,
+    member,
+    reservation_path,
+    local_source,
+    phase1_count,
+    phase2_count,
+    phase3_count,
+    *arguments,
+) = sys.argv[1:]
+counts = [int(phase1_count), int(phase2_count), int(phase3_count)]
+if any(count <= 0 for count in counts) or sum(counts) != len(arguments):
+    raise RuntimeError("runtime Hydra argv framing mismatch")
+observed = []
+offset = 0
+for count in counts:
+    observed.append(arguments[offset:offset + count])
+    offset += count
+
+spec = importlib.util.spec_from_file_location(
+    "formal_hydra_preflight_controller", controller_path
+)
+if spec is None or spec.loader is None:
+    raise RuntimeError("cannot load frozen controller for Hydra preflight")
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+reservation, _ = module.read_json(Path(reservation_path))
+request = module.validate_member_reservation_structure(member, reservation)
+contract = module.hydra_phase_overrides(member, request["Envs"])
+if len(contract) != len(observed):
+    raise RuntimeError("runtime Hydra phase count differs from controller")
+supplied = [
+    {
+        "name": expected["name"],
+        "overrides": actual,
+        "expected": expected["expected"],
+    }
+    for expected, actual in zip(contract, observed)
+]
+module.validate_hydra_argv_preflight(
+    member,
+    request,
+    source_root=Path(local_source),
+    phase_overrides=supplied,
+)
+print("[formal-runtime] exact three-phase Hydra argv compose: PASS")
+PY
 
 launch_training() {
   local log_path=$1
@@ -288,17 +376,12 @@ launch_training() {
       --main_process_port 29561 --num_processes 8 \
       --deepspeed_multinode_launcher standard \
       "${LOCAL_SOURCE}/scripts/train.py" \
-      "${COMMON_OVERRIDES[@]}" "$@"
+      "$@"
   ) 2>&1 | tee "${log_path}"
 }
 
 mkdir -m 0700 "${TRAIN_OUTPUT}"
-launch_training "${PHASE1_LOG}" "" \
-  "output_dir=${TRAIN_OUTPUT}" \
-  "resume=null" \
-  "init_weights=${FASTWAM_INITIAL_CHECKPOINT}" \
-  "save_training_state=true" \
-  "save_final_checkpoint=true"
+launch_training "${PHASE1_LOG}" "" "${PHASE1_ARGV[@]}"
 
 STEP500_WEIGHT="${TRAIN_OUTPUT}/checkpoints/weights/step_000500.pt"
 STEP500_STATE="${TRAIN_OUTPUT}/checkpoints/state/step_000500"
@@ -307,12 +390,7 @@ STEP500_STATE="${TRAIN_OUTPUT}/checkpoints/state/step_000500"
 
 PHASE2_RECEIPT="${TRAIN_OUTPUT}/recovery_load_receipt.json"
 [[ ! -e "${PHASE2_RECEIPT}" && ! -L "${PHASE2_RECEIPT}" ]] || die "phase2 receipt target already exists"
-launch_training "${PHASE2_LOG}" "${PHASE2_RECEIPT}" \
-  "output_dir=${TRAIN_OUTPUT}" \
-  "resume=${STEP500_STATE}" \
-  "init_weights=null" \
-  "save_training_state=true" \
-  "save_final_checkpoint=true"
+launch_training "${PHASE2_LOG}" "${PHASE2_RECEIPT}" "${PHASE2_ARGV[@]}"
 
 STEP1000_WEIGHT="${TRAIN_OUTPUT}/checkpoints/weights/step_001000.pt"
 STEP1000_STATE="${TRAIN_OUTPUT}/checkpoints/state/step_001000"
@@ -397,12 +475,7 @@ rm -rf -- "${STEP500_STATE}"
 
 mkdir -m 0700 "${VERIFY_OUTPUT}"
 PHASE3_RECEIPT="${VERIFY_OUTPUT}/recovery_load_receipt.json"
-launch_training "${PHASE3_LOG}" "${PHASE3_RECEIPT}" \
-  "output_dir=${VERIFY_OUTPUT}" \
-  "resume=${STEP1000_STATE}" \
-  "init_weights=null" \
-  "save_training_state=false" \
-  "save_final_checkpoint=false"
+launch_training "${PHASE3_LOG}" "${PHASE3_RECEIPT}" "${PHASE3_ARGV[@]}"
 
 # Validate terminal state/eval, phase3 zero-update behavior, and both native
 # recovery receipts before the durable output directory exists.

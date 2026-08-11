@@ -1,24 +1,24 @@
-# FASTWAM native-agent N=2/3/4 formal DLC launcher R4
+# FASTWAM native-agent N=2/3/4 formal DLC launcher R5
 
 This directory contains a prepare-first, fail-closed 1 Worker x 8 GPU launcher
 for three action-only runs under a canary promotion policy.  N=2 is submitted
 first; N=3 and N=4 are eligible only after the same suite's N=2 run has durable,
 structured scientific-completion evidence.  Nothing in this directory has
-been submitted by creating or testing these files.  R4 uses new experiment
+been submitted by creating or testing these files.  R5 uses new experiment
 IDs, run IDs, output roots, suite/member ledger paths, and a distinct controller
 lock; prior formal identities and durable records are never reused.
 
-The frozen R4 suite ID is
-`FASTWAM-MR-ACTION-N234-FORMAL-R4-20260812`; its immutable source is
-`/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r4-20260812-r1`,
+The frozen R5 suite ID is
+`FASTWAM-MR-ACTION-N234-FORMAL-R5-20260812`; its immutable source is
+`/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r5-20260812-r1`,
 its output prefix is
-`/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812`, and its
+`/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812`, and its
 control lock is
-`/run/fastwam-dlc-submit-state/workspace-270969/action-n234-formal-r4-controller.lock`.
-The three experiment IDs end in `N2-PLACEFOOD-1K-S42-R4-20260812`,
-`N3-POOL-1K-S42-R4-20260812`, and `N4-STACKCUBE-1K-S42-R4-20260812`;
-their run IDs use the corresponding `-r4-20260812` suffix and display names
-use the corresponding `-r4` suffix.
+`/run/fastwam-dlc-submit-state/workspace-270969/action-n234-formal-r5-controller.lock`.
+The three experiment IDs end in `N2-PLACEFOOD-1K-S42-R5-20260812`,
+`N3-POOL-1K-S42-R5-20260812`, and `N4-STACKCUBE-1K-S42-R5-20260812`;
+their run IDs use the corresponding `-r5-20260812` suffix and display names
+use the corresponding `-r5` suffix.
 
 The frozen experiment matrix is N=2 PlaceFood-rf, N=3
 ThreeRobotsPlaceShoes-rf plus ThreeRobotsStackCube-rf, and N=4
@@ -54,14 +54,34 @@ compared across mounts.
 
 Preparation is two-phase across the whole N=2/3/4 suite.  It first builds and
 validates every member request, source/input binding, and reservation entirely
-in memory.  If any member fails, it creates no output parent, member or suite
-reservation, and no local `PREPARED` state.  Only after all three pure results
-pass does it create the new output parent, publish and read back all member
-reservations, publish the suite marker, and finally record local prepared
-state.  The suite marker is the atomic authorization boundary, not a rollback
-mechanism: if phase two stops after publishing only some member records, those
-records cannot authorize submission and the R4 identity must not be reused.
-A failed prior identity is never resumed or reused.
+in memory, then asks the pinned real Hydra Compose API to compose the exact
+three worker argv vectors for every member.  This preflight imports the frozen
+resolver but neither imports `scripts/train.py` nor starts the trainer.  If any
+member build, validation, or Hydra compose fails, preparation creates no output
+parent, member or suite reservation, and no local `PREPARED` state.  Only after
+all three pure results and all nine compositions pass does it create the new
+output parent, publish and read back all member reservations, publish the suite
+marker, and finally record local prepared state.  The suite marker is the
+atomic authorization boundary, not a rollback mechanism: if phase two stops
+after publishing only some member records, those records cannot authorize
+submission and the R5 identity must not be reused.  A failed prior identity is
+never resumed or reused.
+
+R4 failed before training step 0 because it placed canonical JSON directly in
+Hydra's `text_embedding_cache_files` override.  JSON's quoted mapping keys are
+not valid Hydra flow-mapping keys; the real parser rejected the override with
+`no viable alternative at input '{"PlaceFood-rf"'`.  R5 retains
+`FASTWAM_TEXT_CACHE_MAP_JSON` solely as canonical evidence and adds the
+separate executable `FASTWAM_TEXT_CACHE_MAP_HYDRA` form: frozen unquoted task
+keys and JSON-quoted absolute OSS scalar paths.  The controller proves the two
+forms are strictly equivalent, including task order and path scope.  It
+performs the same real composition before SDK loading on submit, so a grammar
+or semantic failure precedes ListJobs, latch/state writes, and CreateJob.  In
+the worker, the three literal Bash arrays are compared element-for-element
+with the frozen controller contract and composed once more before the first
+training launch; those same arrays, without reconstruction, are then passed to
+the three `launch_training` calls.  The preflight runs with bytecode disabled
+and makes no training output.
 
 This no-hash contract deliberately does not claim content identity for a
 dataset directory or for a same-size replacement of a large checkpoint, VAE,

@@ -23,6 +23,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parents[3]
 CONTROLLER = ROOT / "controller.py"
 RUNTIME = ROOT / "runtime.sh"
 WRAPPER = ROOT / "submit_from_ssh970.sh"
@@ -43,7 +44,7 @@ def build_test_request(module, member: str) -> dict:
         member,
         source_root=(
             module.SOURCE_PREFIX
-            / "fastwam-action-n234-formal-r4-20260812-r1"
+            / "fastwam-action-n234-formal-r5-20260812-r1"
         ),
         source_commit="a" * 40,
         dataset_root=module.OSS_ROOT / "dataset",
@@ -114,6 +115,11 @@ def assert_request(module, member: str) -> None:
     assert json.loads(env["FASTWAM_TEXT_CACHE_MAP_JSON"]) == {
         task: module.DEFAULT_TEXT_CACHES[task] for task in spec["tasks"]
     }
+    assert env[module.HYDRA_TEXT_CACHE_MAP_ENV] == (
+        module.encode_hydra_text_cache_map(
+            member, json.loads(env["FASTWAM_TEXT_CACHE_MAP_JSON"])
+        )
+    )
     assert env["FASTWAM_MAX_OSS_PUBLISH_BYTES"] == str(62 * 1024**3)
     assert env["FASTWAM_PYTHON"] == str(module.PINNED_PYTHON)
     assert env["FASTWAM_PYTHON_TARGET"] == str(module.PINNED_PYTHON_TARGET)
@@ -195,21 +201,21 @@ def test_controller_structure(module) -> None:
         "external generic reservation; trainer terminal contract fields remain null; "
         "terminal success is granted only by the runtime receipt"
     )
-    assert module.SUITE_ID == "FASTWAM-MR-ACTION-N234-FORMAL-R4-20260812"
+    assert module.SUITE_ID == "FASTWAM-MR-ACTION-N234-FORMAL-R5-20260812"
     assert str(module.OUTPUT_PREFIX).endswith(
-        "/fastwam-action-n234-formal-r4-20260812"
+        "/fastwam-action-n234-formal-r5-20260812"
     )
     assert module.CONTROL_ANCHOR == Path("/run")
     assert module.LOCAL_CONTROL_ROOT == Path(
         "/run/fastwam-dlc-submit-state/workspace-270969"
     )
     assert module.CONTROL_LOCK_PATH == (
-        module.LOCAL_CONTROL_ROOT / "action-n234-formal-r4-controller.lock"
+        module.LOCAL_CONTROL_ROOT / "action-n234-formal-r5-controller.lock"
     )
     for spec in module.MEMBERS.values():
-        assert "-R4-20260812" in spec["experiment_id"]
-        assert "-r4-20260812" in spec["run_id"]
-        assert spec["display_name"].endswith("-r4")
+        assert "-R5-20260812" in spec["experiment_id"]
+        assert "-r5-20260812" in spec["run_id"]
+        assert spec["display_name"].endswith("-r5")
     assert module.SUITE_OSS_BUDGET_BYTES == 190 * 1024**3
     assert module.PER_RUN_OSS_BUDGET_BYTES == 62 * 1024**3
     assert str(module.PINNED_PYTHON).endswith(
@@ -277,6 +283,9 @@ def test_controller_structure(module) -> None:
     )
     assert submit_text.index(
         "require_n2_scientific_completion_for_downstream_submit("
+    ) < submit_text.index("validate_hydra_argv_preflight(member, request_body)")
+    assert submit_text.index(
+        "validate_hydra_argv_preflight(member, request_body)"
     ) < submit_text.index("load_sdk()")
     assert submit_text.index("load_sdk()") < submit_text.index(
         "exclusive_write(latch_path(member), latch)"
@@ -291,7 +300,16 @@ def test_controller_structure(module) -> None:
     assert '"SCIENTIFIC_COMPLETE"' in prerequisite_text
     for forbidden in ("hashlib", "sha256sum", "md5sum", "blake2", "checksum"):
         assert forbidden not in text.lower()
-    for retired in ("R1-20260811", "R2-20260811", "-r1-20260811", "-r2-20260811"):
+    for retired in (
+        "R1-20260811",
+        "R2-20260811",
+        "R3-20260812",
+        "R4-20260812",
+        "-r1-20260811",
+        "-r2-20260811",
+        "-r3-20260812",
+        "-r4-20260812",
+    ):
         assert retired not in text
 
     record = suite_record(module)
@@ -427,14 +445,14 @@ def test_controller_structure(module) -> None:
     assert not module.exact_job(strict_scalar_observed, strict_scalar_request)
 
 
-def test_r4_controller_lock_binds_fd_to_exact_path(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-controller-lock-") as name:
+def test_r5_controller_lock_binds_fd_to_exact_path(module) -> None:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-controller-lock-") as name:
         root = Path(name)
-        r4_lock = root / "action-n234-formal-r4-controller.lock"
+        r5_lock = root / "action-n234-formal-r5-controller.lock"
         old_lock = root / "retired-controller.lock"
-        r4_lock.write_bytes(b"")
+        r5_lock.write_bytes(b"")
         old_lock.write_bytes(b"")
-        r4_metadata = os.lstat(r4_lock)
+        r5_metadata = os.lstat(r5_lock)
         old_metadata = os.lstat(old_lock)
         environment = {
             "FASTWAM_CONTROL_NODE": module.CONTROL_NODE,
@@ -443,8 +461,8 @@ def test_r4_controller_lock_binds_fd_to_exact_path(module) -> None:
 
         with (
             mock.patch.dict(os.environ, environment, clear=False),
-            mock.patch.object(module, "CONTROL_LOCK_PATH", r4_lock),
-            mock.patch.object(module.os, "fstat", return_value=r4_metadata),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r5_lock),
+            mock.patch.object(module.os, "fstat", return_value=r5_metadata),
             mock.patch.object(module.fcntl, "flock") as lock,
         ):
             module.require_controller_lock()
@@ -454,7 +472,7 @@ def test_r4_controller_lock_binds_fd_to_exact_path(module) -> None:
 
         with (
             mock.patch.dict(os.environ, environment, clear=False),
-            mock.patch.object(module, "CONTROL_LOCK_PATH", r4_lock),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r5_lock),
             mock.patch.object(module.os, "fstat", return_value=old_metadata),
             mock.patch.object(module.fcntl, "flock") as lock,
         ):
@@ -464,23 +482,23 @@ def test_r4_controller_lock_binds_fd_to_exact_path(module) -> None:
             )
         lock.assert_not_called()
 
-        bound_metadata = os.lstat(r4_lock)
+        bound_metadata = os.lstat(r5_lock)
         replacement = root / "replacement.lock"
         replacement.write_bytes(b"")
-        os.replace(replacement, r4_lock)
+        os.replace(replacement, r5_lock)
         assert (bound_metadata.st_dev, bound_metadata.st_ino) != (
-            os.lstat(r4_lock).st_dev,
-            os.lstat(r4_lock).st_ino,
+            os.lstat(r5_lock).st_dev,
+            os.lstat(r5_lock).st_ino,
         )
         with (
             mock.patch.dict(os.environ, environment, clear=False),
-            mock.patch.object(module, "CONTROL_LOCK_PATH", r4_lock),
+            mock.patch.object(module, "CONTROL_LOCK_PATH", r5_lock),
             mock.patch.object(module.os, "fstat", return_value=bound_metadata),
             mock.patch.object(module.fcntl, "flock") as lock,
         ):
             _assert_runtime_rejected(
                 module.require_controller_lock,
-                "R4 lock path replaced after descriptor open",
+                "R5 lock path replaced after descriptor open",
             )
         lock.assert_not_called()
 
@@ -502,7 +520,7 @@ def test_r4_controller_lock_binds_fd_to_exact_path(module) -> None:
 
 
 def test_controller_exclusive_writer_fails_closed(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-exclusive-writer-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-exclusive-writer-") as name:
         root = Path(name)
 
         collision = root / "collision.json"
@@ -530,7 +548,7 @@ def test_controller_exclusive_writer_fails_closed(module) -> None:
         except FileExistsError:
             pass
         else:
-            raise AssertionError("partial immutable record must poison the R4 identity")
+            raise AssertionError("partial immutable record must poison the R5 identity")
 
         local_state = root / "local-state.json"
         local_state.write_bytes(b"old-local-state\n")
@@ -584,6 +602,7 @@ def _submit_with_n2_evidence(
     formal_result,
     *,
     fixture_mutation: str | None = None,
+    hydra_preflight_error: RuntimeError | None = None,
 ):
     requests = {name: build_test_request(module, name) for name in module.MEMBERS}
     shared_source = {
@@ -605,7 +624,7 @@ def _submit_with_n2_evidence(
     selected_reservation = reservations[member]
     alternate_source = str(
         module.SOURCE_PREFIX
-        / f"fastwam-action-n234-formal-r4-20260812-{member}-alternate"
+        / f"fastwam-action-n234-formal-r5-20260812-{member}-alternate"
     )
     if fixture_mutation == "suite_path":
         selected_reservation["request"]["Envs"][
@@ -627,7 +646,7 @@ def _submit_with_n2_evidence(
         raise AssertionError(f"unknown scientific-gate fixture mutation: {fixture_mutation}")
 
     # Commit and shared-environment changes remain individually request-valid;
-    # source-root drift now also violates the R4 exact frozen-source contract.
+    # source-root drift now also violates the R5 exact frozen-source contract.
     if fixture_mutation in {"source_commit", "shared_request_env"}:
         module.validate_request(member, selected_reservation["request"])
 
@@ -639,7 +658,7 @@ def _submit_with_n2_evidence(
     elif fixture_mutation == "n2_reread_vs_suite":
         alternate_n2_source = str(
             module.SOURCE_PREFIX
-            / "fastwam-action-n234-formal-r4-20260812-n2-reread"
+            / "fastwam-action-n234-formal-r5-20260812-n2-reread"
         )
         n2_readback["source"]["root"] = alternate_n2_source
         n2_readback["request"]["Envs"]["FASTWAM_SOURCE_ROOT"] = alternate_n2_source
@@ -652,7 +671,7 @@ def _submit_with_n2_evidence(
             assert headers == {}
             assert runtime_options == {"autoretry": False}
             return SimpleNamespace(
-                body=SimpleNamespace(to_map=lambda: {"JobId": "dlc-r4-test"})
+                body=SimpleNamespace(to_map=lambda: {"JobId": "dlc-r5-test"})
             )
 
     def read_records(_path):
@@ -694,6 +713,18 @@ def _submit_with_n2_evidence(
         events.append("load-sdk")
         return Client(), SimpleNamespace(), SimpleNamespace()
 
+    def hydra_preflight(selected, request):
+        events.append(f"hydra-preflight:{selected}")
+        assert selected == member
+        assert request == selected_readback["request"]
+        if hydra_preflight_error is not None:
+            raise hydra_preflight_error
+        return {
+            "schema": module.HYDRA_PREFLIGHT_SCHEMA,
+            "member": selected,
+            "phases": [],
+        }
+
     def list_jobs(*_args):
         events.append("list-jobs")
         return []
@@ -704,7 +735,7 @@ def _submit_with_n2_evidence(
     def publish_local_state(_path, _value):
         events.append("local-state")
 
-    with tempfile.TemporaryDirectory(prefix=f"formal-r4-submit-gate-{member}-") as name:
+    with tempfile.TemporaryDirectory(prefix=f"formal-r5-submit-gate-{member}-") as name:
         root = Path(name)
         with ExitStack() as stack:
             read_json = stack.enter_context(
@@ -737,6 +768,13 @@ def _submit_with_n2_evidence(
             sdk_loader = stack.enter_context(
                 mock.patch.object(module, "load_sdk", side_effect=load_sdk)
             )
+            preflight = stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "validate_hydra_argv_preflight",
+                    side_effect=hydra_preflight,
+                )
+            )
             stack.enter_context(
                 mock.patch.object(
                     module,
@@ -766,7 +804,7 @@ def _submit_with_n2_evidence(
                 mock.patch.object(
                     module,
                     "get_job",
-                    return_value={"JobId": "dlc-r4-test", "Status": "Running"},
+                    return_value={"JobId": "dlc-r5-test", "Status": "Running"},
                 )
             )
             stack.enter_context(mock.patch.object(module, "exact_job", return_value=True))
@@ -774,7 +812,7 @@ def _submit_with_n2_evidence(
                 mock.patch.object(
                     module,
                     "publish_acknowledgement",
-                    return_value={"job_id": "dlc-r4-test", "job_status": "Running"},
+                    return_value={"job_id": "dlc-r5-test", "job_status": "Running"},
                 )
             )
             stack.enter_context(
@@ -813,6 +851,7 @@ def _submit_with_n2_evidence(
         suite_validator=suite_validator,
         terminal_validator=terminal_validator,
         sdk_loader=sdk_loader,
+        preflight=preflight,
         jobs=jobs,
         latch=latch,
         local_state=local_state,
@@ -832,6 +871,7 @@ def test_downstream_submit_requires_n2_scientific_completion(module) -> None:
             assert result.events[:2] == [f"live:{member}", "live:n2"]
             assert result.events[2:] == ["n2-terminal"]
             result.terminal_validator.assert_called_once_with("n2")
+            result.preflight.assert_not_called()
             result.sdk_loader.assert_not_called()
             result.jobs.assert_not_called()
             result.latch.assert_not_called()
@@ -845,10 +885,14 @@ def test_downstream_submit_requires_n2_scientific_completion(module) -> None:
         }
         accepted = _submit_with_n2_evidence(module, member, scientific)
         assert accepted.error is None
-        assert accepted.events.index("n2-terminal") < accepted.events.index("load-sdk")
+        assert accepted.events.index("n2-terminal") < accepted.events.index(
+            f"hydra-preflight:{member}"
+        )
+        assert accepted.events.index(f"hydra-preflight:{member}") < accepted.events.index("load-sdk")
         assert accepted.events.index("load-sdk") < accepted.events.index("latch")
         assert accepted.events.index("latch") < accepted.events.index("CreateJob")
         accepted.terminal_validator.assert_called_once_with("n2")
+        accepted.preflight.assert_called_once()
         accepted.latch.assert_called_once()
         assert accepted.local_state.call_count == 2
 
@@ -904,6 +948,7 @@ def test_downstream_gate_rejects_cross_record_drift_before_submission(module) ->
             assert "local-state" not in result.events
             assert "CreateJob" not in result.events
             result.terminal_validator.assert_not_called()
+            result.preflight.assert_not_called()
             result.sdk_loader.assert_not_called()
             result.jobs.assert_not_called()
             result.latch.assert_not_called()
@@ -919,11 +964,55 @@ def test_n2_submit_has_no_scientific_prerequisite(module) -> None:
     assert result.error is None
     assert result.events[0] == "live:n2"
     assert "n2-terminal" not in result.events
+    assert result.events.index("hydra-preflight:n2") < result.events.index("load-sdk")
     assert result.events.index("load-sdk") < result.events.index("latch")
     assert result.events.index("latch") < result.events.index("CreateJob")
     result.suite_validator.assert_not_called()
     result.terminal_validator.assert_not_called()
+    result.preflight.assert_called_once()
     result.latch.assert_called_once()
+
+
+def test_submit_hydra_preflight_failures_precede_every_cloud_or_state_action(
+    module,
+) -> None:
+    scientific = {
+        "status": "SCIENTIFIC_COMPLETE",
+        "output_root": str(module.output_root("n2")),
+        "published_bytes": 123,
+        "artifact_files": 9,
+    }
+    failures = (
+        RuntimeError("Hydra preflight task-to-cache mapping is not canonical"),
+        RuntimeError("runtime Hydra argv differs from the controller contract"),
+        RuntimeError("Hydra compose preflight failed for n3: parser error"),
+    )
+    for member in module.MEMBERS:
+        evidence = (
+            AssertionError("N2 must not inspect predecessor terminal evidence")
+            if member == "n2"
+            else scientific
+        )
+        for failure in failures:
+            result = _submit_with_n2_evidence(
+                module,
+                member,
+                evidence,
+                hydra_preflight_error=failure,
+            )
+            assert isinstance(result.error, RuntimeError)
+            assert str(result.error) == str(failure)
+            assert result.events[-1] == f"hydra-preflight:{member}"
+            assert "load-sdk" not in result.events
+            assert "list-jobs" not in result.events
+            assert "latch" not in result.events
+            assert "local-state" not in result.events
+            assert "CreateJob" not in result.events
+            result.preflight.assert_called_once()
+            result.sdk_loader.assert_not_called()
+            result.jobs.assert_not_called()
+            result.latch.assert_not_called()
+            result.local_state.assert_not_called()
 
 
 def _write_portable_fixture(root: Path, payload: bytes = b"portable-source") -> None:
@@ -936,9 +1025,9 @@ def _write_portable_fixture(root: Path, payload: bytes = b"portable-source") -> 
 def test_source_inventory_cross_mount_portability(module) -> None:
     shared_memory = Path("/dev/shm")
     assert shared_memory.is_dir(), "/dev/shm is required for the cross-mount test"
-    with tempfile.TemporaryDirectory(prefix="formal-r4-posix-", dir="/tmp") as left_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-posix-", dir="/tmp") as left_name:
         with tempfile.TemporaryDirectory(
-            prefix="formal-r4-shm-", dir=shared_memory
+            prefix="formal-r5-shm-", dir=shared_memory
         ) as right_name:
             left = Path(left_name)
             right = Path(right_name)
@@ -961,7 +1050,7 @@ def test_source_inventory_cross_mount_portability(module) -> None:
 
 
 def test_source_inventory_ignores_mode_and_mtime(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-metadata-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-metadata-") as temporary:
         root = Path(temporary)
         _write_portable_fixture(root)
         first = module.source_inventory(root)
@@ -977,7 +1066,7 @@ def test_source_inventory_ignores_mode_and_mtime(module) -> None:
 
 
 def test_source_inventory_content_difference_is_path_only(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-content-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-content-") as temporary:
         root = Path(temporary)
         _write_portable_fixture(root, b"first-content")
         expected = module.source_inventory(root)
@@ -1049,7 +1138,7 @@ def test_source_inventory_schema_rejects_float_bool_and_noncanonical(module) -> 
 
 
 def test_source_inventory_rejects_symlink_and_path_race(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-link-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-link-") as temporary:
         root = Path(temporary)
         (root / "payload.bin").write_bytes(b"payload")
         (root / "payload-link").symlink_to("payload.bin")
@@ -1060,7 +1149,7 @@ def test_source_inventory_rejects_symlink_and_path_race(module) -> None:
         else:
             raise AssertionError("source symlink must fail closed")
 
-    with tempfile.TemporaryDirectory(prefix="formal-r4-race-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-race-") as temporary:
         root = Path(temporary)
         child = root / "nested"
         moved = root / "nested-moved"
@@ -1097,6 +1186,368 @@ def _assert_runtime_rejected(callback, label: str) -> None:
     except RuntimeError:
         return
     raise AssertionError(f"malformed portable binding was accepted: {label}")
+
+
+def _real_hydra_python(module) -> tuple[Path, Path]:
+    """Locate a real isolated Hydra interpreter without accepting a loose binary."""
+
+    candidates: list[Path] = []
+    override = os.environ.get("FASTWAM_TEST_HYDRA_PYTHON")
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(
+        (
+            module.PINNED_PYTHON,
+            Path(
+                "/home/chengjuntao/.codex-tmp/cosmos25-prefetch/"
+                "cosmos-predict2.5-v1.5.2/.venv/bin/python"
+            ),
+        )
+    )
+    for logical in candidates:
+        try:
+            target = logical.resolve(strict=True)
+        except OSError:
+            continue
+        if (
+            not logical.is_symlink()
+            or target.is_symlink()
+            or not target.is_file()
+            or not os.access(target, os.X_OK)
+        ):
+            continue
+        probe = subprocess.run(
+            [
+                str(logical),
+                "-B",
+                "-I",
+                "-c",
+                "import hydra,omegaconf; assert hydra.__version__ == '1.3.2'",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={
+                "PATH": module.BOOTSTRAP_PATH,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+            },
+            check=False,
+        )
+        if probe.returncode == 0:
+            return logical, target
+    raise AssertionError(
+        "real Hydra 1.3.2 symlink and regular interpreter target are unavailable"
+    )
+
+
+def _stage_minimal_hydra_source(root: Path) -> Path:
+    """Stage configs plus the one resolver module; omit every trainer entrypoint."""
+
+    source = root / "source"
+    source.mkdir()
+    shutil.copytree(REPO_ROOT / "configs", source / "configs")
+    utils = source / "src/fastwam/utils"
+    utils.mkdir(parents=True)
+    (source / "src/fastwam/__init__.py").write_text("", encoding="utf-8")
+    (utils / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copyfile(
+        REPO_ROOT / "src/fastwam/utils/config_resolvers.py",
+        utils / "config_resolvers.py",
+    )
+    assert not (source / "scripts/train.py").exists()
+    return source
+
+
+def _tree_paths(root: Path) -> set[str]:
+    return {path.relative_to(root).as_posix() for path in root.rglob("*")}
+
+
+def _hydra_preflight_payload(
+    module, member: str, request: dict, phases: list[dict]
+) -> dict:
+    envs = request["Envs"]
+    return {
+        "schema": module.HYDRA_PREFLIGHT_SCHEMA,
+        "member": member,
+        "agent_count": module.MEMBERS[member]["agent_count"],
+        "tasks": json.loads(envs["FASTWAM_TASKS_JSON"]),
+        "text_map": json.loads(envs["FASTWAM_TEXT_CACHE_MAP_JSON"]),
+        "paths": {
+            "dataset": envs["FASTWAM_DATASET_ROOT"],
+            "stats": envs["FASTWAM_STATS_SOURCE"],
+            "initial_checkpoint": envs["FASTWAM_INITIAL_CHECKPOINT"],
+            "gaussian": envs["FASTWAM_GAUSSIAN_CACHE_DIR"],
+            "fallback": envs["FASTWAM_GAUSSIAN_FALLBACK_CACHE_DIR"],
+        },
+        "phases": phases,
+    }
+
+
+def test_real_hydra_compose_and_raw_json_parser_regression(module) -> None:
+    """Exercise the actual Hydra parser for all nine R5 worker configurations."""
+
+    logical_python, target_python = _real_hydra_python(module)
+    with tempfile.TemporaryDirectory(prefix="formal-r5-real-hydra-") as name:
+        source = _stage_minimal_hydra_source(Path(name))
+        before = _tree_paths(source)
+        with (
+            mock.patch.object(module, "PINNED_PYTHON", logical_python),
+            mock.patch.object(module, "PINNED_PYTHON_TARGET", target_python),
+        ):
+            for member in module.MEMBERS:
+                request = build_test_request(module, member)
+                phases = module.hydra_phase_overrides(member, request["Envs"])
+                receipt = module.validate_hydra_argv_preflight(
+                    member,
+                    request,
+                    source_root=source,
+                    phase_overrides=phases,
+                )
+                assert receipt == {
+                    "schema": module.HYDRA_PREFLIGHT_RECEIPT_SCHEMA,
+                    "member": member,
+                    "phases": [
+                        {"name": phase["name"], "mapping_type": "DictConfig"}
+                        for phase in phases
+                    ],
+                }
+
+            # R4 put canonical JSON directly into the Hydra override.  Its
+            # quoted mapping keys are invalid Hydra dictKey grammar and failed
+            # before step 0.  Keep the exact parser failure as a regression.
+            member = "n2"
+            request = build_test_request(module, member)
+            envs = request["Envs"]
+            phases = copy.deepcopy(module.hydra_phase_overrides(member, envs))
+            encoded = envs[module.HYDRA_TEXT_CACHE_MAP_ENV]
+            raw_json = envs["FASTWAM_TEXT_CACHE_MAP_JSON"]
+            replacements = 0
+            for phase in phases:
+                replaced = []
+                for override in phase["overrides"]:
+                    changed = override.replace(encoded, raw_json)
+                    replacements += int(changed != override)
+                    replaced.append(changed)
+                phase["overrides"] = replaced
+            assert replacements == 6
+            payload = _hydra_preflight_payload(module, member, request, phases)
+            raw_result = subprocess.run(
+                [
+                    str(logical_python),
+                    "-B",
+                    "-I",
+                    "-c",
+                    module.HYDRA_PREFLIGHT_PROGRAM,
+                    str(source),
+                ],
+                input=json.dumps(payload, separators=(",", ":")),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=source,
+                env={
+                    "PATH": module.BOOTSTRAP_PATH,
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONNOUSERSITE": "1",
+                },
+                check=False,
+            )
+        assert raw_result.returncode != 0
+        assert "no viable alternative at input '{\"PlaceFood-rf\"'" in (
+            raw_result.stderr
+        )
+        assert _tree_paths(source) == before
+        assert not any(
+            path.name == "__pycache__" or path.suffix == ".pyc"
+            for path in source.rglob("*")
+        )
+
+
+def test_hydra_mapping_equivalence_and_invalid_contracts(module) -> None:
+    """JSON evidence and executable Hydra syntax must describe one typed map."""
+
+    for member in module.MEMBERS:
+        request = build_test_request(module, member)
+        envs = request["Envs"]
+        text_map = json.loads(envs["FASTWAM_TEXT_CACHE_MAP_JSON"])
+        assert list(text_map) == module.MEMBERS[member]["tasks"]
+        assert envs[module.HYDRA_TEXT_CACHE_MAP_ENV] == (
+            module.encode_hydra_text_cache_map(member, text_map)
+        )
+        module.validate_request(member, request)
+
+        raw_quoted = copy.deepcopy(request)
+        raw_quoted["Envs"][module.HYDRA_TEXT_CACHE_MAP_ENV] = raw_quoted[
+            "Envs"
+        ]["FASTWAM_TEXT_CACHE_MAP_JSON"]
+        with mock.patch.object(module.subprocess, "run") as run:
+            _assert_runtime_rejected(
+                lambda: module.validate_hydra_argv_preflight(member, raw_quoted),
+                f"quoted JSON mapping keys for {member}",
+            )
+        run.assert_not_called()
+
+        mismatched = copy.deepcopy(request)
+        changed_map = json.loads(
+            mismatched["Envs"]["FASTWAM_TEXT_CACHE_MAP_JSON"]
+        )
+        changed_map[next(iter(changed_map))] = str(
+            module.OSS_ROOT / "different-text-cache.pt"
+        )
+        mismatched["Envs"]["FASTWAM_TEXT_CACHE_MAP_JSON"] = json.dumps(
+            changed_map, separators=(",", ":")
+        )
+        _assert_runtime_rejected(
+            lambda: module.validate_request(member, mismatched),
+            f"JSON and Hydra mapping mismatch for {member}",
+        )
+
+        wrong_tasks = copy.deepcopy(request)
+        wrong_tasks["Envs"]["FASTWAM_TASKS_JSON"] = "[]"
+        with mock.patch.object(module.subprocess, "run") as run:
+            _assert_runtime_rejected(
+                lambda: module.validate_hydra_argv_preflight(member, wrong_tasks),
+                f"invalid task scope for {member}",
+            )
+        run.assert_not_called()
+
+        wrong_phase = copy.deepcopy(module.hydra_phase_overrides(member, envs))
+        wrong_phase[0]["overrides"][-5] = "output_dir=../unexpected"
+        with mock.patch.object(module.subprocess, "run") as run:
+            _assert_runtime_rejected(
+                lambda: module.validate_hydra_argv_preflight(
+                    member, request, phase_overrides=wrong_phase
+                ),
+                f"runtime phase path mismatch for {member}",
+            )
+        run.assert_not_called()
+
+    n3_map = {
+        task: str(module.OSS_ROOT / f"{index}.pt")
+        for index, task in enumerate(module.MEMBERS["n3"]["tasks"])
+    }
+    reversed_map = dict(reversed(list(n3_map.items())))
+    _assert_runtime_rejected(
+        lambda: module.encode_hydra_text_cache_map("n3", reversed_map),
+        "Hydra mapping task order",
+    )
+    missing_map = dict(n3_map)
+    missing_map.pop(next(iter(missing_map)))
+    _assert_runtime_rejected(
+        lambda: module.encode_hydra_text_cache_map("n3", missing_map),
+        "Hydra mapping missing task",
+    )
+    extra_map = dict(n3_map)
+    extra_map["UnexpectedTask"] = str(module.OSS_ROOT / "extra.pt")
+    _assert_runtime_rejected(
+        lambda: module.encode_hydra_text_cache_map("n3", extra_map),
+        "Hydra mapping extra task",
+    )
+    invalid_path = dict(n3_map)
+    invalid_path[next(iter(invalid_path))] = "relative/cache.pt"
+    _assert_runtime_rejected(
+        lambda: module.encode_hydra_text_cache_map("n3", invalid_path),
+        "Hydra mapping relative path",
+    )
+    outside_path = dict(n3_map)
+    outside_path[next(iter(outside_path))] = "/tmp/cache.pt"
+    _assert_runtime_rejected(
+        lambda: module.encode_hydra_text_cache_map("n3", outside_path),
+        "Hydra mapping path outside OSS",
+    )
+    invalid_members = copy.deepcopy(module.MEMBERS)
+    invalid_members["n2"]["tasks"] = ["unsafe task"]
+    with mock.patch.object(module, "MEMBERS", invalid_members):
+        _assert_runtime_rejected(
+            lambda: module.encode_hydra_text_cache_map(
+                "n2", {"unsafe task": str(module.OSS_ROOT / "unsafe.pt")}
+            ),
+            "Hydra mapping unsafe task key",
+        )
+
+
+def test_runtime_hydra_argv_arrays_equal_controller_contract(module) -> None:
+    """Evaluate the literal Bash arrays and compare every element to R5."""
+
+    text = RUNTIME.read_text(encoding="utf-8")
+    array_start = text.index("COMMON_OVERRIDES=(")
+    array_end_marker = (
+        "readonly -a COMMON_OVERRIDES PHASE1_ARGV PHASE2_ARGV PHASE3_ARGV"
+    )
+    array_end = text.index(array_end_marker, array_start) + len(array_end_marker)
+    array_program = text[array_start:array_end]
+    probe_program = (
+        "set -euo pipefail\n"
+        + array_program
+        + "\nprintf '%s\\0' \"${#PHASE1_ARGV[@]}\" "
+        '"${#PHASE2_ARGV[@]}" "${#PHASE3_ARGV[@]}"\n'
+        + "printf '%s\\0' \"${PHASE1_ARGV[@]}\" "
+        '"${PHASE2_ARGV[@]}" "${PHASE3_ARGV[@]}"\n'
+    )
+
+    for member in module.MEMBERS:
+        request = build_test_request(module, member)
+        environment = {
+            "PATH": module.BOOTSTRAP_PATH,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            **request["Envs"],
+        }
+        result = subprocess.run(
+            ["/bin/bash", "--noprofile", "--norc", "-c", probe_program],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+        fields = result.stdout.split(b"\0")
+        assert fields.pop() == b""
+        counts = [int(value.decode("ascii")) for value in fields[:3]]
+        arguments = [value.decode("utf-8") for value in fields[3:]]
+        assert sum(counts) == len(arguments)
+        observed: list[list[str]] = []
+        offset = 0
+        for count in counts:
+            observed.append(arguments[offset : offset + count])
+            offset += count
+        expected = [
+            phase["overrides"]
+            for phase in module.hydra_phase_overrides(member, request["Envs"])
+        ]
+        assert observed == expected
+
+    preflight_start = text.index(
+        "# Bind the worker's literal Bash argv vectors back to the frozen controller"
+    )
+    preflight_end = text.index("\nlaunch_training() {", preflight_start)
+    preflight = text[preflight_start:preflight_end]
+    assert preflight.index('"${#PHASE1_ARGV[@]}"') < preflight.index(
+        '"${PHASE1_ARGV[@]}"'
+    )
+    for phase in (1, 2, 3):
+        assert preflight.count(f'"${{#PHASE{phase}_ARGV[@]}}"') == 1
+        assert preflight.count(f'"${{PHASE{phase}_ARGV[@]}}"') == 1
+        assert (
+            text.count(
+                f'launch_training "${{PHASE{phase}_LOG}}"'
+            )
+            == 1
+        )
+        assert (
+            f'"${{PHASE{phase}_ARGV[@]}}"'
+            in next(
+                line
+                for line in text.splitlines()
+                if line.startswith(f'launch_training "${{PHASE{phase}_LOG}}"')
+            )
+        )
+    assert preflight.count("validate_hydra_argv_preflight(") == 1
+    assert '"scripts/train.py"' not in preflight
+    assert "accelerate.commands.launch" not in preflight
+    assert "mkdir " not in preflight
+    assert "tee " not in preflight
+    assert "-B -I -S -" in preflight
 
 
 def test_request_schema_scalar_types_and_trusted_runtime_base64(module) -> None:
@@ -1692,7 +2143,7 @@ def test_gaussian_manifest_reversible_descriptor_contract(module) -> None:
 
 
 def test_gaussian_manifest_large_raw_bounds(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-large-manifest-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-large-manifest-") as name:
         prefix = Path(name)
         cache = prefix / "large"
         cache.mkdir()
@@ -1754,6 +2205,8 @@ def _write_member_input_fixture(
         path = text_root / f"{task}.pt"
         path.write_bytes(f"text cache: {task}".encode("utf-8"))
         text_map[task] = str(path)
+    with mock.patch.object(module, "OSS_ROOT", Path("/")):
+        hydra_text_map = module.encode_hydra_text_cache_map(member, text_map)
     request = {
         "Envs": {
             "FASTWAM_DATASET_ROOT": str(dataset),
@@ -1766,8 +2219,9 @@ def _write_member_input_fixture(
                 module.MEMBERS[member]["tasks"], separators=(",", ":")
             ),
             "FASTWAM_TEXT_CACHE_MAP_JSON": json.dumps(
-                text_map, sort_keys=True, separators=(",", ":")
+                text_map, separators=(",", ":")
             ),
+            "FASTWAM_TEXT_CACHE_MAP_HYDRA": hydra_text_map,
         }
     }
     return request, {
@@ -1825,12 +2279,12 @@ def test_member_inputs_cross_mount_mode_and_mtime_portability(module) -> None:
     member = "n3"
     shared_memory = Path("/dev/shm")
     assert shared_memory.is_dir(), "/dev/shm is required for the cross-mount test"
-    with tempfile.TemporaryDirectory(prefix="formal-r4-input-left-", dir="/tmp") as left_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-input-left-", dir="/tmp") as left_name:
         with tempfile.TemporaryDirectory(
-            prefix="formal-r4-input-right-", dir=shared_memory
+            prefix="formal-r5-input-right-", dir=shared_memory
         ) as right_name:
             with tempfile.TemporaryDirectory(
-                prefix="formal-r4-input-alias-", dir="/tmp"
+                prefix="formal-r5-input-alias-", dir="/tmp"
             ) as alias_name:
                 left = Path(left_name)
                 right = Path(right_name)
@@ -1890,7 +2344,7 @@ def _same_size_replace(path: Path, payload: bytes) -> None:
 
 def test_same_size_stats_and_gaussian_control_replacements_are_detected(module) -> None:
     member = "n2"
-    with tempfile.TemporaryDirectory(prefix="formal-r4-control-content-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-control-content-") as name:
         root = Path(name)
         request, paths = _write_member_input_fixture(
             module, root, member=member, declared_dataset_root=root / "dataset"
@@ -2148,7 +2602,7 @@ def test_prepare_one_is_pure_and_publish_is_explicit(module) -> None:
         "schema": module.SOURCE_INVENTORY_SCHEMA,
         "entries": [{"path": ".", "kind": "directory"}],
     }
-    with tempfile.TemporaryDirectory(prefix="formal-r4-prepare-behavior-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-prepare-behavior-") as name:
         root = Path(name)
         reservation_destination = root / "prepared-reservation.json"
         output_destination = root / "output"
@@ -2303,7 +2757,7 @@ def test_prepare_member_failures_leave_no_durable_or_local_state(module) -> None
     for failure_stage in ("collect", "validate"):
         for failing_member in module.MEMBERS:
             with tempfile.TemporaryDirectory(
-                prefix=f"formal-r4-atomic-{failure_stage}-{failing_member}-"
+                prefix=f"formal-r5-atomic-{failure_stage}-{failing_member}-"
             ) as name:
                 root = Path(name)
                 python_target = root / "python-target"
@@ -2439,7 +2893,7 @@ def test_prepare_member_failures_leave_no_durable_or_local_state(module) -> None
 
 
 def test_prepare_phase_two_follows_all_pure_results(module) -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-phase-two-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-phase-two-") as name:
         root = Path(name)
         python_target = root / "python-target"
         python_target.write_bytes(b"runtime")
@@ -2451,7 +2905,12 @@ def test_prepare_phase_two_follows_all_pure_results(module) -> None:
         events: list[str] = []
         published_suite: dict[str, dict] = {}
         planned = {
-            member: {"member": member, "pure": True} for member in module.MEMBERS
+            member: {
+                "member": member,
+                "pure": True,
+                "request": {"member": member},
+            }
+            for member in module.MEMBERS
         }
         real_mkdir = os.mkdir
 
@@ -2463,6 +2922,11 @@ def test_prepare_phase_two_follows_all_pure_results(module) -> None:
             assert reservation is planned[member]
             events.append(f"inspect:{member}")
             return None
+
+        def preflight(member: str, request: dict):
+            assert request is planned[member]["request"]
+            events.append(f"preflight:{member}")
+            return {"member": member, "status": "PASS"}
 
         def create_output(path: Path, mode: int):
             events.append("mkdir:output")
@@ -2510,6 +2974,13 @@ def test_prepare_phase_two_follows_all_pure_results(module) -> None:
             stack.enter_context(
                 mock.patch.object(
                     module,
+                    "validate_hydra_argv_preflight",
+                    side_effect=preflight,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    module,
                     "validate_existing_member_state",
                     side_effect=inspect_member,
                 )
@@ -2545,13 +3016,145 @@ def test_prepare_phase_two_follows_all_pure_results(module) -> None:
 
         assert output_prefix.is_dir()
         assert events[:3] == ["pure:n2", "pure:n3", "pure:n4"]
-        assert events[3:6] == ["inspect:n2", "inspect:n3", "inspect:n4"]
+        assert events[3:6] == [
+            "preflight:n2",
+            "preflight:n3",
+            "preflight:n4",
+        ]
+        assert events[6:9] == ["inspect:n2", "inspect:n3", "inspect:n4"]
         assert events.index("mkdir:output") > events.index("inspect:n4")
         assert events.index("publish:n2") > events.index("mkdir:output")
         assert events.index("publish:suite") > events.index("publish:n4")
         assert events.index("read:suite") > events.index("publish:suite")
         for member in module.MEMBERS:
             assert events.index(f"local:{member}") > events.index("read:suite")
+
+
+def test_prepare_hydra_preflight_failures_leave_no_state(module) -> None:
+    """Every member must compose before phase two can publish any state."""
+
+    for failing_member in module.MEMBERS:
+        with tempfile.TemporaryDirectory(
+            prefix=f"formal-r5-hydra-atomic-{failing_member}-"
+        ) as name:
+            root = Path(name)
+            python_target = root / "python-target"
+            python_target.write_bytes(b"runtime")
+            python_target.chmod(0o700)
+            python_link = root / "python"
+            python_link.symlink_to(python_target)
+            output_prefix = root / "durable-output-parent"
+            suite_path = root / "suite-reservation.json"
+            member_paths = {
+                member: root / f"{member}-reservation.json"
+                for member in module.MEMBERS
+            }
+            local_paths = {
+                member: root / f"{member}-state.json"
+                for member in module.MEMBERS
+            }
+            planned = {
+                member: {"member": member, "request": {"member": member}}
+                for member in module.MEMBERS
+            }
+            events: list[str] = []
+
+            def prepare_member(member: str, **_kwargs):
+                events.append(f"pure:{member}")
+                return planned[member]
+
+            def preflight(member: str, request: dict):
+                assert request is planned[member]["request"]
+                events.append(f"preflight:{member}")
+                if member == failing_member:
+                    raise RuntimeError(f"Hydra compose failed for {member}")
+                return {"member": member, "status": "PASS"}
+
+            patches = _prepare_read_only_patches(module, root)
+            with ExitStack() as stack:
+                for patcher in patches:
+                    stack.enter_context(patcher)
+                stack.enter_context(
+                    mock.patch.object(module, "PINNED_PYTHON", python_link)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "PINNED_PYTHON_TARGET", python_target
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(module, "OUTPUT_PREFIX", output_prefix)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module, "SUITE_STORAGE_RESERVATION_PATH", suite_path
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module,
+                        "reservation_path",
+                        side_effect=lambda member: member_paths[member],
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module,
+                        "local_state_path",
+                        side_effect=lambda member: local_paths[member],
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(module, "prepare_one", side_effect=prepare_member)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        module,
+                        "validate_hydra_argv_preflight",
+                        side_effect=preflight,
+                    )
+                )
+                inspect = stack.enter_context(
+                    mock.patch.object(module, "validate_existing_member_state")
+                )
+                make_output = stack.enter_context(
+                    mock.patch.object(module.os, "mkdir")
+                )
+                publish_member = stack.enter_context(
+                    mock.patch.object(module, "publish_member_reservation")
+                )
+                publish_suite = stack.enter_context(
+                    mock.patch.object(module, "exclusive_write")
+                )
+                atomic_write = stack.enter_context(
+                    mock.patch.object(module, "atomic_write")
+                )
+                write_local_state = stack.enter_context(
+                    mock.patch.object(module, "write_prepared_local_state")
+                )
+                _assert_runtime_rejected(
+                    lambda: module.prepare(_prepare_test_args(root)),
+                    f"Hydra preflight failure at {failing_member}",
+                )
+
+            assert events[:3] == ["pure:n2", "pure:n3", "pure:n4"]
+            expected_members = list(module.MEMBERS)
+            expected_preflights = expected_members[
+                : expected_members.index(failing_member) + 1
+            ]
+            assert events[3:] == [
+                f"preflight:{member}" for member in expected_preflights
+            ]
+            inspect.assert_not_called()
+            make_output.assert_not_called()
+            publish_member.assert_not_called()
+            publish_suite.assert_not_called()
+            atomic_write.assert_not_called()
+            write_local_state.assert_not_called()
+            assert not output_prefix.exists()
+            assert not suite_path.exists()
+            assert all(not path.exists() for path in member_paths.values())
+            assert all(not path.exists() for path in local_paths.values())
 
 
 def test_live_validation_rejects_all_same_size_control_changes(module) -> None:
@@ -2696,7 +3299,7 @@ def test_suite_rejects_common_input_mismatch(module) -> None:
 
 
 def test_first_frozen_controller_import_does_not_mutate_source() -> None:
-    with tempfile.TemporaryDirectory(prefix="formal-r4-import-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-import-") as temporary:
         source = Path(temporary) / "source"
         controller = source / CONTROLLER.name
         source.mkdir()
@@ -2744,14 +3347,14 @@ def test_runtime_structure() -> None:
     text = RUNTIME.read_text(encoding="utf-8")
     assert text.count("launch_training \"") == 3
     for identity in (
-        "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r4-20260812/",
-        "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r4-20260812-r1",
-        "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R4-20260812",
-        "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R4-20260812",
-        "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R4-20260812",
-        "fastwam-act-n2-placefood-1k-s42-r4-20260812",
-        "fastwam-act-n3-pool-1k-s42-r4-20260812",
-        "fastwam-act-n4-stackcube-1k-s42-r4-20260812",
+        "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/",
+        "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-action-n234-formal-r5-20260812-r1",
+        "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R5-20260812",
+        "FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R5-20260812",
+        "FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R5-20260812",
+        "fastwam-act-n2-placefood-1k-s42-r5-20260812",
+        "fastwam-act-n3-pool-1k-s42-r5-20260812",
+        "fastwam-act-n4-stackcube-1k-s42-r5-20260812",
     ):
         assert identity in text
     for required in (
@@ -2761,8 +3364,8 @@ def test_runtime_structure() -> None:
         "+data.val.integrity_mode=metadata_no_hash",
         "data.train.gaussian_cache_verify=manifest",
         "data.val.gaussian_cache_verify=manifest",
-        "+data.train.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_JSON}",
-        "+data.val.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_JSON}",
+        "+data.train.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_HYDRA}",
+        "+data.val.text_embedding_cache_files=${FASTWAM_TEXT_CACHE_MAP_HYDRA}",
         "training_terminal_contract=null",
         "training_run_profile=null",
         "training_task_scope_receipt=null",
@@ -2858,7 +3461,16 @@ def test_runtime_structure() -> None:
         assert forbidden not in text.lower()
     assert "sparse_delta" not in text
     assert "new pod" not in text.lower()
-    for retired in ("R1-20260811", "R2-20260811", "-r1-20260811", "-r2-20260811"):
+    for retired in (
+        "R1-20260811",
+        "R2-20260811",
+        "R3-20260812",
+        "R4-20260812",
+        "-r1-20260811",
+        "-r2-20260811",
+        "-r3-20260812",
+        "-r4-20260812",
+    ):
         assert retired not in text
     source_copy_validation = text.split(
         'cp -a -- "${FASTWAM_SOURCE_ROOT}/." "${LOCAL_SOURCE}/"', 1
@@ -2909,7 +3521,7 @@ def test_runtime_durable_writers_fail_closed() -> None:
     exec("def write_all(fd, payload):\n" + writers, namespace)
     create_bytes = namespace["create_bytes"]
 
-    with tempfile.TemporaryDirectory(prefix="formal-r4-runtime-writer-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-runtime-writer-") as name:
         root = Path(name)
         collision = root / "COMPLETE"
         collision.write_bytes(b"immutable-existing-marker\n")
@@ -2955,7 +3567,7 @@ def test_runtime_staged_copy_uses_prepared_inventory_counterexample() -> None:
     assert text.count(marker) == 1
     stage_script = text.split(marker, 1)[1].split("\nPY\n", 1)[0]
 
-    with tempfile.TemporaryDirectory(prefix="formal-r4-stage-binding-") as name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-stage-binding-") as name:
         root = Path(name)
         controller = root / "controller.py"
         source = root / "source"
@@ -3077,7 +3689,7 @@ named = os.lstat(lock_path)
 if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
     raise RuntimeError("descriptor 9 is not a single-link regular lock")
 if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
-    raise RuntimeError("descriptor 9 is not the named R4 lock")
+    raise RuntimeError("descriptor 9 is not the named R5 lock")
 if os.get_inheritable(9) is not True:
     raise RuntimeError("descriptor 9 did not survive exec")
 if os.environ.get("FASTWAM_CONTROL_NODE") != "ssh970":
@@ -3120,7 +3732,7 @@ with open(marker_path, "xb") as handle:
         {
             "SSH_CONNECTION": "127.0.0.1 12345 127.0.0.1 970",
             "FASTWAM_WRAPPER_EXPECTED_LOCK": str(
-                lock_root / "action-n234-formal-r4-controller.lock"
+                lock_root / "action-n234-formal-r5-controller.lock"
             ),
             "FASTWAM_WRAPPER_CONTROLLER_MARKER": str(marker),
             "PYTHONDONTWRITEBYTECODE": "1",
@@ -3189,8 +3801,13 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
     assert 'environment["PYTHONDONTWRITEBYTECODE"] = "1"' in wrapper_text
     assert 'LOCK_ANCHOR="/run"' in wrapper_text
     assert 'LOCK_ROOT="/run/fastwam-dlc-submit-state/workspace-270969"' in wrapper_text
-    assert "action-n234-formal-r4-controller.lock" in wrapper_text
-    assert "action-n234-formal-controller.lock" not in wrapper_text
+    assert "action-n234-formal-r5-controller.lock" in wrapper_text
+    for retired_lock in (
+        "action-n234-formal-controller.lock",
+        "action-n234-formal-r3-controller.lock",
+        "action-n234-formal-r4-controller.lock",
+    ):
+        assert retired_lock not in wrapper_text
     assert "exec 9>" not in wrapper_text
     assert "flock -n 9" not in wrapper_text
     assert "os.O_NOFOLLOW" in wrapper_text
@@ -3208,11 +3825,11 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
     expected_lock = str(module.CONTROL_LOCK_PATH)
     assert expected_lock == (
         "/run/fastwam-dlc-submit-state/workspace-270969/"
-        "action-n234-formal-r4-controller.lock"
+        "action-n234-formal-r5-controller.lock"
     )
     assert expected_lock in README.read_text(encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="formal-r4-real-wrapper-") as base_name:
+    with tempfile.TemporaryDirectory(prefix="formal-r5-real-wrapper-") as base_name:
         base = Path(base_name)
         os.chmod(base, 0o700)
 
@@ -3236,7 +3853,7 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
         assert positive.returncode == 0, positive.stderr
         assert positive_marker.read_bytes() == b"controller-ran\n"
         lock_metadata = os.lstat(
-            positive_root / "action-n234-formal-r4-controller.lock"
+            positive_root / "action-n234-formal-r5-controller.lock"
         )
         assert stat.S_ISREG(lock_metadata.st_mode)
         assert stat.S_IMODE(lock_metadata.st_mode) == 0o600
@@ -3354,7 +3971,7 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
         symlink_root.mkdir(mode=0o700)
         lock_target = symlink_case / "lock-target"
         lock_target.write_bytes(b"must-not-be-truncated\n")
-        lock_link = symlink_root / "action-n234-formal-r4-controller.lock"
+        lock_link = symlink_root / "action-n234-formal-r5-controller.lock"
         lock_link.symlink_to(lock_target)
         rejected_link = subprocess.run(
             ["/bin/bash", str(symlink_wrapper)],
@@ -3381,7 +3998,7 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
         hardlink_target = hardlink_case / "lock-target"
         hardlink_target.write_bytes(b"must-remain-single-payload\n")
         os.chmod(hardlink_target, 0o600)
-        hardlink_path = hardlink_root / "action-n234-formal-r4-controller.lock"
+        hardlink_path = hardlink_root / "action-n234-formal-r5-controller.lock"
         os.link(hardlink_target, hardlink_path)
         rejected_hardlink = subprocess.run(
             ["/bin/bash", str(hardlink_wrapper)],
@@ -3391,7 +4008,7 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
             check=False,
         )
         assert rejected_hardlink.returncode != 0
-        assert "unsafe R4 controller lock file" in rejected_hardlink.stderr
+        assert "unsafe R5 controller lock file" in rejected_hardlink.stderr
         assert hardlink_target.read_bytes() == b"must-remain-single-payload\n"
         assert os.lstat(hardlink_target).st_nlink == 2
         assert not hardlink_marker.exists()
@@ -3489,7 +4106,7 @@ def test_wrapper_uses_pinned_nofollow_lock_bootstrap(module) -> None:
             check=False,
         )
         assert rejected_waiter.returncode != 0
-        assert "another formal R4 controller is active" in rejected_waiter.stderr
+        assert "another formal R5 controller is active" in rejected_waiter.stderr
         assert not waiter_marker.exists()
         Path(holder_env["FASTWAM_LOCK_TEST_RELEASE"]).write_bytes(b"release\n")
         try:
@@ -3508,17 +4125,21 @@ def main() -> None:
     for member in module.MEMBERS:
         assert_request(module, member)
     test_controller_structure(module)
-    test_r4_controller_lock_binds_fd_to_exact_path(module)
+    test_r5_controller_lock_binds_fd_to_exact_path(module)
     test_controller_exclusive_writer_fails_closed(module)
     test_downstream_submit_requires_n2_scientific_completion(module)
     test_downstream_gate_rejects_cross_record_drift_before_submission(module)
     test_n2_submit_has_no_scientific_prerequisite(module)
+    test_submit_hydra_preflight_failures_precede_every_cloud_or_state_action(module)
     test_source_inventory_cross_mount_portability(module)
     test_source_inventory_ignores_mode_and_mtime(module)
     test_source_inventory_content_difference_is_path_only(module)
     test_source_inventory_schema_rejects_float_bool_and_noncanonical(module)
     test_source_inventory_rejects_symlink_and_path_race(module)
     test_request_schema_scalar_types_and_trusted_runtime_base64(module)
+    test_real_hydra_compose_and_raw_json_parser_regression(module)
+    test_hydra_mapping_equivalence_and_invalid_contracts(module)
+    test_runtime_hydra_argv_arrays_equal_controller_contract(module)
     test_portable_inputs_schema_rejects_legacy_fields_paths_and_tasks(module)
     test_portable_inputs_reject_bool_float_negative_size_and_base64(module)
     test_gaussian_manifest_reversible_descriptor_contract(module)
@@ -3530,6 +4151,7 @@ def main() -> None:
     test_prepare_one_is_pure_and_publish_is_explicit(module)
     test_prepare_member_failures_leave_no_durable_or_local_state(module)
     test_prepare_phase_two_follows_all_pure_results(module)
+    test_prepare_hydra_preflight_failures_leave_no_state(module)
     test_live_validation_rejects_all_same_size_control_changes(module)
     test_suite_rejects_common_input_mismatch(module)
     test_first_frozen_controller_import_does_not_mutate_source()
