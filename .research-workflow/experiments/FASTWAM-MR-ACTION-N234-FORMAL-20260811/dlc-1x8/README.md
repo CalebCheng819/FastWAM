@@ -1,8 +1,10 @@
-# FASTWAM native-agent N=2/3/4 formal DLC launcher
+# FASTWAM native-agent N=2/3/4 formal DLC launcher R2
 
 This directory contains a prepare-first, fail-closed 1 Worker x 8 GPU launcher
 for three independent action-only runs.  Nothing in this directory has been
-submitted by creating or testing these files.
+submitted by creating or testing these files.  R2 uses new experiment IDs, run
+IDs, output roots, suite/member ledger paths, and a distinct controller lock;
+the submitted R1 identities and durable records are never reused.
 
 The frozen experiment matrix is N=2 PlaceFood-rf, N=3
 ThreeRobotsPlaceShoes-rf plus ThreeRobotsStackCube-rf, and N=4
@@ -11,6 +13,31 @@ seed and split seed 42, native agent counts, and no fixed-capacity masked agent
 set.  The external reservation contract is
 `action_only_native_agents_1x8_v1`; the trainer's terminal contract fields stay
 null because training uses `metadata_no_hash`.
+
+The source reservation uses the strict, formal-specific portable
+`fastwam-formal-source-content-binding-v1` schema.  It persists only canonical
+relative paths and kinds plus regular-file size and Base64 content.  Filesystem
+mode, timestamps, device, inode, and other mount-local identity remain
+transient race checks and are not persisted.  Preparation and the worker use
+the same fd-rooted, `O_NOFOLLOW` validator, so an immutable OSS source can be
+copied to local `/tmp` even when the two mounts assign different metadata.
+
+Member reservations use `fastwam-action-native-agents-reservation-v2` and a
+single shared `fastwam-formal-portable-input-binding-v1` collector during both
+prepare and worker live validation.  Dataset directories persist only their
+canonical path and kind.  The initial checkpoint, VAE, and task text-cache
+files persist canonical path, kind, and byte size.  Small control files -- the
+normalization statistics, Gaussian manifests, and Gaussian completion markers
+-- additionally persist their exact raw Base64 content and validated semantic
+fields.  Mount-local mode, timestamp, device, inode, and link metadata are used
+only for same-open race checks and are never compared across mounts.
+
+This no-hash contract deliberately does not claim content identity for a
+dataset directory or for a same-size replacement of a large checkpoint, VAE,
+or text cache.  Those inputs therefore also rely on their run-specific,
+non-overwritten OSS paths and the recorded producer/run identity.  A new
+identity and source snapshot are required if that external immutability
+assumption cannot be maintained.
 
 The runtime uses three independent eight-rank process worlds in one DLC pod:
 fresh training stops at step 500, a new process world resumes the real

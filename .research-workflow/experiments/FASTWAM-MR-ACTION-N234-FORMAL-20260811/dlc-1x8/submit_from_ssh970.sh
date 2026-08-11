@@ -33,7 +33,7 @@ CONTROL_PYTHON_TARGET=/usr/local/bin/python3.12
   || { echo "Error: pinned PAI SDK environment is incomplete" >&2; exit 1; }
 LOCK_ROOT="/tmp/fastwam-dlc-submit-state/workspace-270969"
 mkdir -p -m 0700 "${LOCK_ROOT}"
-exec 9>"${LOCK_ROOT}/action-n234-formal-controller.lock"
+exec 9>"${LOCK_ROOT}/action-n234-formal-r2-controller.lock"
 flock -n 9 || { echo "Error: another formal controller is active" >&2; exit 1; }
 export FASTWAM_CONTROL_NODE=ssh970
 export FASTWAM_LOCK_FD=9

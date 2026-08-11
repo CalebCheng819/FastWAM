@@ -9,6 +9,7 @@
 set -eEuo pipefail
 IFS=$'\n\t'
 umask 077
+export PYTHONDONTWRITEBYTECODE=1
 
 die() {
   echo "[formal-runtime] ERROR: $*" >&2
@@ -37,7 +38,7 @@ done
 [[ "${NPROC_PER_NODE}" == 8 ]] || die "this runtime requires exactly eight ranks"
 [[ "${FASTWAM_MAX_OSS_PUBLISH_BYTES}" == $((62 * 1024 * 1024 * 1024)) ]] || die "per-run publication cap mismatch"
 [[ "${FASTWAM_MIN_TMP_FREE_BYTES}" == $((200 * 1024 * 1024 * 1024)) ]] || die "local scratch floor mismatch"
-[[ "${FASTWAM_OSS_OUTPUT_ROOT}" == /oss-chengjuntao/artifacts/fastwam-action-n234-formal-20260811/* ]] || die "durable output prefix mismatch"
+[[ "${FASTWAM_OSS_OUTPUT_ROOT}" == /oss-chengjuntao/artifacts/fastwam-action-n234-formal-r2-20260811/* ]] || die "durable output prefix mismatch"
 [[ -d "$(dirname -- "${FASTWAM_OSS_OUTPUT_ROOT}")" && ! -L "$(dirname -- "${FASTWAM_OSS_OUTPUT_ROOT}")" ]] || die "prepared durable output prefix is absent"
 [[ "${FASTWAM_SOURCE_ROOT}" == /oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/* ]] || die "source prefix mismatch"
 [[ "${FASTWAM_PREPARED_RESERVATION_PATH}" == /oss-chengjuntao/* ]] || die "reservation must be on OSS"
@@ -59,22 +60,22 @@ resolved_python="$(readlink -f -- "${FASTWAM_PYTHON}")" || die "cannot resolve p
 case "${FASTWAM_MEMBER}" in
   n2)
     expected_agents=2
-    expected_experiment=FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R1-20260811
-    expected_run=fastwam-act-n2-placefood-1k-s42-r1-20260811
+    expected_experiment=FASTWAM-MR-FT-ACT-N2-PLACEFOOD-1K-S42-R2-20260811
+    expected_run=fastwam-act-n2-placefood-1k-s42-r2-20260811
     expected_config=robofactory_multi_robot_ft_n2_placefood_vg0_hub1_gau1_224_3e-5
     expected_tasks='["PlaceFood-rf"]'
     ;;
   n3)
     expected_agents=3
-    expected_experiment=FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R1-20260811
-    expected_run=fastwam-act-n3-pool-1k-s42-r1-20260811
+    expected_experiment=FASTWAM-MR-FT-ACT-N3-POOL-1K-S42-R2-20260811
+    expected_run=fastwam-act-n3-pool-1k-s42-r2-20260811
     expected_config=robofactory_multi_robot_ft_n3_pool_vg0_hub1_gau1_224_3e-5
     expected_tasks='["ThreeRobotsPlaceShoes-rf","ThreeRobotsStackCube-rf"]'
     ;;
   n4)
     expected_agents=4
-    expected_experiment=FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R1-20260811
-    expected_run=fastwam-act-n4-stackcube-1k-s42-r1-20260811
+    expected_experiment=FASTWAM-MR-FT-ACT-N4-STACKCUBE-1K-S42-R2-20260811
+    expected_run=fastwam-act-n4-stackcube-1k-s42-r2-20260811
     expected_config=robofactory_multi_robot_ft_n4_stackcube_vg0_hub1_gau1_224_3e-5
     expected_tasks='["FourRobotsStackCube-rf"]'
     ;;
@@ -104,7 +105,7 @@ SOURCE_CONTROLLER="${FASTWAM_SOURCE_ROOT}/${CONTROLLER_REL}"
 
 # Re-read the immutable suite and all three member reservations plus every
 # input metadata descriptor immediately before local execution.
-"${FASTWAM_PYTHON}" - "${SOURCE_CONTROLLER}" "${FASTWAM_MEMBER}" "${FASTWAM_PREPARED_RESERVATION_PATH}" <<'PY'
+"${FASTWAM_PYTHON}" -B -I -S - "${SOURCE_CONTROLLER}" "${FASTWAM_MEMBER}" "${FASTWAM_PREPARED_RESERVATION_PATH}" <<'PY'
 import importlib.util
 import sys
 from pathlib import Path
@@ -132,7 +133,7 @@ tmp_available="$(df -PB1 /tmp | awk 'NR==2 {print $4}')"
 [[ "${tmp_available}" =~ ^[0-9]+$ ]] || die "cannot read local scratch capacity"
 (( tmp_available >= FASTWAM_MIN_TMP_FREE_BYTES )) || die "local scratch is below the 200 GiB floor"
 
-SCRATCH="$(mktemp -d /tmp/fastwam-action-n234-formal.XXXXXX)"
+SCRATCH="$(mktemp -d /tmp/fastwam-action-n234-formal-r2.XXXXXX)"
 LOCAL_SOURCE="${SCRATCH}/source"
 TRAIN_OUTPUT="${SCRATCH}/train"
 VERIFY_OUTPUT="${SCRATCH}/fresh-load"
@@ -150,42 +151,30 @@ trap cleanup EXIT
 
 mkdir -m 0700 "${LOCAL_SOURCE}"
 cp -a -- "${FASTWAM_SOURCE_ROOT}/." "${LOCAL_SOURCE}/"
-"${FASTWAM_PYTHON}" - "${FASTWAM_SOURCE_ROOT}" "${LOCAL_SOURCE}" <<'PY'
-import os
-import stat
+"${FASTWAM_PYTHON}" -B -I -S - "${SOURCE_CONTROLLER}" "${FASTWAM_MEMBER}" "${FASTWAM_PREPARED_RESERVATION_PATH}" "${FASTWAM_SOURCE_ROOT}" "${LOCAL_SOURCE}" <<'PY'
+import importlib.util
 import sys
 from pathlib import Path
 
-source, target = map(Path, sys.argv[1:])
-
-def inventory(root):
-    result = []
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            raise RuntimeError(f"source symlink forbidden: {relative}")
-        if stat.S_ISDIR(info.st_mode):
-            result.append((relative, "directory", 0))
-        elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
-            result.append((relative, "file", info.st_size))
-        else:
-            raise RuntimeError(f"unsupported source entry: {relative}")
-    return result
-
-if inventory(source) != inventory(target):
-    raise RuntimeError("staged source inventory differs")
-for original in sorted(path for path in source.rglob("*") if path.is_file()):
-    copied = target / original.relative_to(source)
-    with original.open("rb") as left, copied.open("rb") as right:
-        while True:
-            a = left.read(8 * 1024 * 1024)
-            b = right.read(8 * 1024 * 1024)
-            if a != b:
-                raise RuntimeError(f"staged source byte mismatch: {original.relative_to(source)}")
-            if not a:
-                break
-print("[formal-runtime] staged source byte readback: PASS")
+controller_path, member, reservation_literal, source_literal, target_literal = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("formal_stage_controller", controller_path)
+if spec is None or spec.loader is None:
+    raise RuntimeError("cannot load frozen controller for staged source validation")
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+reservation, _ = module.read_json(Path(reservation_literal))
+if not isinstance(reservation, dict) or reservation.get("member") != member:
+    raise RuntimeError("prepared reservation member mismatch during staged source validation")
+source = reservation.get("source")
+if not isinstance(source, dict) or source.get("root") != source_literal:
+    raise RuntimeError("prepared reservation source root mismatch during staged source validation")
+expected = source.get("inventory")
+observed = module.source_inventory(Path(target_literal))
+module.assert_source_inventory_matches(
+    expected, observed, label="staged source portable content mismatch"
+)
+print("[formal-runtime] staged source portable content readback: PASS")
 PY
 
 [[ -f "${LOCAL_SOURCE}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" ]] || die "Accelerate config absent"
