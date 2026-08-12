@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,6 +40,32 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
             availability,
             {250: False, 500: True, 750: False, 1000: True, 2500: False, 5000: False},
         )
+
+    def test_python_paths_preserve_venv_launcher_and_record_real_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = root / "python3.10"
+            base.write_bytes(b"#!/bin/sh\nexit 0\n")
+            base.chmod(0o755)
+            venv = root / "venv" / "bin"
+            venv.mkdir(parents=True)
+            launcher = venv / "python"
+            launcher.symlink_to(base)
+
+            executable, realpath = ablations._python_paths(launcher)
+
+        self.assertEqual(executable, str(launcher))
+        self.assertEqual(realpath, str(base))
+
+    def test_python_paths_reject_relative_or_non_executable_paths(self) -> None:
+        with self.assertRaisesRegex(ValueError, "absolute path"):
+            ablations._python_paths(Path("venv/bin/python"))
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory) / "python"
+            candidate.write_text("#!/bin/sh\n")
+            os.chmod(candidate, 0o644)
+            with self.assertRaisesRegex(ValueError, "not executable"):
+                ablations._python_paths(candidate)
 
     def test_panel_rows_freeze_eight_environment_and_policy_seeds(self) -> None:
         panel = {

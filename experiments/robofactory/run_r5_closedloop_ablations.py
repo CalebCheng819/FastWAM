@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v1"
+SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v2"
 REQUESTED_CHECKPOINT_STEPS = (250, 500, 750, 1000, 2500, 5000)
 
 
@@ -54,6 +54,17 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise TypeError(f"Expected JSON object: {path}")
     return payload
+
+
+def _python_paths(path: Path) -> tuple[str, str]:
+    """Freeze a venv launcher separately from its resolved interpreter identity."""
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"Python executable must be an absolute path: {path}")
+    executable = Path(os.path.abspath(expanded))
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError(f"Python executable is missing or not executable: {executable}")
+    return str(executable), str(executable.resolve(strict=True))
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -139,6 +150,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     missing = sorted(needed - available_steps)
     if missing:
         raise FileNotFoundError(f"Runnable checkpoint steps are missing: {missing}")
+    python_executable, python_realpath = _python_paths(args.python)
     return {
         "schema_version": SCHEMA_VERSION,
         "experiment_id": args.experiment_id,
@@ -148,7 +160,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
                 strict=True
             )
         ),
-        "python": str(args.python.resolve(strict=True)),
+        "python": python_executable,
+        "python_realpath": python_realpath,
         "panel": str(args.panel.resolve(strict=True)),
         "dataset_root": str(args.dataset_root.resolve(strict=True)),
         "robofactory_root": str(args.robofactory_root.resolve(strict=True)),

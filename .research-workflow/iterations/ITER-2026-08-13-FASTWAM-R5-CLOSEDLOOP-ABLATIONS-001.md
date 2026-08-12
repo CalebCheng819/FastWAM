@@ -3,7 +3,7 @@
 - 时间：2026-08-13T00:00:00+08:00
 - 类型：Code_Evaluation_Experiment
 - 动机：按用户要求，不再用 action loss 代替闭环结果；用受控的 exec_horizon、oracle 干预和 checkpoint 面板定位 PlaceFood 失败是接近误差还是闭爪时序主导。
-- 变更：已在既有固定 rollout runner 中实现 exec_horizon=1/5 受控对照、robot0 pose/robot0 gripper/robot1 action 三种 expert temporal replay 干预、真实仿真 grasp 状态与肉块最大抬升量统计；保持场景 seed、policy seed、初始状态、评测步数和其他配置不变。断点续跑同时严格绑定 checkpoint 路径/字节数/mtime 与 policy seed，避免误复用旧结果。
+- 变更：已在既有固定 rollout runner 中实现 exec_horizon=1/5 受控对照、robot0 pose/robot0 gripper/robot1 action 三种 expert temporal replay 干预、真实仿真 grasp 状态与肉块最大抬升量统计；保持场景 seed、policy seed、初始状态、评测步数和其他配置不变。断点续跑同时严格绑定 checkpoint 路径/字节数/mtime 与 policy seed，避免误复用旧结果。进程启动保留虚拟环境 Python 的词法绝对路径，并单独记录解析后的基础解释器身份，避免解析符号链接后丢失 venv site-packages。
 - Git：分支 `rollout-eval-r5`，起点 commit `4ba4143a6d2bf1ce3a5830fd9f287fc9ec13d891`；当前只有一个既有未跟踪 workflow outbox，本轮不修改也不纳入提交。
 - 实验：DSW `cwam-dsw970` 4×RTX4090；固定 8 个 PlaceFood validation seeds。真实已有 R5 checkpoint 仅 step500/1000；step250/750 当前缺失，禁止重命名、插值或伪造评测点。
 - 结果：Implementation_In_Progress；本地实现已完成，加入 checkpoint 路径/字节数/mtime 与 policy seed 身份门后，在 DSW Python 3.10 环境重跑两组定向测试，14/14 PASS。尚未创建正式 Notion 记录或启动 rollout。
