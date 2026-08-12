@@ -159,6 +159,7 @@ OUTPUT_DIR="${FASTWAM_B4_OUTPUT_DIR:-}"
 SOURCE_WEIGHT="${FASTWAM_B4_SOURCE_WEIGHT:-/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt}"
 EXPECTED_WEIGHT_BYTES="${FASTWAM_B4_SOURCE_WEIGHT_BYTES:-12047213728}"
 DATASET_ROOT="${FASTWAM_B4_DATASET_ROOT:-/cpfs/user/chengjuntao/datasets/robofactory_multi_robot}"
+STATS_SOURCE_ROOT="${DATASET_ROOT}"
 STATS_PATH="${FASTWAM_B4_STATS_PATH:-${DATASET_ROOT}/fastwam_multi_robot_n234_train_s42_stats_v2.json}"
 TEXT_CACHE_DIR="${FASTWAM_B4_TEXT_CACHE_DIR:-${DATASET_ROOT}/text_embeds_cache_n234}"
 GAUSSIAN_CACHE_DIR="${FASTWAM_B4_GAUSSIAN_CACHE_DIR:-/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/compact-s42-13x28x40-fp16-meanalpha-v2}"
@@ -256,6 +257,7 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   require_exact_env FASTWAM_B4_PROVENANCE_MODE "stat_cmp"
   require_exact_env FASTWAM_B4_INPUT_CACHE_ROOT "/tmp/fastwam-b4-input-cache"
   require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao"
+  require_exact_env FASTWAM_B4_STATS_SOURCE_ROOT "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
   require_exact_env FASTWAM_B4_CPFS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/cpfs-whole-file-bundle.sha256"
   require_exact_env FASTWAM_B4_OSS_SOURCE_ROOT "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
   require_exact_env FASTWAM_B4_OSS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"
@@ -297,6 +299,11 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   [[ -f "${FASTWAM_LOCAL_OSS_CACHE_DIR}/READY.stat-cmp.json" ]] || \
     die "OSS stat-cmp READY contract is missing"
 
+  # Preserve the logical source root declared by the published stats before
+  # rebinding reads to the attempt-owned node-local copy. The physical OSS
+  # mirror remains the staging source above; dataset provenance accepts only
+  # this explicit logical-source -> staged-read pair.
+  STATS_SOURCE_ROOT="${FASTWAM_B4_STATS_SOURCE_ROOT}"
   DATASET_ROOT="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_DATASET_RELATIVE_ROOT}"
   STATS_PATH="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_STATS_RELATIVE_PATH}"
   TEXT_CACHE_DIR="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_TEXT_EMBEDS_RELATIVE_ROOT}"
@@ -601,6 +608,8 @@ COMMAND=(
   "data.val.root_dir=${DATASET_ROOT}"
   "data.train.pretrained_norm_stats=${STATS_PATH}"
   "data.val.pretrained_norm_stats=${STATS_PATH}"
+  "data.train.stats_source_root=${STATS_SOURCE_ROOT}"
+  "data.val.stats_source_root=${STATS_SOURCE_ROOT}"
   "data.train.text_embedding_cache_dir=${TEXT_CACHE_DIR}"
   "data.val.text_embedding_cache_dir=${TEXT_CACHE_DIR}"
   "data.train.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"

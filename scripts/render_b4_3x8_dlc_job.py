@@ -164,6 +164,9 @@ def main() -> int:
         "FASTWAM_B4_PROVENANCE_MODE": "stat_cmp",
         "FASTWAM_B4_INPUT_CACHE_ROOT": "/tmp/fastwam-b4-input-cache",
         "FASTWAM_B4_CPFS_SOURCE_ROOT": "/oss-chengjuntao/cpfs-user-chengjuntao",
+        "FASTWAM_B4_STATS_SOURCE_ROOT": (
+            "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
+        ),
         "FASTWAM_B4_CPFS_ALLOWLIST": (
             "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-"
             "20260802T1235Z/cpfs-whole-file-bundle.sha256"
@@ -277,7 +280,15 @@ def main() -> int:
         "b4_provenance_contract": {
             "mode": "stat_cmp",
             "new_hashes": False,
-            "records": ["path", "bytes", "mtime", "count", "run_id", "attempt_id"],
+            "records": [
+                "path",
+                "bytes",
+                "mtime",
+                "count",
+                "run_id",
+                "attempt_id",
+                "world_size",
+            ],
         },
         "request": request,
     }

@@ -16,7 +16,7 @@ from typing import Any
 
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
-_STAT_CMP_MARKER_SCHEMA = "fastwam-runtime-file-barrier-stat-cmp-v1"
+_STAT_CMP_MARKER_SCHEMA = "fastwam-runtime-file-barrier-stat-cmp-v2"
 _ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -46,7 +46,16 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _read_regular_file_snapshot(path: Path) -> tuple[bytes, dict[str, int]]:
+_SNAPSHOT_STABLE_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
+
+
+def _read_regular_file_once(path: Path) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -68,8 +77,13 @@ def _read_regular_file_snapshot(path: Path) -> tuple[bytes, dict[str, int]]:
             chunks.append(chunk)
         payload = b"".join(chunks)
         after = os.fstat(descriptor)
-        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
-        if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+        if (
+            stat.S_IFMT(before.st_mode) != stat.S_IFMT(after.st_mode)
+            or any(
+                getattr(before, field) != getattr(after, field)
+                for field in _SNAPSHOT_STABLE_FIELDS
+            )
+        ):
             raise RuntimeError(
                 f"runtime provenance file changed while being read: {path}"
             )
@@ -77,12 +91,58 @@ def _read_regular_file_snapshot(path: Path) -> tuple[bytes, dict[str, int]]:
             raise RuntimeError(
                 f"runtime provenance file changed while being read: {path}"
             )
-        return payload, {
-            "bytes": int(after.st_size),
-            "mtime_ns": int(after.st_mtime_ns),
-        }
+        try:
+            pathname = os.stat(path, follow_symlinks=False)
+        except OSError as error:
+            raise RuntimeError(
+                f"runtime provenance pathname changed while being read: {path}"
+            ) from error
+        if (
+            not stat.S_ISREG(pathname.st_mode)
+            or stat.S_IFMT(after.st_mode) != stat.S_IFMT(pathname.st_mode)
+            or any(
+                getattr(after, field) != getattr(pathname, field)
+                for field in _SNAPSHOT_STABLE_FIELDS
+            )
+        ):
+            raise RuntimeError(
+                f"runtime provenance pathname changed while being read: {path}"
+            )
+        return payload, after
     finally:
         os.close(descriptor)
+
+
+def _read_regular_file_snapshot(path: Path) -> tuple[bytes, dict[str, int]]:
+    """Read a small provenance file twice and bind bytes to its pathname.
+
+    The second O_NOFOLLOW open is intentional.  Some FUSE clients can expose
+    path-stable or coarsely quantized metadata across an atomic replacement,
+    so fd/path stat comparisons alone cannot prove that the bytes just read
+    still belong to the pathname.  Full byte equality across two independent
+    opens supplies that binding without adding a digest.
+    """
+
+    first_payload, first = _read_regular_file_once(path)
+    second_payload, second = _read_regular_file_once(path)
+    if first_payload != second_payload:
+        raise RuntimeError(
+            f"runtime provenance pathname changed between verification reads: {path}"
+        )
+    if (
+        stat.S_IFMT(first.st_mode) != stat.S_IFMT(second.st_mode)
+        or any(
+            getattr(first, field) != getattr(second, field)
+            for field in _SNAPSHOT_STABLE_FIELDS
+        )
+    ):
+        raise RuntimeError(
+            f"runtime provenance pathname changed between verification reads: {path}"
+        )
+    return second_payload, {
+        "bytes": int(second.st_size),
+        "mtime_ns": int(second.st_mtime_ns),
+    }
 
 
 def _read_regular_file(path: Path) -> bytes:
@@ -198,6 +258,7 @@ def publish_rank_zero_file(
             path,
             payload,
             rank=rank,
+            world_size=world_size,
             timeout_seconds=timeout_seconds,
             attempt_id=attempt_id,
         )
@@ -234,11 +295,13 @@ def _stat_cmp_marker_payload(
     path: Path,
     *,
     attempt_id: str,
+    world_size: int,
     metadata: dict[str, int],
 ) -> bytes:
     marker: dict[str, Any] = {
         "schema": _STAT_CMP_MARKER_SCHEMA,
         "attempt_id": attempt_id,
+        "world_size": world_size,
         "path": str(path.resolve()),
         "bytes": int(metadata["bytes"]),
         "mtime_ns": int(metadata["mtime_ns"]),
@@ -256,6 +319,7 @@ def _validate_stat_cmp_marker(
     path: Path,
     payload: bytes,
     attempt_id: str,
+    world_size: int,
 ) -> None:
     try:
         marker = json.loads(marker_payload)
@@ -263,25 +327,43 @@ def _validate_stat_cmp_marker(
         raise RuntimeError(
             f"runtime ready marker has an invalid payload: {ready}"
         ) from error
-    expected_keys = {"schema", "attempt_id", "path", "bytes", "mtime_ns", "count"}
+    expected_keys = {
+        "schema",
+        "attempt_id",
+        "world_size",
+        "path",
+        "bytes",
+        "mtime_ns",
+        "count",
+    }
     if not isinstance(marker, dict) or set(marker) != expected_keys:
         raise RuntimeError(f"runtime ready marker has an invalid schema: {ready}")
     expected_static = {
         "schema": _STAT_CMP_MARKER_SCHEMA,
         "attempt_id": attempt_id,
+        "world_size": world_size,
         "path": str(path.resolve()),
         "bytes": len(payload),
         "count": 1,
     }
-    if any(marker.get(key) != value for key, value in expected_static.items()):
+    if (
+        type(marker.get("world_size")) is not int
+        or type(marker.get("bytes")) is not int
+        or type(marker.get("count")) is not int
+        or any(marker.get(key) != value for key, value in expected_static.items())
+    ):
         raise RuntimeError(f"runtime ready marker contract mismatch: {ready}")
-    if not isinstance(marker.get("mtime_ns"), int) or int(marker["mtime_ns"]) < 0:
+    if type(marker.get("mtime_ns")) is not int or int(marker["mtime_ns"]) < 0:
         raise RuntimeError(f"runtime ready marker has an invalid mtime: {ready}")
     observed, metadata = _read_regular_file_snapshot(path)
     if observed != payload:
         raise RuntimeError(f"runtime config byte comparison mismatch: {path}")
-    if metadata != {"bytes": int(marker["bytes"]), "mtime_ns": int(marker["mtime_ns"])}:
+    if metadata["bytes"] != int(marker["bytes"]):
         raise RuntimeError(f"runtime config stat comparison mismatch: {path}")
+    # OSSFS clients can expose the same immutable object with differently
+    # quantized or cached mtimes.  Keep rank zero's mtime in the marker for
+    # diagnostics, but make exact bytes plus size the cross-client identity
+    # gate.  Snapshot reads above still reject a file changing during a read.
 
 
 def _publish_rank_zero_file_stat_cmp(
@@ -289,6 +371,7 @@ def _publish_rank_zero_file_stat_cmp(
     payload: bytes,
     *,
     rank: int,
+    world_size: int,
     timeout_seconds: float,
     attempt_id: str | None,
 ) -> None:
@@ -315,6 +398,7 @@ def _publish_rank_zero_file_stat_cmp(
                 _stat_cmp_marker_payload(
                     path,
                     attempt_id=attempt_id,
+                    world_size=world_size,
                     metadata=metadata,
                 ),
                 0o440,
@@ -333,6 +417,7 @@ def _publish_rank_zero_file_stat_cmp(
                 path=path,
                 payload=payload,
                 attempt_id=attempt_id,
+                world_size=world_size,
             )
             return None
         time.sleep(0.1)

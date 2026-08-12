@@ -1,5 +1,6 @@
 import hashlib
 import json
+import shutil
 
 import h5py
 import numpy as np
@@ -681,6 +682,78 @@ def test_unified_stats_provenance_and_cardinality_are_validated(tmp_path):
             required_agent_counts=[2],
             pretrained_norm_stats=str(stats_path),
             text_embedding_cache_dir=str(cache_dir),
+            instruction_map={task_name: instruction},
+        )
+
+
+def test_stats_provenance_requires_explicit_canonical_to_staged_root_mapping(tmp_path):
+    task_name = "Synthetic2RobotTask-rf"
+    instruction = "two robots complete the synthetic task"
+    canonical_root = tmp_path / "canonical" / "datasets" / "robofactory_multi_robot"
+    canonical_root.mkdir(parents=True)
+    stats_path, _ = _write_demo(
+        canonical_root,
+        task_name=task_name,
+        num_agents=2,
+        instruction=instruction,
+    )
+    stats_payload = compute_robofactory_stats(str(canonical_root))
+    stats_path.write_text(json.dumps(stats_payload), encoding="utf-8")
+
+    staged_root = (
+        tmp_path
+        / "fastwam-b4-input-cache"
+        / "run-1"
+        / "attempt-4"
+        / "cpfs"
+        / "datasets"
+        / "robofactory_multi_robot"
+    )
+    shutil.copytree(canonical_root, staged_root)
+    staged_stats = staged_root / stats_path.name
+    staged_cache = staged_root / "cache"
+
+    # Legacy/default behavior remains strict: a copied dataset is not allowed
+    # to inherit stats provenance for another root implicitly.
+    with pytest.raises(ValueError, match="Stats source_root mismatch"):
+        RoboFactoryMultiRobotDataset(
+            str(staged_root),
+            video_size=(32, 32),
+            val_set_proportion=0.0,
+            is_training_set=True,
+            required_agent_counts=[2],
+            pretrained_norm_stats=str(staged_stats),
+            text_embedding_cache_dir=str(staged_cache),
+            instruction_map={task_name: instruction},
+        )
+
+    dataset = RoboFactoryMultiRobotDataset(
+        str(staged_root),
+        video_size=(32, 32),
+        val_set_proportion=0.0,
+        is_training_set=True,
+        required_agent_counts=[2],
+        pretrained_norm_stats=str(staged_stats),
+        stats_source_root=str(canonical_root),
+        text_embedding_cache_dir=str(staged_cache),
+        instruction_map={task_name: instruction},
+    )
+    assert dataset.agent_counts == (2,)
+
+    wrong_source = tmp_path / "wrong-canonical-root"
+    drifted_payload = dict(stats_payload)
+    drifted_payload["source_root"] = str(wrong_source)
+    staged_stats.write_text(json.dumps(drifted_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"stats=.*wrong-canonical-root.*expected="):
+        RoboFactoryMultiRobotDataset(
+            str(staged_root),
+            video_size=(32, 32),
+            val_set_proportion=0.0,
+            is_training_set=True,
+            required_agent_counts=[2],
+            pretrained_norm_stats=str(staged_stats),
+            stats_source_root=str(canonical_root),
+            text_embedding_cache_dir=str(staged_cache),
             instruction_map={task_name: instruction},
         )
 

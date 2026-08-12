@@ -188,6 +188,102 @@ def test_ready_marker_reader_rejects_symlink(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("mutation", ["replace", "symlink", "missing"])
+def test_regular_file_snapshot_rejects_pathname_race_after_read(
+    tmp_path: Path, monkeypatch, mutation: str
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    replacement = tmp_path / "replacement.yaml"
+    target.write_bytes(b"seed: 42\n")
+    replacement.write_bytes(b"seed: 99\n")
+    original_fstat = module.os.fstat
+    fstat_calls = 0
+
+    def mutate_path_after_second_fstat(descriptor: int):
+        nonlocal fstat_calls
+        observed = original_fstat(descriptor)
+        fstat_calls += 1
+        if fstat_calls == 2:
+            if mutation == "replace":
+                os.replace(replacement, target)
+            elif mutation == "symlink":
+                target.unlink()
+                target.symlink_to(replacement)
+            else:
+                target.unlink()
+        return observed
+
+    monkeypatch.setattr(module.os, "fstat", mutate_path_after_second_fstat)
+
+    with pytest.raises(RuntimeError, match="pathname changed while being read"):
+        module._read_regular_file_snapshot(target)
+
+    assert fstat_calls == 2
+
+
+def test_regular_file_snapshot_rejects_same_metadata_replace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    replacement = tmp_path / "replacement.yaml"
+    target.write_bytes(b"seed: 42\n")
+    replacement.write_bytes(b"seed: 99\n")
+    original_stat = module.os.stat
+    original_metadata = original_stat(target, follow_symlinks=False)
+    stat_calls = 0
+
+    def replace_but_spoof_metadata(path, *, follow_symlinks=True):
+        nonlocal stat_calls
+        stat_calls += 1
+        if stat_calls == 1:
+            os.replace(replacement, target)
+            # Model an OSSFS client whose pathname metadata remains cached and
+            # indistinguishable after a same-size atomic replacement.
+            return original_metadata
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(module.os, "stat", replace_but_spoof_metadata)
+
+    with pytest.raises(RuntimeError, match="between verification reads"):
+        module._read_regular_file_snapshot(target)
+
+    assert target.read_bytes() == b"seed: 99\n"
+
+
+def test_regular_file_snapshot_rejects_mutated_prefix_with_restored_mtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    target.write_bytes(b"a" * (2 * 1024 * 1024))
+    initial = target.stat()
+    original_read = module.os.read
+    mutated = False
+
+    def mutate_already_read_prefix(descriptor: int, size: int) -> bytes:
+        nonlocal mutated
+        chunk = original_read(descriptor, size)
+        if chunk and not mutated:
+            mutated = True
+            with target.open("r+b", buffering=0) as stream:
+                stream.write(b"b")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.utime(target, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", mutate_already_read_prefix)
+
+    with pytest.raises(RuntimeError, match="changed while being read"):
+        module._read_regular_file_snapshot(target)
+
+    assert mutated
+    assert target.read_bytes()[:1] == b"b"
+    assert target.stat().st_mtime_ns == initial.st_mtime_ns
+
+
 def test_stat_cmp_barrier_uses_attempt_marker_and_never_hashes(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -232,14 +328,16 @@ def test_stat_cmp_barrier_uses_attempt_marker_and_never_hashes(
     assert set(marker) == {
         "schema",
         "attempt_id",
+        "world_size",
         "path",
         "bytes",
         "mtime_ns",
         "count",
     }
     assert marker == {
-        "schema": "fastwam-runtime-file-barrier-stat-cmp-v1",
+        "schema": "fastwam-runtime-file-barrier-stat-cmp-v2",
         "attempt_id": "b4-attempt-17",
+        "world_size": 2,
         "path": str(target.resolve()),
         "bytes": len(payload),
         "mtime_ns": target.stat().st_mtime_ns,
@@ -247,6 +345,94 @@ def test_stat_cmp_barrier_uses_attempt_marker_and_never_hashes(
     }
     assert "sha" not in ready.read_text(encoding="utf-8").lower()
     assert target.read_bytes() == payload
+
+
+def test_stat_cmp_barrier_accepts_same_bytes_with_one_second_mtime_drift(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    payload = b"model: fastwam-b4\n"
+    attempt_id = "mtime-drift"
+    module.publish_rank_zero_file(
+        target,
+        payload,
+        rank=0,
+        world_size=2,
+        timeout_seconds=1,
+        provenance_mode="stat_cmp",
+        attempt_id=attempt_id,
+    )
+    ready = tmp_path / f".config.yaml.ready.stat_cmp.{attempt_id}"
+    marker = json.loads(ready.read_bytes())
+    marker_mtime_ns = int(marker["mtime_ns"])
+    os.utime(
+        target,
+        ns=(target.stat().st_atime_ns, marker_mtime_ns + 1_000_000_000),
+    )
+    assert target.stat().st_mtime_ns == marker_mtime_ns + 1_000_000_000
+
+    assert (
+        module.publish_rank_zero_file(
+            target,
+            payload,
+            rank=1,
+            world_size=2,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id=attempt_id,
+        )
+        is None
+    )
+    assert target.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("path", "/different/config.yaml"),
+        ("attempt_id", "different-attempt"),
+        ("world_size", 3),
+        ("bytes", 999),
+        ("count", 2),
+    ],
+)
+def test_stat_cmp_barrier_rejects_marker_contract_mismatch(
+    tmp_path: Path, field: str, replacement: object
+) -> None:
+    module = _load_module()
+    target = tmp_path / "config.yaml"
+    payload = b"model: fastwam-b4\n"
+    attempt_id = "contract-mismatch"
+    module.publish_rank_zero_file(
+        target,
+        payload,
+        rank=0,
+        world_size=2,
+        timeout_seconds=1,
+        provenance_mode="stat_cmp",
+        attempt_id=attempt_id,
+    )
+    ready = tmp_path / f".config.yaml.ready.stat_cmp.{attempt_id}"
+    marker = json.loads(ready.read_bytes())
+    marker[field] = replacement
+    ready.chmod(0o640)
+    ready.write_bytes(
+        (json.dumps(marker, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="marker contract mismatch"):
+        module.publish_rank_zero_file(
+            target,
+            payload,
+            rank=1,
+            world_size=2,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id=attempt_id,
+        )
 
 
 @pytest.mark.parametrize(
@@ -279,7 +465,7 @@ def test_stat_cmp_barrier_same_attempt_fails_closed_on_payload_or_file_change(
         target,
         original,
         rank=0,
-        world_size=1,
+        world_size=2,
         timeout_seconds=1,
         provenance_mode="stat_cmp",
         attempt_id="attempt-reuse",
@@ -290,13 +476,25 @@ def test_stat_cmp_barrier_same_attempt_fails_closed_on_payload_or_file_change(
             target,
             b"seed: 43\n",
             rank=0,
-            world_size=1,
+            world_size=2,
             timeout_seconds=1,
             provenance_mode="stat_cmp",
             attempt_id="attempt-reuse",
         )
 
     target.write_bytes(b"seed: 99\n")
+    with pytest.raises(RuntimeError, match="byte comparison mismatch"):
+        module.publish_rank_zero_file(
+            target,
+            original,
+            rank=1,
+            world_size=2,
+            timeout_seconds=1,
+            provenance_mode="stat_cmp",
+            attempt_id="attempt-reuse",
+        )
+
+    target.write_bytes(b"short\n")
     with pytest.raises(RuntimeError, match="byte comparison mismatch"):
         module.publish_rank_zero_file(
             target,

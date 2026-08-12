@@ -19,6 +19,9 @@ train:
   # The formal 2026-08-01 data scope is the verified N=2/3/4 corpus. Keep its
   # normalization and prompt artifacts separate from legacy 3/4-only files.
   pretrained_norm_stats: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json
+  # Keep null for direct reads. Node-local launchers must explicitly bind this
+  # to the canonical root recorded in stats instead of weakening validation.
+  stats_source_root: null
   require_train_only_stats: true
   text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
   # GAU1 overrides this with an immutable compact-cache root. Full-resolution
@@ -56,6 +59,7 @@ val:
   split_seed: 42
   randomize_agent_order: false
   pretrained_norm_stats: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json
+  stats_source_root: null
   require_train_only_stats: true
   text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
   gaussian_cache_dir: null

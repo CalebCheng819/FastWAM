@@ -227,6 +227,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         randomize_agent_order: bool = True,
         required_agent_counts: Optional[list[int] | tuple[int, ...]] = None,
         pretrained_norm_stats: Optional[str] = None,
+        stats_source_root: Optional[str] = None,
         text_embedding_cache_dir: Optional[str] = None,
         gaussian_cache_dir: Optional[str] = None,
         gaussian_cache_verify: str = "manifest",
@@ -267,6 +268,16 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             count < 1 for count in self.required_agent_counts
         ):
             raise ValueError("required_agent_counts must contain only positive integers")
+        # By default, normalization provenance remains bound to the dataset
+        # root exactly as before.  A node-local staging caller may explicitly
+        # name the canonical root recorded by the stats file; in that case the
+        # pair (stats_source_root, root_dir) is the only accepted source-to-
+        # staged-root mapping for this dataset instance.
+        self.stats_source_root = (
+            self.root_dir
+            if stats_source_root is None
+            else Path(stats_source_root).expanduser().resolve()
+        )
         self.text_embedding_cache_dir = (
             None if text_embedding_cache_dir is None else Path(text_embedding_cache_dir).expanduser()
         )
@@ -610,10 +621,11 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
 
         if "source_root" in metadata:
             source_root = Path(str(metadata["source_root"])).expanduser().resolve()
-            if source_root != self.root_dir:
+            if source_root != self.stats_source_root:
                 raise ValueError(
                     f"Stats source_root mismatch in {stats_path}: "
-                    f"stats={source_root} dataset={self.root_dir}."
+                    f"stats={source_root} expected={self.stats_source_root} "
+                    f"dataset={self.root_dir}."
                 )
         for field in ("files", "trajectories"):
             if field not in metadata:

@@ -246,6 +246,14 @@ class T:
             self.assertTrue((root / "output" / ".b4-run-reservation").is_file())
             launched = command_log.read_text(encoding="utf-8")
             self.assertIn("--num_processes\n24", launched)
+            self.assertIn(
+                f"data.train.stats_source_root={root / 'dataset'}",
+                launched,
+            )
+            self.assertIn(
+                f"data.val.stats_source_root={root / 'dataset'}",
+                launched,
+            )
             self.assertEqual(env["FASTWAM_B4_PYTHON"], str(fake_bin / "python"))
             self.assertNotIn("/checkpoints/state/", launched)
 
@@ -574,6 +582,10 @@ class T:
                 "/oss-chengjuntao/cpfs-user-chengjuntao",
             )
             self.assertEqual(
+                request["Envs"]["FASTWAM_B4_STATS_SOURCE_ROOT"],
+                "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot",
+            )
+            self.assertEqual(
                 request["Envs"]["FASTWAM_B4_INPUT_CACHE_ROOT"],
                 "/tmp/fastwam-b4-input-cache",
             )
@@ -584,7 +596,15 @@ class T:
                 {
                     "mode": "stat_cmp",
                     "new_hashes": False,
-                    "records": ["path", "bytes", "mtime", "count", "run_id", "attempt_id"],
+                    "records": [
+                        "path",
+                        "bytes",
+                        "mtime",
+                        "count",
+                        "run_id",
+                        "attempt_id",
+                        "world_size",
+                    ],
                 },
             )
             self.assertEqual(request["Envs"]["FASTWAM_LOCAL_EXPECTED_H5_FILES"], "24")
@@ -663,6 +683,20 @@ class T:
         self.assertIn(
             'require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT '
             '"/oss-chengjuntao/cpfs-user-chengjuntao"',
+            launcher_source,
+        )
+        self.assertIn(
+            'require_exact_env FASTWAM_B4_STATS_SOURCE_ROOT '
+            '"/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"',
+            launcher_source,
+        )
+        self.assertIn(
+            'STATS_SOURCE_ROOT="${FASTWAM_B4_STATS_SOURCE_ROOT}"',
+            launcher_source,
+        )
+        self.assertNotIn(
+            'STATS_SOURCE_ROOT="${FASTWAM_B4_CPFS_SOURCE_ROOT}/'
+            '${FASTWAM_LOCAL_DATASET_RELATIVE_ROOT}"',
             launcher_source,
         )
         self.assertNotIn(
