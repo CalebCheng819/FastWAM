@@ -205,8 +205,11 @@ class B4RolloutContractTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn("FASTWAM_EVAL_GPU_COUNT", runner)
+        self.assertIn("FASTWAM_EVAL_GPU_IDS", runner)
         self.assertIn("nvidia-smi --list-gpus", runner)
-        self.assertIn('for ((gpu = 0; gpu < gpu_count; gpu++))', runner)
+        self.assertIn('for ((worker = 0; worker < gpu_count; worker++))', runner)
+        self.assertIn('gpu=${gpu_ids[$worker]}', runner)
+        self.assertIn('index = worker', runner)
         self.assertIn("--expected-training-code-commit", runner)
 
     def test_b4_action_only_model_contract(self) -> None:

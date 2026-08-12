@@ -55,14 +55,47 @@ if not isinstance(episode, dict) or episode.get("split") != "train" or int(episo
     raise SystemExit("smoke episode identity mismatch")
 PY
 
+available_gpu_count=$(nvidia-smi --list-gpus | wc -l)
+gpu_ids_raw=${FASTWAM_EVAL_GPU_IDS:-}
 gpu_count=${FASTWAM_EVAL_GPU_COUNT:-}
-if [[ -z "$gpu_count" ]]; then
-  gpu_count=$(nvidia-smi --list-gpus | wc -l)
-fi
-if [[ ! "$gpu_count" =~ ^[1-8]$ ]]; then
-  echo "FASTWAM_EVAL_GPU_COUNT must resolve to an integer from 1 through 8" >&2
+
+if [[ -n "$gpu_count" && ! "$gpu_count" =~ ^[1-8]$ ]]; then
+  echo "FASTWAM_EVAL_GPU_COUNT must be an integer from 1 through 8" >&2
   exit 5
 fi
+if [[ -n "$gpu_ids_raw" ]]; then
+  IFS=',' read -r -a gpu_ids <<< "$gpu_ids_raw"
+  if [[ -n "$gpu_count" && "$gpu_count" -ne "${#gpu_ids[@]}" ]]; then
+    echo "FASTWAM_EVAL_GPU_COUNT does not match FASTWAM_EVAL_GPU_IDS" >&2
+    exit 5
+  fi
+  gpu_count=${#gpu_ids[@]}
+else
+  if [[ -z "$gpu_count" ]]; then
+    gpu_count=$available_gpu_count
+  fi
+  gpu_ids=()
+  for ((gpu = 0; gpu < gpu_count; gpu++)); do
+    gpu_ids+=("$gpu")
+  done
+fi
+
+if [[ ! "$gpu_count" =~ ^[1-8]$ ]]; then
+  echo "the selected GPU count must be an integer from 1 through 8" >&2
+  exit 5
+fi
+declare -A seen_gpu_ids=()
+for gpu in "${gpu_ids[@]}"; do
+  if [[ ! "$gpu" =~ ^[0-7]$ || "$gpu" -ge "$available_gpu_count" ]]; then
+    echo "selected GPU is not exposed by nvidia-smi: $gpu" >&2
+    exit 5
+  fi
+  if [[ -n "${seen_gpu_ids[$gpu]:-}" ]]; then
+    echo "selected GPU is repeated: $gpu" >&2
+    exit 5
+  fi
+  seen_gpu_ids[$gpu]=1
+done
 
 mkdir -- "$logs_dir"
 
@@ -87,9 +120,10 @@ tokens=(
   val:0 val:1 val:2 val:3 val:4 val:5 val:6 val:7
 )
 pids=()
-for ((gpu = 0; gpu < gpu_count; gpu++)); do
+for ((worker = 0; worker < gpu_count; worker++)); do
+  gpu=${gpu_ids[$worker]}
   worker_tokens=()
-  for ((index = gpu; index < ${#tokens[@]}; index += gpu_count)); do
+  for ((index = worker; index < ${#tokens[@]}; index += gpu_count)); do
     worker_tokens+=("${tokens[$index]}")
   done
   run_worker "$gpu" "${worker_tokens[@]}" &
