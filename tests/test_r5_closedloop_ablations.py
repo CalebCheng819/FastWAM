@@ -6,11 +6,53 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from experiments.robofactory import run_r5_closedloop_ablations as ablations
 
 
 class R5ClosedLoopAblationTests(unittest.TestCase):
+    def test_rollout_subprocess_gets_absolute_checkout_pythonpath(self) -> None:
+        contract = {
+            "source_root": "/frozen/fastwam",
+            "robofactory_root": "/robofactory",
+        }
+        cell = ablations.Cell("cell", 1000, 1, "none")
+        seed = {
+            "environment_seed": 333183,
+            "policy_seed": 10000,
+            "episode_start": 0,
+        }
+        output_root = Path("/output")
+        gpu_pool = __import__("queue").Queue()
+        gpu_pool.put(2)
+
+        with (
+            mock.patch.dict(os.environ, {"PYTHONPATH": "src"}, clear=False),
+            mock.patch.object(ablations, "_run_command", return_value=["/python"]),
+            mock.patch.object(Path, "exists", return_value=False),
+            mock.patch.object(Path, "mkdir"),
+            mock.patch.object(Path, "open", mock.mock_open()),
+            mock.patch.object(ablations.subprocess, "run") as run,
+            mock.patch.object(ablations, "_atomic_json"),
+            mock.patch.object(ablations, "_completed_output", return_value=True),
+        ):
+            run.return_value.returncode = 0
+            ablations._one_run(
+                contract=contract,
+                cell=cell,
+                seed=seed,
+                output_root=output_root,
+                gpu_pool=gpu_pool,
+            )
+
+        subprocess_env = run.call_args.kwargs["env"]
+        self.assertEqual(subprocess_env["CUDA_VISIBLE_DEVICES"], "2")
+        self.assertEqual(
+            subprocess_env["PYTHONPATH"],
+            os.pathsep.join(("/frozen/fastwam/src", "src")),
+        )
+
     def test_matrix_separates_replanning_oracles_and_checkpoints(self) -> None:
         cells = {cell.name: cell for cell in ablations.CELLS}
 

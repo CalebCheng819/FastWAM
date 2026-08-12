@@ -344,6 +344,13 @@ def _one_run(
     command = _run_command(contract, cell, seed, output)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    source_pythonpath = str(Path(contract["source_root"]) / "src")
+    inherited_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        source_pythonpath
+        if not inherited_pythonpath
+        else os.pathsep.join((source_pythonpath, inherited_pythonpath))
+    )
     try:
         with log_path.open("x", encoding="utf-8") as log:
             process = subprocess.run(
