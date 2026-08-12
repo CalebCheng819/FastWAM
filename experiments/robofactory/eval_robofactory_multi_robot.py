@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -26,6 +27,7 @@ try:
         POLICY_LIGHTNING_COMMIT,
         TRAINING_STATS_SHA256,
         require_file_sha256,
+        require_regular_file_metadata,
         sha256_file,
     )
 except ImportError:
@@ -35,6 +37,7 @@ except ImportError:
         POLICY_LIGHTNING_COMMIT,
         TRAINING_STATS_SHA256,
         require_file_sha256,
+        require_regular_file_metadata,
         sha256_file,
     )
 
@@ -88,34 +91,76 @@ def _git(repo: Path, *arguments: str) -> str:
     ).stdout.strip()
 
 
-def _verify_robofactory_checkout(root: Path) -> dict[str, Any]:
+def _verify_robofactory_checkout(
+    root: Path, *, integrity_mode: str = "sha256"
+) -> dict[str, Any]:
     root = root.expanduser().resolve(strict=True)
     actual_commit = _git(root, "rev-parse", "HEAD")
-    actual_tree = _git(root, "rev-parse", "HEAD^{tree}")
     dirty = _git(root, "status", "--porcelain=v1", "-uall")
-    if actual_commit != ROBOFACTORY_COMMIT or actual_tree != ROBOFACTORY_TREE:
+    if actual_commit != ROBOFACTORY_COMMIT:
         raise ValueError(
             "RoboFactory source identity mismatch: "
-            f"expected={ROBOFACTORY_COMMIT}/{ROBOFACTORY_TREE} "
-            f"actual={actual_commit}/{actual_tree}"
+            f"expected_commit={ROBOFACTORY_COMMIT} actual_commit={actual_commit}"
         )
     if dirty:
         raise ValueError(f"RoboFactory checkout is dirty: {root}")
+    if integrity_mode not in {"sha256", "metadata_no_hash"}:
+        raise ValueError(f"Unsupported integrity mode: {integrity_mode!r}")
+    actual_tree = None
+    if integrity_mode == "sha256":
+        actual_tree = _git(root, "rev-parse", "HEAD^{tree}")
+        if actual_tree != ROBOFACTORY_TREE:
+            raise ValueError(
+                "RoboFactory source tree mismatch: "
+                f"expected={ROBOFACTORY_TREE} actual={actual_tree}"
+            )
     return {
         "path": str(root),
         "commit": actual_commit,
         "tree": actual_tree,
         "clean": True,
+        "integrity_mode": integrity_mode,
         "remote": _git(root, "remote", "get-url", "origin"),
     }
 
 
-def _load_panel(path: Path, expected_sha256: str) -> tuple[dict[str, Any], str]:
-    resolved, actual_sha256 = require_file_sha256(
-        path,
-        expected_sha256,
-        label="held-out evaluation panel",
-    )
+def _load_panel(
+    path: Path,
+    expected_sha256: str | None,
+    *,
+    expected_size_bytes: int | None = None,
+    integrity_mode: str = "sha256",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if integrity_mode == "sha256":
+        if not expected_sha256:
+            raise ValueError("panel_sha256 is required in sha256 mode")
+        resolved, actual_sha256 = require_file_sha256(
+            path,
+            expected_sha256,
+            label="held-out evaluation panel",
+        )
+        identity = {
+            "path": str(resolved),
+            "size_bytes": resolved.stat().st_size,
+            "sha256": actual_sha256,
+            "integrity_mode": integrity_mode,
+        }
+    elif integrity_mode == "metadata_no_hash":
+        if expected_size_bytes is None:
+            raise ValueError("panel_size_bytes is required in metadata_no_hash mode")
+        resolved, actual_size_bytes = require_regular_file_metadata(
+            path,
+            expected_size_bytes=expected_size_bytes,
+            label="held-out evaluation panel",
+        )
+        identity = {
+            "path": str(resolved),
+            "size_bytes": actual_size_bytes,
+            "sha256": None,
+            "integrity_mode": integrity_mode,
+        }
+    else:
+        raise ValueError(f"Unsupported integrity mode: {integrity_mode!r}")
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     if payload.get("schema_version") != "fastwam-robofactory-heldout-panel-v1":
         raise ValueError(
@@ -123,7 +168,7 @@ def _load_panel(path: Path, expected_sha256: str) -> tuple[dict[str, Any], str]:
         )
     if not isinstance(payload.get("episodes"), list):
         raise TypeError("Evaluation panel must contain an episodes list")
-    return payload, actual_sha256
+    return payload, identity
 
 
 def _selected_episodes(
@@ -154,13 +199,22 @@ def _selected_episodes(
 
 
 def _source_path(dataset_root: Path, relative: str) -> Path:
-    source = (dataset_root / relative).resolve(strict=True)
+    requested = dataset_root / relative
+    before = requested.lstat()
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError(
+            f"Source H5 must be a direct regular non-symlink file: {requested}"
+        )
+    if before.st_nlink != 1:
+        raise ValueError(f"Source H5 must have exactly one hard link: {requested}")
+    source = requested.resolve(strict=True)
     try:
         source.relative_to(dataset_root)
     except ValueError as error:
         raise ValueError(f"Source path escapes dataset root: {relative!r}") from error
-    if source.is_symlink() or not source.is_file():
-        raise ValueError(f"Source H5 must be a regular non-symlink file: {source}")
+    after = source.stat()
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+        raise ValueError(f"Source H5 identity changed during resolution: {requested}")
     return source
 
 
@@ -282,9 +336,10 @@ def _run_episode(
     started_at = _utc_now()
     start_time = time.monotonic()
     source = _source_path(dataset_root, str(episode["source_path"]))
-    if source.stat().st_size != int(episode["source_h5_bytes"]):
+    source_size_bytes = source.stat().st_size
+    if source_size_bytes != int(episode["source_h5_bytes"]):
         raise ValueError(f"Source H5 byte-size mismatch: {source}")
-    if args.verify_source_h5:
+    if args.integrity_mode == "sha256" and args.verify_source_h5:
         actual_source_sha256 = sha256_file(source)
         if actual_source_sha256 != episode["source_h5_sha256"]:
             raise ValueError(
@@ -394,7 +449,12 @@ def _run_episode(
             "task_index": int(episode["task_index"]),
             "panel_index": int(episode["panel_index"]),
             "source_path": str(episode["source_path"]),
-            "source_h5_sha256": episode["source_h5_sha256"],
+            "source_h5_size_bytes": source_size_bytes,
+            "source_h5_sha256": (
+                episode["source_h5_sha256"]
+                if args.integrity_mode == "sha256"
+                else None
+            ),
             "source_h5_sha256_verified": actual_source_sha256,
             "trajectory": episode["trajectory"],
             "episode_id": int(episode["episode_id"]),
@@ -416,16 +476,17 @@ def _run_episode(
 
 
 def _required_fastwam_arguments(args: argparse.Namespace) -> None:
+    required = [
+        "checkpoint",
+        "stats",
+        "context_cache_dir",
+        "model_cache_root",
+    ]
+    if args.gaussian_conditioning:
+        required.extend(("policy_lightning_repo", "noposplat_checkpoint"))
     missing = [
         name
-        for name in (
-            "checkpoint",
-            "stats",
-            "context_cache_dir",
-            "model_cache_root",
-            "policy_lightning_repo",
-            "noposplat_checkpoint",
-        )
+        for name in required
         if getattr(args, name) is None
     ]
     if missing:
@@ -437,7 +498,13 @@ def main() -> None:
     parser.add_argument("--mode", choices=("expert-replay", "fastwam"), required=True)
     parser.add_argument("--task", choices=tuple(TASK_CONFIGS), required=True)
     parser.add_argument("--panel", type=Path, required=True)
-    parser.add_argument("--panel-sha256", required=True)
+    parser.add_argument(
+        "--integrity-mode",
+        choices=("sha256", "metadata_no_hash"),
+        default="sha256",
+    )
+    parser.add_argument("--panel-sha256")
+    parser.add_argument("--panel-size-bytes", type=int)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--robofactory-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -454,9 +521,12 @@ def main() -> None:
     )
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--checkpoint-sha256", default=STEP5000_CHECKPOINT_SHA256)
+    parser.add_argument("--checkpoint-size-bytes", type=int)
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--stats-sha256", default=TRAINING_STATS_SHA256)
+    parser.add_argument("--stats-size-bytes", type=int)
     parser.add_argument("--context-cache-dir", type=Path)
+    parser.add_argument("--context-size-bytes", type=int)
     parser.add_argument("--model-cache-root", type=Path)
     parser.add_argument("--policy-lightning-repo", type=Path)
     parser.add_argument("--policy-lightning-commit", default=POLICY_LIGHTNING_COMMIT)
@@ -465,6 +535,13 @@ def main() -> None:
         "--noposplat-checkpoint-sha256",
         default=NOPOSPLAT_CHECKPOINT_SHA256,
     )
+    parser.add_argument(
+        "--gaussian-conditioning",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--training-source-commit")
+    parser.add_argument("--training-job-id")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--teacher-device")
     parser.add_argument("--action-horizon", type=int, default=32)
@@ -473,12 +550,21 @@ def main() -> None:
     parser.add_argument("--continue-on-error", action="store_true")
     args = parser.parse_args()
 
-    output_dir = args.output_dir.expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=False)
     robofactory_root = args.robofactory_root.expanduser().resolve(strict=True)
     dataset_root = args.dataset_root.expanduser().resolve(strict=True)
-    source_identity = _verify_robofactory_checkout(robofactory_root)
-    panel, panel_sha256 = _load_panel(args.panel, args.panel_sha256)
+    output_dir = args.output_dir.expanduser()
+    if output_dir.exists() or output_dir.is_symlink():
+        raise FileExistsError(f"Evaluation output must not already exist: {output_dir}")
+    output_dir = output_dir.resolve()
+    source_identity = _verify_robofactory_checkout(
+        robofactory_root, integrity_mode=args.integrity_mode
+    )
+    panel, panel_identity = _load_panel(
+        args.panel,
+        args.panel_sha256,
+        expected_size_bytes=args.panel_size_bytes,
+        integrity_mode=args.integrity_mode,
+    )
     selected = _selected_episodes(
         panel,
         args.task,
@@ -487,6 +573,10 @@ def main() -> None:
     )
     if args.exec_horizon < 1:
         raise ValueError("exec_horizon must be positive")
+    for episode in selected:
+        source = _source_path(dataset_root, str(episode["source_path"]))
+        if source.stat().st_size != int(episode["source_h5_bytes"]):
+            raise ValueError(f"Source H5 byte-size mismatch: {source}")
 
     policy = None
     policy_init_seconds = None
@@ -495,16 +585,33 @@ def main() -> None:
         init_started = time.monotonic()
         policy = FastWAMMultiRobotPolicy(
             checkpoint_path=args.checkpoint,
-            checkpoint_sha256=args.checkpoint_sha256,
+            checkpoint_sha256=(
+                args.checkpoint_sha256
+                if args.integrity_mode == "sha256"
+                else None
+            ),
+            checkpoint_size_bytes=args.checkpoint_size_bytes,
             stats_path=args.stats,
-            expected_stats_sha256=args.stats_sha256,
+            expected_stats_sha256=(
+                args.stats_sha256 if args.integrity_mode == "sha256" else None
+            ),
+            stats_size_bytes=args.stats_size_bytes,
             context_cache_dir=args.context_cache_dir,
+            context_size_bytes=args.context_size_bytes,
             task_name=args.task,
             model_cache_root=args.model_cache_root,
             policy_lightning_repo=args.policy_lightning_repo,
             policy_lightning_commit=args.policy_lightning_commit,
             noposplat_checkpoint_path=args.noposplat_checkpoint,
-            noposplat_checkpoint_sha256=args.noposplat_checkpoint_sha256,
+            noposplat_checkpoint_sha256=(
+                args.noposplat_checkpoint_sha256
+                if args.integrity_mode == "sha256"
+                else None
+            ),
+            integrity_mode=args.integrity_mode,
+            gaussian_conditioning=args.gaussian_conditioning,
+            training_source_commit=args.training_source_commit,
+            training_job_id=args.training_job_id,
             device=args.device,
             teacher_device=args.teacher_device,
             action_horizon=args.action_horizon,
@@ -514,8 +621,10 @@ def main() -> None:
         )
         policy_init_seconds = time.monotonic() - init_started
 
+    output_dir.mkdir(parents=True, exist_ok=False)
+
     run_manifest = {
-        "schema_version": "fastwam-robofactory-eval-run-v1",
+        "schema_version": "fastwam-robofactory-eval-run-v2",
         "status": "running",
         "started_at": _utc_now(),
         "mode": args.mode,
@@ -527,7 +636,8 @@ def main() -> None:
         "policy_seed_base": args.policy_seed,
         "policy_seed_schedule": "base_plus_task_index_then_plus_query_index_v1",
         "eval_code_commit": args.eval_code_commit,
-        "panel": {"path": str(args.panel.resolve()), "sha256": panel_sha256},
+        "integrity_mode": args.integrity_mode,
+        "panel": panel_identity,
         "dataset_root": str(dataset_root),
         "verify_source_h5": args.verify_source_h5,
         "robofactory": source_identity,
@@ -574,8 +684,9 @@ def main() -> None:
 
     completed = [result for result in results if result["status"] == "completed"]
     successes = sum(bool(result["success"]) for result in completed)
+    episodes_path = output_dir / "episodes.jsonl"
     summary = {
-        "schema_version": "fastwam-robofactory-eval-summary-v1",
+        "schema_version": "fastwam-robofactory-eval-summary-v2",
         "status": (
             "PASS"
             if infrastructure_errors == 0 and len(results) == len(selected)
@@ -597,7 +708,10 @@ def main() -> None:
             successes / len(completed) if completed else None
         ),
         "finished_at": _utc_now(),
-        "episodes_jsonl_sha256": sha256_file(output_dir / "episodes.jsonl"),
+        "episodes_jsonl_size_bytes": episodes_path.stat().st_size,
+        "episodes_jsonl_sha256": (
+            sha256_file(episodes_path) if args.integrity_mode == "sha256" else None
+        ),
     }
     if (
         args.mode == "expert-replay"
@@ -608,7 +722,11 @@ def main() -> None:
     _atomic_json(output_dir / "summary.json", summary)
     run_manifest["status"] = "terminal"
     run_manifest["finished_at"] = _utc_now()
-    run_manifest["summary_sha256"] = sha256_file(output_dir / "summary.json")
+    summary_path = output_dir / "summary.json"
+    run_manifest["summary_size_bytes"] = summary_path.stat().st_size
+    run_manifest["summary_sha256"] = (
+        sha256_file(summary_path) if args.integrity_mode == "sha256" else None
+    )
     _atomic_json(output_dir / "run_manifest.json", run_manifest)
     print(json.dumps(summary, sort_keys=True), flush=True)
     if summary["status"] == "INFRASTRUCTURE_ERROR":

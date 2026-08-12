@@ -1330,6 +1330,7 @@ class FastWAMMultiRobot(FastWAM):
         optimizer=None,
         *,
         validate_trainable_scope: bool = True,
+        record_checkpoint_sha256: bool = True,
     ):
         """Load a checkpoint with strict architecture/treatment validation.
 
@@ -1345,6 +1346,7 @@ class FastWAMMultiRobot(FastWAM):
             load_role="top_level",
             active_paths=set(),
             validate_trainable_scope=validate_trainable_scope,
+            record_checkpoint_sha256=record_checkpoint_sha256,
         )
 
     def _load_checkpoint_with_role(
@@ -1355,6 +1357,7 @@ class FastWAMMultiRobot(FastWAM):
         load_role: str,
         active_paths: set[Path],
         validate_trainable_scope: bool = True,
+        record_checkpoint_sha256: bool = True,
     ):
         checkpoint_path = Path(path).expanduser().resolve(strict=True)
         if not checkpoint_path.is_file():
@@ -1398,19 +1401,29 @@ class FastWAMMultiRobot(FastWAM):
                 self.mot.load_state_dict(mot_state, strict=True)
                 if load_role == "top_level":
                     self._loaded_base_checkpoint = str(checkpoint_path)
-                    self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
-                        checkpoint_path
-                    )
-                    self._loaded_base_checkpoint_descriptor = {
-                        "path": str(checkpoint_path),
-                        "sha256": self._loaded_base_checkpoint_sha256,
-                        "role": "base_dependency",
-                    }
-                    self._loaded_base_checkpoint_can_restore_sparse = True
+                    if record_checkpoint_sha256:
+                        self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
+                            checkpoint_path
+                        )
+                        self._loaded_base_checkpoint_descriptor = {
+                            "path": str(checkpoint_path),
+                            "sha256": self._loaded_base_checkpoint_sha256,
+                            "role": "base_dependency",
+                        }
+                        self._loaded_base_checkpoint_can_restore_sparse = True
+                    else:
+                        self._loaded_base_checkpoint_sha256 = None
+                        self._loaded_base_checkpoint_descriptor = None
+                        self._loaded_base_checkpoint_can_restore_sparse = False
             else:
                 if load_role != "top_level":
                     raise ValueError(
                         f"sparse_delta is only valid as a top-level checkpoint: {checkpoint_path}"
+                    )
+                if not record_checkpoint_sha256:
+                    raise ValueError(
+                        "metadata_no_hash cannot load sparse_delta checkpoints because "
+                        "their base dependency contract is SHA-256-bound"
                     )
                 trainable_state = payload["mot_trainable"]
                 self._validate_sparse_trainable_contract(
@@ -1429,6 +1442,7 @@ class FastWAMMultiRobot(FastWAM):
                     load_role="base_dependency",
                     active_paths=active_paths,
                     validate_trainable_scope=validate_trainable_scope,
+                    record_checkpoint_sha256=record_checkpoint_sha256,
                 )
                 result = self.mot.load_state_dict(trainable_state, strict=False)
                 if result.unexpected_keys:
@@ -1455,15 +1469,20 @@ class FastWAMMultiRobot(FastWAM):
             self._load_matching_state(self.mot, mot_state, label="legacy mot")
             if load_role == "top_level":
                 self._loaded_base_checkpoint = str(checkpoint_path)
-                self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
-                    checkpoint_path
-                )
-                self._loaded_base_checkpoint_descriptor = {
-                    "path": str(checkpoint_path),
-                    "sha256": self._loaded_base_checkpoint_sha256,
-                    "role": "base_dependency",
-                }
-                self._loaded_base_checkpoint_can_restore_sparse = True
+                if record_checkpoint_sha256:
+                    self._loaded_base_checkpoint_sha256 = self._checkpoint_sha256(
+                        checkpoint_path
+                    )
+                    self._loaded_base_checkpoint_descriptor = {
+                        "path": str(checkpoint_path),
+                        "sha256": self._loaded_base_checkpoint_sha256,
+                        "role": "base_dependency",
+                    }
+                    self._loaded_base_checkpoint_can_restore_sparse = True
+                else:
+                    self._loaded_base_checkpoint_sha256 = None
+                    self._loaded_base_checkpoint_descriptor = None
+                    self._loaded_base_checkpoint_can_restore_sparse = False
         elif "dit" in payload:
             self._validate_legacy_minimum_coverage(
                 payload["dit"],

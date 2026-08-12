@@ -21,6 +21,7 @@ from experiments.robofactory.fastwam_multi_robot_policy import (
     load_text_context,
     model_input_image,
     prepare_observation,
+    require_regular_file_metadata,
     sha256_file,
     teacher_image_pairs,
 )
@@ -160,6 +161,54 @@ def test_stats_loader_is_hash_pinned_and_clamps_std(tmp_path: Path):
         load_normalization_stats(path, expected_sha256="0" * 64)
 
 
+def test_stats_loader_supports_no_hash_metadata_binding(tmp_path: Path):
+    payload = {
+        "normalization_fit": {
+            "split": "train",
+            "split_seed": 42,
+            "val_set_proportion": 0.1,
+        },
+        "cardinality": {"agent_counts": [2, 3, 4]},
+        "action": {"mean": [0.0] * 8, "std": [1.0] * 8},
+        "state": {"mean": [0.0] * 18, "std": [1.0] * 18},
+    }
+    path = tmp_path / "stats.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    size_bytes = path.stat().st_size
+
+    stats = load_normalization_stats(
+        path,
+        expected_sha256=None,
+        expected_size_bytes=size_bytes,
+        integrity_mode="metadata_no_hash",
+    )
+
+    assert stats.path == path.resolve()
+    assert stats.sha256 is None
+    assert stats.size_bytes == size_bytes
+    with pytest.raises(ValueError, match="size mismatch"):
+        load_normalization_stats(
+            path,
+            expected_sha256=None,
+            expected_size_bytes=size_bytes + 1,
+            integrity_mode="metadata_no_hash",
+        )
+
+
+def test_no_hash_metadata_binding_rejects_symlink(tmp_path: Path):
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"direct-file-only")
+    link = tmp_path / "link.bin"
+    link.symlink_to(target)
+
+    with pytest.raises(FileNotFoundError, match="direct regular file"):
+        require_regular_file_metadata(
+            link,
+            expected_size_bytes=target.stat().st_size,
+            label="test artifact",
+        )
+
+
 def test_text_context_loader_uses_prompt_hash_and_padding_convention(tmp_path: Path):
     task_name = "PlaceFood-rf"
     prompt = DEFAULT_PROMPT.format(task=DEFAULT_INSTRUCTIONS[task_name])
@@ -180,6 +229,28 @@ def test_text_context_loader_uses_prompt_hash_and_padding_convention(tmp_path: P
     assert loaded.sha256 == digest
 
 
+def test_text_context_loader_supports_no_hash_metadata_binding(tmp_path: Path):
+    task_name = "PlaceFood-rf"
+    prompt = DEFAULT_PROMPT.format(task=DEFAULT_INSTRUCTIONS[task_name])
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    path = tmp_path / f"{prompt_digest}.t5_len128.wan22ti2v5b.pt"
+    context = torch.ones((128, 4096), dtype=torch.bfloat16)
+    mask = torch.ones((128,), dtype=torch.bool)
+    torch.save({"context": context, "mask": mask}, path)
+
+    loaded = load_text_context(
+        tmp_path,
+        task_name,
+        expected_sha256=None,
+        expected_size_bytes=path.stat().st_size,
+        integrity_mode="metadata_no_hash",
+    )
+
+    assert loaded.path == path.resolve()
+    assert loaded.sha256 is None
+    assert loaded.size_bytes == path.stat().st_size
+
+
 def test_step5000_model_config_is_joint_hub_gaussian_without_text_encoder():
     config = compose_step5000_model_config()
 
@@ -196,3 +267,11 @@ def test_step5000_model_config_is_joint_hub_gaussian_without_text_encoder():
     assert NOPOSPLAT_CHECKPOINT_SHA256 == (
         "4a35bc8c341b20859c0621f5238349b55b19a34a5bbeb3daec8d1f4c4603cd08"
     )
+
+
+def test_step5000_model_config_can_disable_gaussian_conditioning():
+    config = compose_step5000_model_config(enable_gaussian=False)
+
+    assert config.action_dit_config.enable_gaussian is False
+    assert config.action_dit_config.hub_enabled is True
+    assert config.training_mode == "joint"
