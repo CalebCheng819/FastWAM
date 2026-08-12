@@ -177,6 +177,12 @@ require_env FASTWAM_POSE_FOCUS_REPO_ROOT
 require_env FASTWAM_POSE_FOCUS_PYTHON
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
 is_safe_id "${ATTEMPT_ID}" || die "FASTWAM_POSE_FOCUS_ATTEMPT_ID is not a safe identifier: ${ATTEMPT_ID}"
+if [[ -n "${FASTWAM_B4_ATTEMPT_ID:-}" && "${FASTWAM_B4_ATTEMPT_ID}" != "${ATTEMPT_ID}" ]]; then
+  die "FASTWAM_B4_ATTEMPT_ID conflicts with FASTWAM_POSE_FOCUS_ATTEMPT_ID"
+fi
+# stat_cmp config publication is shared with the audited B4 runtime contract.
+export FASTWAM_B4_ATTEMPT_ID="${ATTEMPT_ID}"
+printf 'POSE_FOCUS runtime provenance binding: FASTWAM_B4_ATTEMPT_ID=%s\n' "${FASTWAM_B4_ATTEMPT_ID}"
 
 [[ "${NUM_MACHINES}" == "3" ]] || die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"

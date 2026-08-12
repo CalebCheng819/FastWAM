@@ -139,7 +139,32 @@ class PoseFocusLauncherTests(unittest.TestCase):
             self.assertIn("task=robofactory_placefood_pose_focus_r5_224_5e-6", output)
             self.assertIn("+scale=robofactory_multi_robot_24gpu_pose_focus", output)
             self.assertIn("POSE_FOCUS source import gate:", output)
+            self.assertIn(
+                "POSE_FOCUS runtime provenance binding: "
+                "FASTWAM_B4_ATTEMPT_ID=attempt-1",
+                output,
+            )
             self.assertNotIn("/checkpoints/state/", output)
+
+    def test_rejects_conflicting_runtime_attempt_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_B4_ATTEMPT_ID"] = "different-attempt"
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "FASTWAM_B4_ATTEMPT_ID conflicts with "
+                "FASTWAM_POSE_FOCUS_ATTEMPT_ID",
+                result.stderr,
+            )
 
     def test_renderer_pins_priority7_3x8_and_oss_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
