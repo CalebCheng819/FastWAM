@@ -12,7 +12,7 @@ python_bin=/opt/venvs/gaudp-robofactory-py310/bin/python
 aggregate_script="$script_dir/../FASTWAM-MR-FT-ACT-N2-PLACEFOOD-TRAINLAYOUT-EVAL-R5-20260813/aggregate_results.py"
 smoke_dir="$output_root/train/episode-00"
 aggregate="$output_root/aggregate.json"
-logs_dir="$output_root/logs"
+logs_dir="$output_root/formal-logs"
 
 if [[ ! -d "$smoke_dir" || ! -f "$smoke_dir/summary.json" || ! -f "$smoke_dir/run_manifest.json" ]]; then
   echo "train episode 00 smoke output is not present" >&2
@@ -43,6 +43,15 @@ if not isinstance(episode, dict) or episode.get("split") != "train" or int(episo
     raise SystemExit("smoke episode identity mismatch")
 PY
 
+gpu_count=${FASTWAM_EVAL_GPU_COUNT:-}
+if [[ -z "$gpu_count" ]]; then
+  gpu_count=$(nvidia-smi --list-gpus | wc -l)
+fi
+if [[ ! "$gpu_count" =~ ^[1-8]$ ]]; then
+  echo "FASTWAM_EVAL_GPU_COUNT must resolve to an integer from 1 through 8" >&2
+  exit 5
+fi
+
 mkdir -- "$logs_dir"
 
 run_worker() {
@@ -57,17 +66,22 @@ run_worker() {
   done
 }
 
-run_worker 0 train:1 val:0 & pid0=$!
-run_worker 1 train:2 val:1 & pid1=$!
-run_worker 2 train:3 val:2 & pid2=$!
-run_worker 3 train:4 val:3 & pid3=$!
-run_worker 4 train:5 val:4 & pid4=$!
-run_worker 5 train:6 val:5 & pid5=$!
-run_worker 6 train:7 val:6 & pid6=$!
-run_worker 7 val:7 & pid7=$!
+tokens=(
+  train:1 train:2 train:3 train:4 train:5 train:6 train:7
+  val:0 val:1 val:2 val:3 val:4 val:5 val:6 val:7
+)
+pids=()
+for ((gpu = 0; gpu < gpu_count; gpu++)); do
+  worker_tokens=()
+  for ((index = gpu; index < ${#tokens[@]}; index += gpu_count)); do
+    worker_tokens+=("${tokens[$index]}")
+  done
+  run_worker "$gpu" "${worker_tokens[@]}" &
+  pids+=("$!")
+done
 
 status=0
-for pid in "$pid0" "$pid1" "$pid2" "$pid3" "$pid4" "$pid5" "$pid6" "$pid7"; do
+for pid in "${pids[@]}"; do
   if ! wait "$pid"; then
     status=1
   fi
@@ -79,4 +93,7 @@ fi
 
 exec "$python_bin" -B "$aggregate_script" \
   --root "$output_root" \
+  --expected-checkpoint \
+  /oss-chengjuntao/artifacts/fastwam-mr-n234-b4-phase-gripcontact-actft-s42-24g-r4-20260812/checkpoints/weights/step_002500.pt \
+  --comparison "B4 checkpoint on frozen PlaceFood-rf train-layout and validation-layout panels" \
   --output "$aggregate"

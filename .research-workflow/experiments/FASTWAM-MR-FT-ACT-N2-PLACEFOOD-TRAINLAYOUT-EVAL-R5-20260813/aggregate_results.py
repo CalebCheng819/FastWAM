@@ -35,7 +35,6 @@ EXPECTED_ARGV = {
     "--max-steps": "300",
     "--initial-state": "raw",
     "--exec-horizon": "5",
-    "--checkpoint": EXPECTED_CHECKPOINT,
     "--integrity-mode": "metadata_no_hash",
     "--action-horizon": "32",
     "--num-inference-steps": "20",
@@ -56,7 +55,13 @@ def _single_argv_value(argv: list[Any], flag: str, episode_dir: Path) -> str:
     return str(argv[positions[0] + 1])
 
 
-def _episode(root: Path, split: str, index: int) -> dict[str, Any]:
+def _episode(
+    root: Path,
+    split: str,
+    index: int,
+    *,
+    expected_checkpoint: str,
+) -> dict[str, Any]:
     episode_dir = root / split / f"episode-{index:02d}"
     summary = _load_json(episode_dir / "summary.json")
     manifest = _load_json(episode_dir / "run_manifest.json")
@@ -89,6 +94,8 @@ def _episode(root: Path, split: str, index: int) -> dict[str, Any]:
     for flag, expected in EXPECTED_ARGV.items():
         if _single_argv_value(argv, flag, episode_dir) != expected:
             raise ValueError(f"evaluator argument mismatch for {flag}: {episode_dir}")
+    if _single_argv_value(argv, "--checkpoint", episode_dir) != expected_checkpoint:
+        raise ValueError(f"evaluator checkpoint mismatch: {episode_dir}")
     if not isinstance(selected, dict):
         raise ValueError(f"selected episode metadata is absent: {episode_dir}")
     if selected.get("split") != split:
@@ -150,10 +157,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--expected-checkpoint", default=EXPECTED_CHECKPOINT)
+    parser.add_argument(
+        "--comparison",
+        default=(
+            "same R5 FastWAM checkpoint and evaluator; only the recorded "
+            "initial-state split differs"
+        ),
+    )
     args = parser.parse_args()
     root = args.root.expanduser().resolve(strict=True)
     rows = [
-        _episode(root, split, index)
+        _episode(
+            root,
+            split,
+            index,
+            expected_checkpoint=args.expected_checkpoint,
+        )
         for split in EXPECTED_SPLITS
         for index in range(EXPECTED_EPISODES_PER_SPLIT)
     ]
@@ -189,7 +209,7 @@ def main() -> None:
     result = {
         "schema_version": SCHEMA_VERSION,
         "status": "COMPLETE",
-        "comparison": "same R5 FastWAM checkpoint and evaluator; only the recorded initial-state split differs",
+        "comparison": args.comparison,
         "train": grouped["train"],
         "val": grouped["val"],
         "train_minus_val_success_rate": (

@@ -163,6 +163,21 @@ class B4RolloutContractTests(unittest.TestCase):
             'export __EGL_VENDOR_LIBRARY_FILENAMES="$egl_vendor"', launcher
         )
 
+    def test_b4_batch_runner_supports_actual_gpu_count(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        runner = (
+            root
+            / ".research-workflow/experiments"
+            / "FASTWAM-MR-B4-N2-PLACEFOOD-CLOSEDLOOP-EVAL-20260813"
+            / "run_remaining.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("FASTWAM_EVAL_GPU_COUNT", runner)
+        self.assertIn("nvidia-smi --list-gpus", runner)
+        self.assertIn('for ((gpu = 0; gpu < gpu_count; gpu++))', runner)
+        self.assertIn("--expected-checkpoint", runner)
+        self.assertIn("step_002500.pt", runner)
+
     def test_b4_action_only_model_contract(self) -> None:
         config = policy.compose_b4_action_model_config()
 
