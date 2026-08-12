@@ -14,7 +14,7 @@
   "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-EXPERT-REPLAY-R2-20260813",
   "mode": "confirmatory_recovery",
   "notion_page_id": "3ba21e77-89cc-81fa-bd2c-e08de5100984",
-  "notion_page_url": "https://app.notion.com/p/FastWAM-PlaceFood-formal-expert-replay-R1-3ba21e7789cc81fabd2ce08de5100984",
+  "notion_page_url": "https://app.notion.com/p/FastWAM-PlaceFood-formal-expert-replay-R2-3ba21e7789cc81fabd2ce08de5100984",
   "physical_gpu_ids": [0, 1, 2, 3],
   "predecessor": {
     "artifact_root": "/oss-chengjuntao/artifacts/fastwam-placefood-expert-replay-20260813-r1",
@@ -26,5 +26,17 @@
   },
   "provenance_policy": "Git revision, run ID, paths, timestamps, sizes, and artifact metadata; no new artifact checksums",
   "regression_smoke_root": "/oss-chengjuntao/artifacts/fastwam-placefood-expert-replay-smoke-train05-20260813-r2",
-  "status": "PRELAUNCH"
+  "completed_at": "2026-08-13T06:04:12+08:00",
+  "actual_runtime_seconds": 5052,
+  "result": {
+    "terminal_summaries": 16,
+    "train_successes": 7,
+    "validation_successes": 7,
+    "total_successes": 14,
+    "success_rate": 0.875,
+    "scalar_action_bound_violations": 42,
+    "acceptance_passed": false,
+    "conclusion": "Expert replay establishes an 87.5% positive-control upper bound, but fails the predeclared zero-bound-violation criterion."
+  },
+  "status": "FAILED_ACCEPTANCE"
 }

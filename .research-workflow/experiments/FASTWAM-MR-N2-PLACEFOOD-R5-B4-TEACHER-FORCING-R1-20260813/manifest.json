@@ -1,0 +1,114 @@
+{
+  "schema_version": "metadata_no_hash_v1",
+  "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-R5-B4-TEACHER-FORCING-R2-20260813",
+  "project_id": "FASTWAM-MULTIROBOT",
+  "mode": "confirmatory",
+  "status": "SUCCEEDED",
+  "notion": {
+    "database_id": "920fa3ed-32f9-445f-b928-0391de560592",
+    "data_source_id": "7456bae9-0c32-4754-9014-213b1ef8df63",
+    "page_id": "3ba21e77-89cc-811a-a7fe-f011570b20e3",
+    "page_url": "https://app.notion.com/p/FastWAM-R5-vs-B4-PlaceFood-paired-teacher-forcing-R2-3ba21e7789cc811aa7fef011570b20e3"
+  },
+  "hypothesis": "On the identical expert PlaceFood trajectory and identical stochastic seeds, B4 should reduce robot0 active-arm pose error relative to R5 if its rapid action-only fine-tuning learned useful control rather than only lowering aggregate offline loss.",
+  "objective": "Strictly load both checkpoints and complete all 263 expert states at timesteps 5 through 267, yielding 263 H1 and 1305 H5 valid pairs; compare robot0 arm MAE and RMSE by phase and joint.",
+  "baseline": {
+    "experiment_id": "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-TRAINLAYOUT-EVAL-R5-20260813",
+    "run_ids": [
+      "r5-step001000-val-episode02-teacher-forcing"
+    ]
+  },
+  "estimated_runtime_seconds": 1200,
+  "initial_eta": "2026-08-13T05:52:00+08:00",
+  "started_at": "2026-08-13T05:43:00+08:00",
+  "current_eta": "2026-08-13T06:40:00+08:00",
+  "experiment_window": {
+    "start": "2026-08-13T05:43:00+08:00",
+    "end": "2026-08-13T06:40:00+08:00"
+  },
+  "git": {
+    "evaluation_commit": "301e22b14b8d4bf706167824ee6d74ee1fbfe35c",
+    "branch": "exp/b4-closedloop-eval-r5base-20260813",
+    "dirty": false,
+    "pushed": true,
+    "remote": "https://github.com/CalebCheng819/FastWAM.git"
+  },
+  "checkpoints": {
+    "r5": {
+      "path": "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt",
+      "training_code_commit": "1a690ab49246cbeb841618a86b5bd546f93ddd40"
+    },
+    "b4": {
+      "path": "/oss-chengjuntao/artifacts/fastwam-mr-n234-b4-phase-gripcontact-actft-s42-24g-r4-20260812/checkpoints/weights/step_002500.pt",
+      "training_code_commit": "6ad834248f0fbc1d070c9be97627364174af143c"
+    }
+  },
+  "config": {
+    "mode": "teacher-forcing",
+    "formal_contract": true,
+    "teacher_start_timestep": 5,
+    "max_teacher_states": 263,
+    "action_horizon": 32,
+    "num_inference_steps": 20,
+    "integrity_mode": "metadata_no_hash"
+  },
+  "data": {
+    "version": "RoboFactory PlaceFood-rf frozen val8 split seed 42",
+    "panel": ".research-workflow/experiments/FASTWAM-MR-FT-ACT-N2-PLACEFOOD-TRAINLAYOUT-EVAL-R5-20260813/panels/val8.json",
+    "panel_index": 2,
+    "episode_id": 107,
+    "trajectory": "traj_107",
+    "source_relative": "robofactory_stage0_extract/demos/PlaceFood-rf/motionplanning/20260610_003846.h5",
+    "source_bytes": 2181409116,
+    "expert_actions": 283,
+    "gaussian_cache_version": "compact-s42-13x28x40-fp16-meanalpha-v2"
+  },
+  "environment": {
+    "workspace": "Alibaba PAI DSW dsw-472471-587bbbff64-bzk54",
+    "python": "/opt/venvs/gaudp-robofactory-py310/bin/python",
+    "graphics": "Vulkan/EGL with NVIDIA driver libraries from /cpfs/user/chengjuntao/fastwam-deploy/nvidia-graphics-570.153.02",
+    "hardware": "2 x NVIDIA GeForce RTX 4090, one GPU per checkpoint cell"
+  },
+  "seeds": {
+    "policy_seed": 10002,
+    "per_state_rule": "10002 + expert timestep",
+    "paired_between_checkpoints": true
+  },
+  "artifact_root": "/oss-chengjuntao/artifacts/fastwam-r5-b4-teacher-forcing-20260813-r2",
+  "run_ids": [
+    "r5-step001000-val-episode02-teacher-forcing-r1-infra",
+    "b4-step002500-val-episode02-teacher-forcing-r1-infra",
+    "r5-step001000-val-episode02-teacher-forcing-r2",
+    "b4-step002500-val-episode02-teacher-forcing-r2"
+  ],
+  "completed_at": "2026-08-13T06:06:43+08:00",
+  "actual_runtime_seconds": 1423,
+  "result": {
+    "terminal_checkpoints": 2,
+    "h1_pairs_per_checkpoint": 263,
+    "h5_pairs_per_checkpoint": 1305,
+    "r5_robot0_arm_h1_mae": 0.0057507922,
+    "r5_robot0_arm_h1_rmse": 0.0090152708,
+    "r5_robot0_arm_h5_mae": 0.00641798,
+    "r5_robot0_arm_h5_rmse": 0.01016399,
+    "b4_robot0_arm_h1_mae": 0.00804533,
+    "b4_robot0_arm_h1_rmse": 0.01184869,
+    "b4_robot0_arm_h5_mae": 0.00827797,
+    "b4_robot0_arm_h5_rmse": 0.01230388,
+    "technical_acceptance_passed": true,
+    "hypothesis_supported": false,
+    "conclusion": "B4 worsens robot0 arm MAE by 39.9% at H1 and 29.0% at H5 relative to R5."
+  },
+  "provenance_policy": "Git revision, stable paths, timestamps, byte sizes, experiment and run IDs; no newly computed artifact hashes.",
+  "prelaunch_validation": {
+    "storage_mount": "PASS: /oss-chengjuntao is writable fuse.ossfs2",
+    "evaluation_commit_pushed": "PASS",
+    "checkpoint_presence": "PASS",
+    "dataset_presence_and_size": "PASS",
+    "trajectory_action_count": "PASS: traj_107 has 283 actions for each of panda-0 and panda-1",
+    "notion_page": "PASS",
+    "legacy_validator": "SCHEMA_CONFLICT: bundled schema still requires SHA fields, which are forbidden by the active no-hash policy; no hash values were fabricated or recomputed.",
+    "r1_terminal_state": "INFRASTRUCTURE_ERROR before inference: the formal validator counted targets past the fixed timestep-267 endpoint on the longer traj_107 source.",
+    "r2_protocol_fix": "PASS: evaluation commit 301e22b fixes the exclusive action boundary at 268, atomically stages teacher-forcing artifacts before OSS publication, and passed 21 DSW unit tests."
+  }
+}
