@@ -143,6 +143,29 @@ class B4RolloutContractTests(unittest.TestCase):
                 with self.assertRaises(FileExistsError):
                     diagnostic._publish_staged_file(source, destination)
 
+    def test_formal_teacher_targets_stop_at_action_268(self) -> None:
+        lengths = [
+            diagnostic.teacher_target_length(
+                action_count=283,
+                timestep=timestep,
+                horizon=5,
+                formal_contract=True,
+            )
+            for timestep in range(5, 268)
+        ]
+
+        self.assertEqual(sum(lengths), 1305)
+        self.assertEqual(lengths[-5:], [5, 4, 3, 2, 1])
+        self.assertEqual(
+            diagnostic.teacher_target_length(
+                action_count=283,
+                timestep=267,
+                horizon=5,
+                formal_contract=False,
+            ),
+            5,
+        )
+
     def test_diagnostic_cli_imports_from_a_clean_script_entrypoint(self) -> None:
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(

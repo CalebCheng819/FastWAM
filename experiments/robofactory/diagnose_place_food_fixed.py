@@ -53,6 +53,7 @@ except ImportError:
 ROBOFACTORY_COMMIT = "2d34fb38c80cb06550a5dbf99abac2c89f4336ed"
 LEGACY_HELDOUT_PANEL_SCHEMA = "fastwam-robofactory-heldout-panel-v1"
 SPLIT_PANEL_SCHEMA = "fastwam-robofactory-split-panel-nohash-v1"
+FORMAL_TEACHER_ACTION_STOP = 268
 SPLIT_KEY_SCHEME = "sorted_trajectory_ordinal_splitmix64_v1"
 _UINT64_MASK = (1 << 64) - 1
 TASK_CONFIGS = {
@@ -832,10 +833,26 @@ def validate_formal_teacher_contract(
     return {
         "timesteps": "5..267",
         "states": 263,
+        "action_stop_exclusive": FORMAL_TEACHER_ACTION_STOP,
         "valid_pairs_h1": valid_h1,
         "valid_pairs_h5": valid_h5,
         "action_horizon": action_horizon,
     }
+
+
+def teacher_target_length(
+    *, action_count: int, timestep: int, horizon: int, formal_contract: bool
+) -> int:
+    """Return the scored future-action count for one teacher query state."""
+
+    if action_count < 1 or timestep < 0 or horizon < 1:
+        raise ValueError("Invalid teacher target-length arguments")
+    action_stop = (
+        min(action_count, FORMAL_TEACHER_ACTION_STOP)
+        if formal_contract
+        else action_count
+    )
+    return max(0, min(horizon, action_stop - timestep))
 
 
 def target_action_phase_mask(
@@ -1719,6 +1736,14 @@ def run_teacher_forcing(
     started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=False)
     env = _build_environment(args.robofactory_root, args.task)
+    local_stage = tempfile.TemporaryDirectory(prefix="fastwam-teacher-forcing-")
+    local_stage_dir = Path(local_stage.name)
+    physical_trace_stage_path = local_stage_dir / "expert_physical_trace.jsonl"
+    states_stage_path = local_stage_dir / "teacher_forcing_states.jsonl"
+    first_pair_rgb_stage_path = local_stage_dir / "teacher_first_pair_rgb.npz"
+    actions_stage_path = local_stage_dir / "teacher_forcing_actions.npz"
+    gaussians_stage_path = local_stage_dir / "teacher_forcing_gaussians.npz"
+    phase_summary_stage_path = local_stage_dir / "phase_action_error_summary.json"
     try:
         _reset_environment(env, episode)
         agent_names = tuple(episode["agent_names"])
@@ -1743,7 +1768,13 @@ def run_teacher_forcing(
         if args.formal_contract:
             expected_valid = np.zeros_like(valid)
             for row, timestep in enumerate(timesteps.tolist()):
-                expected_valid[row, : min(horizon, action_count - int(timestep))] = True
+                length = teacher_target_length(
+                    action_count=action_count,
+                    timestep=int(timestep),
+                    horizon=horizon,
+                    formal_contract=True,
+                )
+                expected_valid[row, :length] = True
             # Fail before expensive paired inference if the requested matrix is
             # not the complete fixed formal contract.
             validate_formal_teacher_contract(
@@ -1754,6 +1785,8 @@ def run_teacher_forcing(
         stored_gaussians: list[np.ndarray] = []
         live_gaussians: list[np.ndarray] = []
         snapshots: list[dict[str, Any]] = []
+        physical_trace_stage_path.touch(exist_ok=False)
+        states_stage_path.touch(exist_ok=False)
         # Derive phase boundaries from the complete expert state sequence even
         # during a bounded model smoke test.  This keeps the contamination-safe
         # lid-settling rule and phase definitions identical between smoke and
@@ -1762,7 +1795,7 @@ def run_teacher_forcing(
             env.unwrapped.set_state_dict(state)
             snapshot = physical_snapshot(env, simulator_step=timestep)
             snapshots.append(snapshot)
-            _append_jsonl(output_dir / "expert_physical_trace.jsonl", snapshot)
+            _append_jsonl(physical_trace_stage_path, snapshot)
         masks, events = phase_masks(snapshots)
         expected_start = int(args.teacher_start_timestep)
         if int(events["lid_settled"]) != expected_start:
@@ -1806,7 +1839,12 @@ def run_teacher_forcing(
             live_denorm[row] = np.asarray(live_trace["denormalized_action"])
             stored_gaussians.append(np.asarray(stored_trace["agent_gaussian"]))
             live_gaussians.append(np.asarray(live_trace["agent_gaussian"]))
-            length = min(horizon, action_count - timestep)
+            length = teacher_target_length(
+                action_count=action_count,
+                timestep=timestep,
+                horizon=horizon,
+                formal_contract=bool(args.formal_contract),
+            )
             chunk = np.stack(
                 [actions[name][timestep : timestep + length] for name in agent_names],
                 axis=0,
@@ -1815,7 +1853,7 @@ def run_teacher_forcing(
             expert_norm[row, :, :length] = (chunk - mean) / std
             valid[row, :length] = True
             _append_jsonl(
-                output_dir / "teacher_forcing_states.jsonl",
+                states_stage_path,
                 {
                     "timestep": timestep,
                     "inference_seed": inference_seed,
@@ -1840,7 +1878,7 @@ def run_teacher_forcing(
             )
             if row == 0:
                 np.savez_compressed(
-                    output_dir / "teacher_first_pair_rgb.npz",
+                    first_pair_rgb_stage_path,
                     **{
                         f"stored_{camera}": _camera_array(stored_obs, camera)
                         for camera in (
@@ -1929,7 +1967,7 @@ def run_teacher_forcing(
             )
             phase_summary["formal_contract"] = formal_contract
         np.savez_compressed(
-            output_dir / "teacher_forcing_actions.npz",
+            actions_stage_path,
             timesteps=timesteps,
             inference_seeds=inference_seeds,
             stored_prediction_normalized=stored_norm,
@@ -1949,13 +1987,34 @@ def run_teacher_forcing(
             },
         )
         np.savez_compressed(
-            output_dir / "teacher_forcing_gaussians.npz",
+            gaussians_stage_path,
             timesteps=timesteps,
             inference_seeds=inference_seeds,
             stored=np.stack(stored_gaussians),
             live=np.stack(live_gaussians),
         )
-        _atomic_json(output_dir / "phase_action_error_summary.json", phase_summary)
+        _atomic_json(phase_summary_stage_path, phase_summary)
+        artifact_integrity = {
+            "actions": _publish_staged_file(
+                actions_stage_path, output_dir / "teacher_forcing_actions.npz"
+            ),
+            "gaussians": _publish_staged_file(
+                gaussians_stage_path, output_dir / "teacher_forcing_gaussians.npz"
+            ),
+            "first_pair_rgb": _publish_staged_file(
+                first_pair_rgb_stage_path, output_dir / "teacher_first_pair_rgb.npz"
+            ),
+            "per_state": _publish_staged_file(
+                states_stage_path, output_dir / "teacher_forcing_states.jsonl"
+            ),
+            "physical_trace": _publish_staged_file(
+                physical_trace_stage_path, output_dir / "expert_physical_trace.jsonl"
+            ),
+            "phase_summary": _publish_staged_file(
+                phase_summary_stage_path,
+                output_dir / "phase_action_error_summary.json",
+            ),
+        }
         result = {
             "status": "completed",
             "states_evaluated": count,
@@ -1967,6 +2026,7 @@ def run_teacher_forcing(
             "phase_mask_semantics": phase_summary["phase_mask_semantics"],
             "formal_contract": formal_contract,
             "phase_events": events,
+            "artifact_integrity": artifact_integrity,
             "elapsed_seconds": time.monotonic() - started,
             "artifacts": {
                 "actions": "teacher_forcing_actions.npz",
@@ -1980,6 +2040,7 @@ def run_teacher_forcing(
         _atomic_json(output_dir / "teacher_forcing_result.json", result)
         return result
     finally:
+        local_stage.cleanup()
         env.close()
 
 
