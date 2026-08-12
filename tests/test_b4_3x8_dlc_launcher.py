@@ -557,6 +557,7 @@ class T:
             spec = request["JobSpecs"][0]
             self.assertEqual(spec["PodCount"], 3)
             self.assertEqual(spec["ResourceConfig"]["GPU"], "8")
+            self.assertEqual(request["Priority"], 7)
             self.assertEqual(request["SuccessPolicy"], "AllWorkers")
             self.assertEqual(request["Envs"]["FASTWAM_B4_OUTPUT_DIR"], f"/oss-chengjuntao/artifacts/{run_id}")
             self.assertNotIn("FASTWAM_B4_TEST_MODE", request["Envs"])

@@ -240,7 +240,7 @@ def main() -> int:
             }
         ],
         "JobType": "PyTorchJob",
-        "Priority": 1,
+        "Priority": 7,
         "ResourceId": RESOURCE_ID,
         "Settings": {
             "AllocateAllRDMADevices": True,

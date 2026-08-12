@@ -91,6 +91,10 @@ resume inside the same previously reserved output: rank zero verifies the
 complete sealed state tree and publishes an immutable resume-validation marker;
 the other nodes wait for that exact marker.
 
+The B4 3x8 DLC renderer pins the initial `CreateJob` request to the highest
+workspace-legal priority, `Priority=7`. Do not submit at priority 1 and depend
+on a follow-up `UpdateJob` to raise the queue priority.
+
 ## Formal environment skeleton
 
 Each DLC node receives the same non-login-shell command and environment except
