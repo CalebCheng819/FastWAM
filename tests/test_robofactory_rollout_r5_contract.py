@@ -129,6 +129,53 @@ class R5RolloutContractTests(unittest.TestCase):
                     source, destination, expected_frames=3
                 )
 
+    def test_artifact_directory_is_published_once_with_exact_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "local" / "rollout"
+            destination = root / "published" / "rollout"
+            source.mkdir(parents=True)
+            destination.parent.mkdir()
+            (source / "empty.jsonl").touch()
+            nested = source / "nested"
+            nested.mkdir()
+            (nested / "result.json").write_text(
+                '{"status":"completed"}\n', encoding="utf-8"
+            )
+
+            report = diagnostic._publish_directory(source, destination)
+
+            self.assertEqual(report["files"], 2)
+            self.assertEqual(
+                report["bytes"],
+                (source / "nested/result.json").stat().st_size,
+            )
+            self.assertFalse(report["high_frequency_writes_on_destination"])
+            self.assertTrue(report["staged_on_local_disk"])
+            self.assertTrue(report["published_readback_validated"])
+            self.assertEqual(
+                (destination / "nested/result.json").read_bytes(),
+                (source / "nested/result.json").read_bytes(),
+            )
+            with self.assertRaises(FileExistsError):
+                diagnostic._publish_directory(source, destination)
+
+    def test_artifact_directory_rejects_source_symlink_without_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "local"
+            destination = root / "published"
+            source.mkdir()
+            real = root / "real.txt"
+            real.write_text("evidence\n", encoding="utf-8")
+            (source / "escape.txt").symlink_to(real)
+
+            with self.assertRaisesRegex(RuntimeError, "contains a symlink"):
+                diagnostic._publish_directory(source, destination)
+
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(root.glob(".published.publishing.*")), [])
+
     def test_diagnostic_cli_imports_from_a_clean_script_entrypoint(self) -> None:
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(

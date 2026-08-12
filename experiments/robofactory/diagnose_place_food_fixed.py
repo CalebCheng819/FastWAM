@@ -15,6 +15,7 @@ import math
 import os
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -269,7 +270,7 @@ def _reset_environment(env: Any, episode: Mapping[str, Any]) -> None:
     env.reset(seed=reset_seed, **reset_kwargs)
 
 
-SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v2"
+SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v3"
 ACTION_DIM = 8
 ARM_DIMS = tuple(range(7))
 GRIPPER_DIM = 7
@@ -364,7 +365,7 @@ def _validate_video(path: Path, *, expected_frames: int) -> dict[str, Any]:
 def _publish_video(
     source: Path, destination: Path, *, expected_frames: int
 ) -> dict[str, Any]:
-    """Validate a local MP4, atomically publish it, then validate OSS readback."""
+    """Validate a local MP4, atomically publish it, then validate readback."""
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"Refusing to overwrite video: {destination}")
     local_report = _validate_video(source, expected_frames=expected_frames)
@@ -399,6 +400,98 @@ def _publish_video(
         **published_report,
         "encoding_staged_on_local_disk": True,
         "published_readback_validated": True,
+    }
+
+
+def _regular_file_inventory(root: Path) -> dict[str, int]:
+    """Return an exact regular-file inventory without following any symlink."""
+
+    root_stat = root.lstat()
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        raise RuntimeError(f"Artifact root must be a real directory: {root}")
+    inventory: dict[str, int] = {}
+    for current, directory_names, file_names in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for name in directory_names:
+            child = current_path / name
+            child_stat = child.lstat()
+            if stat.S_ISLNK(child_stat.st_mode):
+                raise RuntimeError(f"Artifact tree contains a symlink: {child}")
+            if not stat.S_ISDIR(child_stat.st_mode):
+                raise RuntimeError(f"Artifact tree contains a non-directory: {child}")
+        for name in file_names:
+            child = current_path / name
+            child_stat = child.lstat()
+            if stat.S_ISLNK(child_stat.st_mode):
+                raise RuntimeError(f"Artifact tree contains a symlink: {child}")
+            if not stat.S_ISREG(child_stat.st_mode):
+                raise RuntimeError(f"Artifact tree contains a non-regular file: {child}")
+            relative = child.relative_to(root).as_posix()
+            if relative in inventory:
+                raise RuntimeError(f"Duplicate artifact path: {relative}")
+            inventory[relative] = int(child_stat.st_size)
+    return dict(sorted(inventory.items()))
+
+
+def _files_equal(left: Path, right: Path, *, chunk_bytes: int = 8 * 1024 * 1024) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_handle, right.open("rb") as right_handle:
+        while True:
+            left_chunk = left_handle.read(chunk_bytes)
+            right_chunk = right_handle.read(chunk_bytes)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+def _validate_directory_copy(source: Path, destination: Path) -> dict[str, int]:
+    source_inventory = _regular_file_inventory(source)
+    destination_inventory = _regular_file_inventory(destination)
+    if destination_inventory != source_inventory:
+        raise RuntimeError(
+            "Published artifact inventory differs from local staging: "
+            f"source={source_inventory} destination={destination_inventory}"
+        )
+    for relative in source_inventory:
+        if not _files_equal(source / relative, destination / relative):
+            raise RuntimeError(f"Published artifact bytes differ: {relative}")
+    return source_inventory
+
+
+def _publish_directory(source: Path, destination: Path) -> dict[str, Any]:
+    """Publish a completed local artifact tree once and verify every byte."""
+
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite artifact directory: {destination}")
+    if not destination.parent.is_dir() or destination.parent.is_symlink():
+        raise RuntimeError(
+            f"Artifact destination parent must be a real directory: {destination.parent}"
+        )
+    source_inventory = _regular_file_inventory(source)
+    temporary = destination.parent / (
+        f".{destination.name}.publishing.{os.getpid()}.{uuid.uuid4().hex}"
+    )
+    try:
+        shutil.copytree(source, temporary, symlinks=False)
+        copied_inventory = _validate_directory_copy(source, temporary)
+        if copied_inventory != source_inventory:
+            raise RuntimeError("Artifact inventory changed while publishing")
+        os.replace(temporary, destination)
+        published_inventory = _validate_directory_copy(source, destination)
+        if published_inventory != source_inventory:
+            raise RuntimeError("Artifact inventory changed after publication")
+    finally:
+        if temporary.exists() and not temporary.is_symlink():
+            shutil.rmtree(temporary)
+    return {
+        "files": len(source_inventory),
+        "bytes": sum(source_inventory.values()),
+        "high_frequency_writes_on_destination": False,
+        "staged_on_local_disk": True,
+        "published_readback_validated": True,
+        "validation": "exact_relative_paths_sizes_and_bytes",
     }
 
 
@@ -1252,8 +1345,16 @@ def run_rollout(
     output_dir: Path,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    published_output_dir = output_dir
+    if published_output_dir.exists() or published_output_dir.is_symlink():
+        raise FileExistsError(
+            f"Refusing to overwrite rollout directory: {published_output_dir}"
+        )
+    published_output_dir.parent.mkdir(parents=True, exist_ok=True)
+    artifact_stage = tempfile.TemporaryDirectory(prefix="fastwam-rollout-artifacts-")
+    output_dir = Path(artifact_stage.name) / "rollout"
     output_dir.mkdir(parents=True, exist_ok=False)
-    env = _build_environment(args.robofactory_root, args.task)
+    env = None
     multiview_writer = None
     global_writer = None
     video_stage = tempfile.TemporaryDirectory(prefix="fastwam-rollout-video-")
@@ -1263,6 +1364,7 @@ def run_rollout(
     violations: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
     try:
+        env = _build_environment(args.robofactory_root, args.task)
         _reset_environment(env, episode)
         env.unwrapped.set_state_dict(states[0])
         agent_names = tuple(episode["agent_names"])
@@ -1468,25 +1570,33 @@ def run_rollout(
             "bound_violations": buckets,
             "video_integrity": video_integrity,
             "elapsed_seconds": time.monotonic() - started,
+            "artifact_publication_contract": {
+                "mode": "local_directory_then_validated_publish",
+                "high_frequency_writes_on_destination": False,
+                "destination_overwrite_allowed": False,
+                "validation": "exact_relative_paths_sizes_and_bytes",
+            },
             "artifacts": {
                 "multiview_mp4": "rollout_multiview.mp4",
                 "global_mp4": "rollout_global.mp4",
                 "queries": "policy_queries.jsonl",
-                "executed_actions": "executed_actions.jsonl",
                 "physical_trace": "physical_trace.jsonl",
                 "violations": "action_bound_violations.jsonl",
                 "initial_state_audit": "initial_state_audit.json",
             },
         }
         _atomic_json(output_dir / "rollout_result.json", result)
-        return result
+        publication = _publish_directory(output_dir, published_output_dir)
+        return {**result, "artifact_publication": publication}
     finally:
         if multiview_writer is not None:
             multiview_writer.close()
         if global_writer is not None:
             global_writer.close()
         video_stage.cleanup()
-        env.close()
+        if env is not None:
+            env.close()
+        artifact_stage.cleanup()
 
 
 def run_teacher_forcing(
