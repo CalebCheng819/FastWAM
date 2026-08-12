@@ -67,6 +67,7 @@ mkdir -p -- "$output_root/$split"
 
 export PYTHONDONTWRITEBYTECODE=1
 export CUDA_VISIBLE_DEVICES="$gpu"
+export PYTHONPATH="$source_root/src:$source_root/experiments/robofactory${PYTHONPATH:+:$PYTHONPATH}"
 exec "$python_bin" -B "$evaluator" \
   --mode rollout \
   --formal-contract \
