@@ -150,6 +150,35 @@ def _flat_action_to_dict(
     }
 
 
+def _expert_action_at(
+    actions: Mapping[str, np.ndarray],
+    agent_names: Sequence[str],
+    timestep: int,
+) -> dict[str, np.ndarray]:
+    """Return one stored multi-agent action without changing its ordering."""
+
+    if timestep < 0:
+        raise ValueError(f"Expert action timestep must be non-negative, got {timestep}")
+    result: dict[str, np.ndarray] = {}
+    for name in agent_names:
+        if name not in actions:
+            raise KeyError(f"Expert actions are missing agent {name!r}")
+        array = np.asarray(actions[name], dtype=np.float32)
+        if array.ndim != 2 or array.shape[1:] != (ACTION_DIM,):
+            raise ValueError(f"Invalid expert action array for {name}: {array.shape}")
+        if timestep >= len(array):
+            raise IndexError(
+                f"Expert action timestep {timestep} is outside {name} length {len(array)}"
+            )
+        vector = np.ascontiguousarray(array[timestep])
+        if not np.isfinite(vector).all():
+            raise FloatingPointError(
+                f"Expert action contains non-finite values for {name} at {timestep}"
+            )
+        result[name] = vector
+    return result
+
+
 def _build_environment(robofactory_root: Path, task_name: str):
     if str(robofactory_root) not in sys.path:
         sys.path.insert(0, str(robofactory_root))
@@ -184,7 +213,7 @@ def _reset_environment(env: Any, episode: Mapping[str, Any]) -> None:
     env.reset(seed=reset_seed, **reset_kwargs)
 
 
-SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v2"
+SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v3"
 ACTION_DIM = 8
 ARM_DIMS = tuple(range(7))
 GRIPPER_DIM = 7
@@ -693,6 +722,32 @@ def validate_formal_rollout_contract(
         "initial_state": initial_state,
         "exec_horizon": exec_horizon,
         "explicit_cell": True,
+    }
+
+
+def validate_formal_expert_replay_contract(
+    *,
+    max_steps: int,
+    initial_state: str,
+    initial_state_explicit: bool,
+    evaluation_code_commit: str | None,
+) -> dict[str, Any]:
+    """Fail closed unless expert replay starts from the untouched H5 state."""
+
+    if max_steps != 300:
+        raise ValueError(f"Formal expert replay requires max_steps=300, got {max_steps}")
+    if not initial_state_explicit or initial_state != "raw":
+        raise ValueError("Formal expert replay requires explicit --initial-state raw")
+    if not evaluation_code_commit or evaluation_code_commit.strip() != evaluation_code_commit:
+        raise ValueError(
+            "Formal expert replay requires a non-empty --evaluation-code-commit"
+        )
+    return {
+        "max_steps": max_steps,
+        "initial_state": initial_state,
+        "action_source": "stored_h5_expert",
+        "policy_initialized": False,
+        "evaluation_code_commit": evaluation_code_commit,
     }
 
 
@@ -1400,6 +1455,178 @@ def run_rollout(
         env.close()
 
 
+def run_expert_replay(
+    *,
+    args: argparse.Namespace,
+    episode: Mapping[str, Any],
+    states: Sequence[Mapping[str, Any]],
+    actions: Mapping[str, np.ndarray],
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Replay the complete stored two-arm action stream without a policy."""
+
+    started = time.monotonic()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    env = _build_environment(args.robofactory_root, args.task)
+    multiview_writer = None
+    global_writer = None
+    video_stage = tempfile.TemporaryDirectory(prefix="fastwam-expert-replay-video-")
+    video_stage_dir = Path(video_stage.name)
+    multiview_stage_path = video_stage_dir / "expert_replay_multiview.mp4"
+    global_stage_path = video_stage_dir / "expert_replay_global.mp4"
+    violations: list[dict[str, Any]] = []
+    snapshots: list[dict[str, Any]] = []
+    try:
+        _reset_environment(env, episode)
+        env.unwrapped.set_state_dict(states[0])
+        agent_names = tuple(episode["agent_names"])
+        action_count = next(iter(actions.values())).shape[0]
+        initial_audit = {
+            "mode": "raw_h5_t0",
+            "mutation_api": None,
+            "before": {
+                "qpos": _flat(env.unwrapped.pot.get_qpos()),
+                "qvel": _flat(env.unwrapped.pot.get_qvel()),
+            },
+            "after": {
+                "qpos": _flat(env.unwrapped.pot.get_qpos()),
+                "qvel": _flat(env.unwrapped.pot.get_qvel()),
+            },
+            "other_state_verified_unchanged": True,
+        }
+        _atomic_json(output_dir / "initial_state_audit.json", initial_audit)
+        (output_dir / "expert_actions.jsonl").touch(exist_ok=False)
+        (output_dir / "action_bound_violations.jsonl").touch(exist_ok=False)
+        multiview_writer = imageio.get_writer(
+            multiview_stage_path,
+            fps=FPS,
+            codec="libx264",
+            pixelformat="yuv420p",
+            macro_block_size=None,
+        )
+        global_writer = imageio.get_writer(
+            global_stage_path,
+            fps=FPS,
+            codec="libx264",
+            pixelformat="yuv420p",
+            macro_block_size=None,
+        )
+
+        def record_frame() -> None:
+            frame = _video_frame(env)
+            multiview_writer.append_data(frame)
+            global_writer.append_data(frame[:, -320:, :])
+
+        record_frame()
+        first = physical_snapshot(env, simulator_step=0)
+        snapshots.append(first)
+        _append_jsonl(output_dir / "physical_trace.jsonl", first)
+        steps = 0
+        success = bool(first["task_success_from_geometry"])
+        termination_reason = "initial_success" if success else "expert_actions_exhausted"
+        max_steps = min(
+            int(args.max_steps),
+            int(episode["max_episode_steps"]),
+            int(action_count),
+        )
+        while steps < max_steps and not success:
+            action = _expert_action_at(actions, agent_names, steps)
+            current = action_bound_records(
+                action,
+                env.action_space,
+                simulator_step=steps,
+                query_index=-1,
+                chunk_offset=0,
+            )
+            violations.extend(current)
+            for record in current:
+                _append_jsonl(output_dir / "action_bound_violations.jsonl", record)
+            _append_jsonl(
+                output_dir / "expert_actions.jsonl",
+                {
+                    "simulator_step": steps,
+                    "source_timestep": steps,
+                    "action": action,
+                },
+            )
+            _, _, terminated, truncated, info = env.step(action)
+            steps += 1
+            record_frame()
+            snapshot = physical_snapshot(env, simulator_step=steps, last_action=action)
+            snapshot["info_success"] = _as_bool(info["success"], label="info.success")
+            snapshots.append(snapshot)
+            _append_jsonl(output_dir / "physical_trace.jsonl", snapshot)
+            success = bool(snapshot["info_success"])
+            if success:
+                termination_reason = "success"
+                break
+            if _as_bool(terminated, label="terminated"):
+                termination_reason = "terminated"
+                break
+            if _as_bool(truncated, label="truncated"):
+                termination_reason = "truncated"
+                break
+        multiview_writer.close()
+        multiview_writer = None
+        global_writer.close()
+        global_writer = None
+        video_integrity = {
+            "multiview_mp4": _publish_video(
+                multiview_stage_path,
+                output_dir / "expert_replay_multiview.mp4",
+                expected_frames=len(snapshots),
+            ),
+            "global_mp4": _publish_video(
+                global_stage_path,
+                output_dir / "expert_replay_global.mp4",
+                expected_frames=len(snapshots),
+            ),
+        }
+        buckets = bucket_bound_violations(violations)
+        _atomic_json(output_dir / "action_bound_buckets.json", buckets)
+        initial_height = float(snapshots[0]["meat_height"])
+        max_height = max(float(snapshot["meat_height"]) for snapshot in snapshots)
+        result = {
+            "status": "completed",
+            "success": success,
+            "steps": steps,
+            "expert_actions_available": int(action_count),
+            "expert_actions_executed": steps,
+            "action_source": "stored_h5_expert",
+            "policy_initialized": False,
+            "recorded_video_frames": len(snapshots),
+            "termination_reason": termination_reason,
+            "initial_state": "raw",
+            "initial_state_audit": initial_audit,
+            "meat_initial_height_m": initial_height,
+            "meat_max_height_m": max_height,
+            "meat_max_lift_m": max_height - initial_height,
+            "pot_lid_max_qpos": max(
+                float(snapshot["pot_lid_qpos"]) for snapshot in snapshots
+            ),
+            "bound_violations": buckets,
+            "video_integrity": video_integrity,
+            "elapsed_seconds": time.monotonic() - started,
+            "artifacts": {
+                "multiview_mp4": "expert_replay_multiview.mp4",
+                "global_mp4": "expert_replay_global.mp4",
+                "actions": "expert_actions.jsonl",
+                "physical_trace": "physical_trace.jsonl",
+                "violations": "action_bound_violations.jsonl",
+                "initial_state_audit": "initial_state_audit.json",
+            },
+        }
+        _atomic_json(output_dir / "expert_replay_result.json", result)
+        return result
+    finally:
+        if multiview_writer is not None:
+            multiview_writer.close()
+        if global_writer is not None:
+            global_writer.close()
+        video_stage.cleanup()
+        env.close()
+
+
 def run_teacher_forcing(
     *,
     args: argparse.Namespace,
@@ -1689,9 +1916,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("rollout", "teacher-forcing", "parity", "all"),
+        choices=("rollout", "teacher-forcing", "parity", "expert-replay", "all"),
         default="all",
-        help="Use rollout for one independently schedulable raw/clean x h1/h5 cell.",
+        help=(
+            "Use rollout for one independently schedulable raw/clean x h1/h5 cell; "
+            "expert-replay executes stored H5 actions without loading FastWAM."
+        ),
     )
     parser.add_argument(
         "--formal-contract",
@@ -1702,7 +1932,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--panel", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--robofactory-root", type=Path, required=True)
-    parser.add_argument("--gaussian-cache", type=Path, required=True)
+    parser.add_argument("--gaussian-cache", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--episode-start", type=int, default=0)
     parser.add_argument("--policy-seed", type=int, default=10000)
@@ -1711,11 +1941,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-start-timestep", type=int, default=5)
     parser.add_argument("--initial-state", choices=("raw", "clean"), default=None)
     parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=None)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path)
     parser.add_argument(
         "--training-code-commit",
-        required=True,
+        required=False,
         help="Git commit used to train the selected checkpoint",
+    )
+    parser.add_argument(
+        "--evaluation-code-commit",
+        required=False,
+        help="Git commit of the evaluator used for a formal expert replay",
     )
     parser.add_argument(
         "--integrity-mode",
@@ -1724,14 +1959,14 @@ def _parser() -> argparse.ArgumentParser:
         help="R5 uses ordinary file metadata; sha256 is retained only for legacy evaluation.",
     )
     parser.add_argument("--checkpoint-sha256")
-    parser.add_argument("--stats", type=Path, required=True)
+    parser.add_argument("--stats", type=Path)
     parser.add_argument("--stats-sha256")
     parser.add_argument("--context-cache-dir", type=Path)
     parser.add_argument("--context-file", type=Path)
-    parser.add_argument("--model-cache-root", type=Path, required=True)
-    parser.add_argument("--policy-lightning-repo", type=Path, required=True)
+    parser.add_argument("--model-cache-root", type=Path)
+    parser.add_argument("--policy-lightning-repo", type=Path)
     parser.add_argument("--policy-lightning-commit", default=POLICY_LIGHTNING_COMMIT)
-    parser.add_argument("--noposplat-checkpoint", type=Path, required=True)
+    parser.add_argument("--noposplat-checkpoint", type=Path)
     parser.add_argument("--noposplat-checkpoint-sha256")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--teacher-device", default="cuda:0")
@@ -1743,6 +1978,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    policy_needed = args.mode != "expert-replay"
     args.initial_state_explicit = args.initial_state is not None
     args.exec_horizon_explicit = args.exec_horizon is not None
     if args.initial_state is None:
@@ -1751,7 +1987,25 @@ def main() -> None:
         args.exec_horizon = 5
     if args.task != "PlaceFood-rf":
         raise ValueError("This diagnostic intentionally supports PlaceFood-rf only")
-    if args.integrity_mode == "metadata_no_hash":
+    if policy_needed:
+        required_policy_arguments = {
+            "checkpoint": args.checkpoint,
+            "training_code_commit": args.training_code_commit,
+            "stats": args.stats,
+            "gaussian_cache": args.gaussian_cache,
+            "model_cache_root": args.model_cache_root,
+            "policy_lightning_repo": args.policy_lightning_repo,
+            "noposplat_checkpoint": args.noposplat_checkpoint,
+        }
+        missing_policy_arguments = sorted(
+            name for name, value in required_policy_arguments.items() if value is None
+        )
+        if missing_policy_arguments:
+            raise ValueError(
+                "Policy mode requires arguments: "
+                + ", ".join(missing_policy_arguments)
+            )
+    if policy_needed and args.integrity_mode == "metadata_no_hash":
         if args.context_file is None:
             raise ValueError("metadata_no_hash mode requires --context-file")
         if args.context_cache_dir is not None:
@@ -1768,7 +2022,7 @@ def main() -> None:
             raise ValueError(
                 "metadata_no_hash mode forbids hash arguments: " + ", ".join(supplied)
             )
-    else:
+    elif policy_needed:
         if args.context_cache_dir is None:
             raise ValueError("sha256 mode requires --context-cache-dir")
         if args.context_file is not None:
@@ -1790,6 +2044,7 @@ def main() -> None:
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be positive")
     formal_rollout_contract = None
+    formal_expert_replay_contract = None
     if args.formal_contract:
         if args.mode == "parity":
             raise ValueError("--formal-contract does not apply to parity-only mode")
@@ -1808,10 +2063,18 @@ def main() -> None:
                 raise ValueError("Formal teacher forcing requires 263 states")
             if int(args.action_horizon) < 5:
                 raise ValueError("Formal teacher forcing requires action_horizon>=5")
+        if args.mode == "expert-replay":
+            formal_expert_replay_contract = validate_formal_expert_replay_contract(
+                max_steps=int(args.max_steps),
+                initial_state=str(args.initial_state),
+                initial_state_explicit=bool(args.initial_state_explicit),
+                evaluation_code_commit=args.evaluation_code_commit,
+            )
     args.output_dir = args.output_dir.expanduser().resolve()
     args.dataset_root = args.dataset_root.expanduser().resolve(strict=True)
     args.robofactory_root = args.robofactory_root.expanduser().resolve(strict=True)
-    args.gaussian_cache = args.gaussian_cache.expanduser().resolve(strict=True)
+    if policy_needed:
+        args.gaussian_cache = args.gaussian_cache.expanduser().resolve(strict=True)
     args.output_dir.mkdir(parents=True, exist_ok=False)
     started_at = _utc_now()
     started = time.monotonic()
@@ -1821,13 +2084,18 @@ def main() -> None:
         "started_at": started_at,
         "provenance_policy": "ordinary Git, run, path, timestamp, size, and version identifiers; no new artifact checksums",
         "base_eval_commit": "f89a7a5b7ca0674c78bca5f329398dfa28fb8758",
-        "training_code_commit": str(args.training_code_commit),
+        "training_code_commit": (
+            str(args.training_code_commit) if policy_needed else None
+        ),
+        "evaluation_code_commit": args.evaluation_code_commit,
         "robofactory_expected_commit": ROBOFACTORY_COMMIT,
         "runtime_code_path": str(Path(__file__).resolve().parents[2]),
         "python": {"executable": sys.executable, "version": sys.version, "platform": platform.platform()},
         "argv": sys.argv,
         "formal_contract_requested": bool(args.formal_contract),
         "formal_rollout_contract": formal_rollout_contract,
+        "formal_expert_replay_contract": formal_expert_replay_contract,
+        "policy_initialized": policy_needed,
     }
     _atomic_json(args.output_dir / "run_manifest.json", manifest)
     try:
@@ -1882,30 +2150,34 @@ def main() -> None:
             "global_ordinal": episode.get("global_ordinal"),
             "split_fraction": episode.get("split_fraction"),
         }
-        init_started = time.monotonic()
-        policy = FastWAMMultiRobotPolicy(
-            checkpoint_path=args.checkpoint,
-            checkpoint_sha256=args.checkpoint_sha256,
-            stats_path=args.stats,
-            expected_stats_sha256=args.stats_sha256,
-            context_cache_dir=args.context_cache_dir,
-            context_path=args.context_file,
-            task_name=args.task,
-            model_cache_root=args.model_cache_root,
-            policy_lightning_repo=args.policy_lightning_repo,
-            policy_lightning_commit=args.policy_lightning_commit,
-            noposplat_checkpoint_path=args.noposplat_checkpoint,
-            noposplat_checkpoint_sha256=args.noposplat_checkpoint_sha256,
-            integrity_mode=args.integrity_mode,
-            allowed_agent_counts=(2,),
-            device=args.device,
-            teacher_device=args.teacher_device,
-            action_horizon=args.action_horizon,
-            num_inference_steps=args.num_inference_steps,
-            sigma_shift=args.sigma_shift,
-            seed=args.policy_seed,
-        )
-        manifest["policy_init_seconds"] = time.monotonic() - init_started
+        policy = None
+        if policy_needed:
+            init_started = time.monotonic()
+            policy = FastWAMMultiRobotPolicy(
+                checkpoint_path=args.checkpoint,
+                checkpoint_sha256=args.checkpoint_sha256,
+                stats_path=args.stats,
+                expected_stats_sha256=args.stats_sha256,
+                context_cache_dir=args.context_cache_dir,
+                context_path=args.context_file,
+                task_name=args.task,
+                model_cache_root=args.model_cache_root,
+                policy_lightning_repo=args.policy_lightning_repo,
+                policy_lightning_commit=args.policy_lightning_commit,
+                noposplat_checkpoint_path=args.noposplat_checkpoint,
+                noposplat_checkpoint_sha256=args.noposplat_checkpoint_sha256,
+                integrity_mode=args.integrity_mode,
+                allowed_agent_counts=(2,),
+                device=args.device,
+                teacher_device=args.teacher_device,
+                action_horizon=args.action_horizon,
+                num_inference_steps=args.num_inference_steps,
+                sigma_shift=args.sigma_shift,
+                seed=args.policy_seed,
+            )
+            manifest["policy_init_seconds"] = time.monotonic() - init_started
+        else:
+            manifest["policy_init_seconds"] = 0.0
         manifest["status"] = "running"
         manifest["mode"] = args.mode
         manifest["rollout_cell"] = {
@@ -1919,9 +2191,11 @@ def main() -> None:
         }
         _atomic_json(args.output_dir / "run_manifest.json", manifest)
         rollout = None
+        expert_replay = None
         teacher_forcing = None
         parity = None
         if args.mode in ("rollout", "all"):
+            assert policy is not None
             rollout = run_rollout(
                 args=args,
                 episode=episode,
@@ -1930,6 +2204,7 @@ def main() -> None:
                 output_dir=args.output_dir / "rollout",
             )
         if args.mode in ("teacher-forcing", "all"):
+            assert policy is not None
             teacher_forcing = run_teacher_forcing(
                 args=args,
                 episode=episode,
@@ -1940,6 +2215,7 @@ def main() -> None:
                 output_dir=args.output_dir / "teacher_forcing",
             )
         if args.mode in ("parity", "all"):
+            assert policy is not None
             parity_dir = args.output_dir / "parity"
             parity_dir.mkdir(parents=True, exist_ok=False)
             parity = run_first_frame_parity(
@@ -1950,13 +2226,28 @@ def main() -> None:
                 policy=policy,
                 output_dir=parity_dir,
             )
+        if args.mode == "expert-replay":
+            expert_replay = run_expert_replay(
+                args=args,
+                episode=episode,
+                states=states,
+                actions=actions,
+                output_dir=args.output_dir / "expert_replay",
+            )
         summary = {
             "schema_version": SCHEMA_VERSION,
             "status": "COMPLETED",
             "simulator_success": (
-                None if rollout is None else bool(rollout["success"])
+                bool(rollout["success"])
+                if rollout is not None
+                else (
+                    None
+                    if expert_replay is None
+                    else bool(expert_replay["success"])
+                )
             ),
             "rollout": rollout,
+            "expert_replay": expert_replay,
             "teacher_forcing": teacher_forcing,
             "first_frame_parity": parity,
             "finished_at": _utc_now(),

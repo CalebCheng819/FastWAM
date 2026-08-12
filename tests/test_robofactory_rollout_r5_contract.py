@@ -142,6 +142,91 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("--formal-contract", result.stdout)
         self.assertIn("--training-code-commit", result.stdout)
+        self.assertIn("--evaluation-code-commit", result.stdout)
+        self.assertIn("expert-replay", result.stdout)
+
+    def test_expert_replay_cli_does_not_require_model_arguments(self) -> None:
+        parsed = diagnostic._parser().parse_args(
+            [
+                "--mode",
+                "expert-replay",
+                "--panel",
+                "/tmp/panel.json",
+                "--dataset-root",
+                "/tmp/dataset",
+                "--robofactory-root",
+                "/tmp/robofactory",
+                "--output-dir",
+                "/tmp/output",
+                "--initial-state",
+                "raw",
+            ]
+        )
+
+        self.assertEqual(parsed.mode, "expert-replay")
+        self.assertIsNone(parsed.checkpoint)
+        self.assertIsNone(parsed.gaussian_cache)
+        self.assertIsNone(parsed.noposplat_checkpoint)
+
+    def test_expert_replay_launcher_omits_policy_inputs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        launcher = (
+            root
+            / ".research-workflow"
+            / "experiments"
+            / "FASTWAM-MR-N2-PLACEFOOD-EXPERT-REPLAY-R1-20260813"
+            / "run_one.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("--mode expert-replay", launcher)
+        self.assertIn("--initial-state raw", launcher)
+        self.assertIn("--evaluation-code-commit", launcher)
+        self.assertNotIn("--checkpoint", launcher)
+        self.assertNotIn("--gaussian-cache", launcher)
+        self.assertNotIn("--noposplat-checkpoint", launcher)
+
+    def test_expert_action_preserves_agent_order_and_values(self) -> None:
+        import numpy as np
+
+        actions = {
+            "panda-0": np.arange(24, dtype=np.float32).reshape(3, 8),
+            "panda-1": np.arange(100, 124, dtype=np.float32).reshape(3, 8),
+        }
+
+        selected = diagnostic._expert_action_at(
+            actions, ("panda-1", "panda-0"), timestep=2
+        )
+
+        self.assertEqual(tuple(selected), ("panda-1", "panda-0"))
+        np.testing.assert_array_equal(selected["panda-1"], actions["panda-1"][2])
+        np.testing.assert_array_equal(selected["panda-0"], actions["panda-0"][2])
+        with self.assertRaisesRegex(IndexError, "outside"):
+            diagnostic._expert_action_at(actions, ("panda-0", "panda-1"), 3)
+
+    def test_formal_expert_replay_requires_explicit_raw_state(self) -> None:
+        contract = diagnostic.validate_formal_expert_replay_contract(
+            max_steps=300,
+            initial_state="raw",
+            initial_state_explicit=True,
+            evaluation_code_commit="0123456789abcdef0123456789abcdef01234567",
+        )
+
+        self.assertEqual(contract["action_source"], "stored_h5_expert")
+        self.assertFalse(contract["policy_initialized"])
+        with self.assertRaisesRegex(ValueError, "explicit --initial-state raw"):
+            diagnostic.validate_formal_expert_replay_contract(
+                max_steps=300,
+                initial_state="clean",
+                initial_state_explicit=True,
+                evaluation_code_commit="0123456789abcdef0123456789abcdef01234567",
+            )
+        with self.assertRaisesRegex(ValueError, "evaluation-code-commit"):
+            diagnostic.validate_formal_expert_replay_contract(
+                max_steps=300,
+                initial_state="raw",
+                initial_state_explicit=True,
+                evaluation_code_commit=None,
+            )
 
     def test_b4_launcher_pins_and_validates_vulkan_runtime(self) -> None:
         root = Path(__file__).resolve().parents[1]
