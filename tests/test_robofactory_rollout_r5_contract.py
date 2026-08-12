@@ -142,6 +142,27 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("--formal-contract", result.stdout)
 
+    def test_b4_launcher_pins_and_validates_vulkan_runtime(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        launcher = (
+            root
+            / ".research-workflow/experiments"
+            / "FASTWAM-MR-B4-N2-PLACEFOOD-CLOSEDLOOP-EVAL-20260813"
+            / "run_one.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("FASTWAM_NVIDIA_GRAPHICS_ROOT", launcher)
+        self.assertIn("nvidia-graphics-570.153.02", launcher)
+        self.assertIn('"$vulkan_icd"', launcher)
+        self.assertIn('"$egl_vendor"', launcher)
+        self.assertIn('"$graphics_driver_lib"', launcher)
+        self.assertIn('export VK_ICD_FILENAMES="$vulkan_icd"', launcher)
+        self.assertIn('export VK_DRIVER_FILES="$vulkan_icd"', launcher)
+        self.assertIn('export __GLX_VENDOR_LIBRARY_NAME=nvidia', launcher)
+        self.assertIn(
+            'export __EGL_VENDOR_LIBRARY_FILENAMES="$egl_vendor"', launcher
+        )
+
     def test_b4_action_only_model_contract(self) -> None:
         config = policy.compose_b4_action_model_config()
 

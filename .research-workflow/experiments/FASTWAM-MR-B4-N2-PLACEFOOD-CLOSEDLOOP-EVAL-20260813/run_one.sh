@@ -47,6 +47,10 @@ context_file=/oss-chengjuntao/cpfs-user-chengjuntao/datasets/robofactory_multi_r
 model_cache_root=/mnt/workspace/checkpoints/FastWAM/model-cache
 policy_lightning_repo=/mnt/workspace/Policy-Lightning
 noposplat_checkpoint=/mnt/workspace/checkpoints/noposplat/664ba9156f10a6203f0a0fad2f02c069c6894f4f/mixRe10kDl3dv_512x512.ckpt
+graphics_root=${FASTWAM_NVIDIA_GRAPHICS_ROOT:-/cpfs/user/chengjuntao/fastwam-deploy/nvidia-graphics-570.153.02}
+vulkan_icd="$graphics_root/nvidia_icd.json"
+egl_vendor="$graphics_root/10_nvidia.json"
+graphics_driver_lib="$graphics_root/driver-lib"
 episode_dir="$output_root/$split/episode-$(printf '%02d' "$panel_index")"
 policy_seed=$((10000 + panel_index))
 
@@ -62,7 +66,10 @@ for required in \
   "$context_file" \
   "$model_cache_root" \
   "$policy_lightning_repo" \
-  "$noposplat_checkpoint"; do
+  "$noposplat_checkpoint" \
+  "$vulkan_icd" \
+  "$egl_vendor" \
+  "$graphics_driver_lib"; do
   if [[ ! -e "$required" ]]; then
     echo "required input is absent: $required" >&2
     exit 4
@@ -77,6 +84,11 @@ mkdir -p -- "$output_root/$split"
 export PYTHONDONTWRITEBYTECODE=1
 export CUDA_VISIBLE_DEVICES="$gpu"
 export PYTHONPATH="$source_root/src:$source_root/experiments/robofactory${PYTHONPATH:+:$PYTHONPATH}"
+export VK_ICD_FILENAMES="$vulkan_icd"
+export VK_DRIVER_FILES="$vulkan_icd"
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export __EGL_VENDOR_LIBRARY_FILENAMES="$egl_vendor"
+export LD_LIBRARY_PATH="$graphics_driver_lib:/usr/local/cuda-12.8/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$python_bin" -B "$evaluator" \
   --mode rollout \
   --formal-contract \
