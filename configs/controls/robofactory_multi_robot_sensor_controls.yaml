@@ -1,0 +1,34 @@
+# Audit registry only. This file is deliberately outside configs/task and is
+# not a launchable Hydra task config.
+controls:
+  global_only:
+    label: global-only
+    status: runnable
+    runnable: true
+    task_axis: GAU0
+    modalities: [head_camera_global]
+    required_env: null
+    task_config: robofactory_multi_robot_vg{0,1}_hub{0,1}_gau0_224_1e-4
+
+  global_agent_rgb:
+    label: global+agent-RGB
+    status: planned_not_runnable
+    runnable: false
+    task_axis: null
+    modalities: [head_camera_global, agent_rgb]
+    required_env: null
+    task_config: null
+    blocker: No per-agent RGB dataset/model input contract is implemented.
+
+  global_agent_gaussian:
+    label: global+agent-Gaussian
+    status: runnable_with_versioned_cache
+    runnable: true
+    task_axis: GAU1
+    modalities: [head_camera_global, agent_gaussian]
+    required_env:
+      - FASTWAM_GAUSSIAN_CACHE_DIR
+      - FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256
+      - FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256
+      - FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256
+    task_config: robofactory_multi_robot_vg{0,1}_hub{0,1}_gau1_224_1e-4

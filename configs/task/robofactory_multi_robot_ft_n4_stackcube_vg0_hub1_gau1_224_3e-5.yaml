@@ -1,0 +1,20 @@
+# @package _global_
+
+# Native four-agent action-policy fine-tuning for FourRobotsStackCube.  The
+# exact N=4 scope filters samples without introducing a padded or masked
+# fixed-capacity agent set.
+defaults:
+  - robofactory_multi_robot_ft_n2_vg0_hub1_gau1_224_3e-5
+  - _self_
+
+data:
+  train:
+    required_agent_counts: [4]
+    required_tasks: [FourRobotsStackCube-rf]
+  val:
+    required_agent_counts: [4]
+    required_tasks: [FourRobotsStackCube-rf]
+
+wandb:
+  group: robofactory-multirobot-n4-task-scope-finetune
+  name: fastwam-ft-n4-stackcube-vg0-hub1-gau1-1k-s42

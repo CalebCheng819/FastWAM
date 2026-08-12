@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_ablation_224_1e-4
+  - _self_
+
+trainable_scope: action
+
+data:
+  train:
+    load_future_video: false
+  val:
+    load_future_video: false
+
+model:
+  training_mode: action_only_cache
+  action_dit_config:
+    hub_enabled: true
+  loss:
+    lambda_video: 0.0
+    lambda_action: 1.0
+
+wandb:
+  name: fastwam-robofactory-vg0-hub1-s42

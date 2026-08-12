@@ -1,0 +1,19 @@
+schema_version = 1
+
+[project]
+id = "FASTWAM-MULTIROBOT"
+name = "FastWAM Multi-Robot"
+experiment_id_prefix = "FASTWAM-MR"
+repository_url = "https://github.com/yuantianyuan01/FastWAM"
+
+[notion]
+project_page_id = "3ae21e77-89cc-8145-873a-c6c7057f1c52"
+experiments_database_id = "920fa3ed-32f9-445f-b928-0391de560592"
+experiments_data_source_id = "7456bae9-0c32-4754-9014-213b1ef8df63"
+workspace_id = "2dc05352-6acc-48e1-a630-f42652151140"
+workflow_page_id = "39e21e77-89cc-8032-9342-fde858da46f1"
+calendar_date_property = "Experiment Window"
+
+[storage]
+artifact_root = "/cpfs/user/chengjuntao/eval/FastWAM/multirobot"
+outbox_directory = ".research-workflow/outbox"

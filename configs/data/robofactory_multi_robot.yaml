@@ -1,0 +1,73 @@
+train:
+  _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
+  root_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot
+  num_frames: 33
+  action_video_freq_ratio: 4
+  video_size: [224, 320]
+  # Native variable-length agent axis. When declared, this is the exact
+  # cardinality scope: missing or unexpected counts both fail closed.
+  required_agent_counts: [2, 3, 4]
+  # Optional exact task scope for specialized fine-tuning. Null keeps the full
+  # task inventory while preserving the original source/cache identity.
+  required_tasks: null
+  agent_geometry_dim: 7
+  load_future_video: true
+  action_dim: 8
+  state_dim: 18
+  window_stride: 16
+  val_set_proportion: 0.1
+  is_training_set: true
+  split_seed: 42
+  randomize_agent_order: true
+  # The formal 2026-08-01 data scope is the verified N=2/3/4 corpus. Keep its
+  # normalization and prompt artifacts separate from legacy 3/4-only files.
+  pretrained_norm_stats: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json
+  require_train_only_stats: true
+  text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
+  # GAU1 overrides this with an immutable compact-cache root. Full-resolution
+  # all-timestep 13ch tensors remain the OSS canonical source, not the hot path.
+  gaussian_cache_dir: null
+  gaussian_cache_verify: manifest
+  gaussian_cache_expected_manifest_sha256: null
+  gaussian_cache_expected_selection_sha256: null
+  gaussian_cache_expected_source_identity_sha256: null
+  gaussian_channels: 13
+  gaussian_size: [28, 40]
+  context_len: 128
+  instruction_map:
+    StrikeCubeHard-rf: two robots collaboratively strike the cube to the target
+    PlaceFood-rf: two robots collaboratively place the food in the target location
+    PlaceCubeInCup-rf: two robots collaboratively place the cube in the cup
+    ThreeRobotsPlaceShoes-rf: three robots collaboratively place the shoes in their target locations
+    ThreeRobotsStackCube-rf: three robots collaboratively stack the cubes
+    FourRobotsStackCube-rf: four robots collaboratively stack the cubes
+
+val:
+  _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
+  root_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot
+  num_frames: 33
+  action_video_freq_ratio: 4
+  video_size: [224, 320]
+  required_agent_counts: [2, 3, 4]
+  required_tasks: null
+  agent_geometry_dim: 7
+  load_future_video: true
+  action_dim: 8
+  state_dim: 18
+  window_stride: 32
+  val_set_proportion: 0.1
+  is_training_set: false
+  split_seed: 42
+  randomize_agent_order: false
+  pretrained_norm_stats: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json
+  require_train_only_stats: true
+  text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
+  gaussian_cache_dir: null
+  gaussian_cache_verify: manifest
+  gaussian_cache_expected_manifest_sha256: null
+  gaussian_cache_expected_selection_sha256: null
+  gaussian_cache_expected_source_identity_sha256: null
+  gaussian_channels: 13
+  gaussian_size: [28, 40]
+  context_len: 128
+  instruction_map: ${data.train.instruction_map}

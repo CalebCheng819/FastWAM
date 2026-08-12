@@ -1,0 +1,20 @@
+# @package _global_
+
+# Native three-agent action-policy fine-tuning over the complete N=3 task
+# pool.  The agent axis remains sample-native; this is a dataset scope, not a
+# padded or masked fixed-capacity agent set.
+defaults:
+  - robofactory_multi_robot_ft_n2_vg0_hub1_gau1_224_3e-5
+  - _self_
+
+data:
+  train:
+    required_agent_counts: [3]
+    required_tasks: [ThreeRobotsPlaceShoes-rf, ThreeRobotsStackCube-rf]
+  val:
+    required_agent_counts: [3]
+    required_tasks: [ThreeRobotsPlaceShoes-rf, ThreeRobotsStackCube-rf]
+
+wandb:
+  group: robofactory-multirobot-n3-task-pool-finetune
+  name: fastwam-ft-n3-pool-vg0-hub1-gau1-1k-s42

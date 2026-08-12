@@ -1,0 +1,36 @@
+# @package _global_
+
+# FASTWAM_GAUSSIAN_CACHE_DIR must name an immutable, versioned compact-cache
+# root. It intentionally has no fallback so GAU1 fails closed before launch.
+defaults:
+  - robofactory_multi_robot_ablation_224_1e-4
+  - _self_
+
+trainable_scope: action
+
+data:
+  train:
+    load_future_video: false
+    gaussian_cache_dir: ${oc.env:FASTWAM_GAUSSIAN_CACHE_DIR}
+    gaussian_cache_expected_manifest_sha256: ${oc.env:FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256}
+    gaussian_cache_expected_selection_sha256: ${oc.env:FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256}
+    gaussian_cache_expected_source_identity_sha256: ${oc.env:FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256}
+  val:
+    load_future_video: false
+    gaussian_cache_dir: ${oc.env:FASTWAM_GAUSSIAN_CACHE_DIR}
+    gaussian_cache_expected_manifest_sha256: ${oc.env:FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256}
+    gaussian_cache_expected_selection_sha256: ${oc.env:FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256}
+    gaussian_cache_expected_source_identity_sha256: ${oc.env:FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256}
+
+model:
+  training_mode: action_only_cache
+  action_dit_config:
+    hub_enabled: true
+    enable_gaussian: true
+  loss:
+    lambda_video: 0.0
+    lambda_action: 1.0
+
+wandb:
+  group: robofactory-multirobot-videogen-hub-gaussian-2x2x2
+  name: fastwam-robofactory-vg0-hub1-gau1-s42

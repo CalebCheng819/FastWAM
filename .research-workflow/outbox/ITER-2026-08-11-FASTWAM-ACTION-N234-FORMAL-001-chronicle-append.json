@@ -1,0 +1,53 @@
+{
+  "children": [
+    {
+      "object": "block",
+      "type": "heading_2",
+      "heading_2": {
+        "rich_text": [{"type": "text", "text": {"content": "ITER-2026-08-11-FASTWAM-ACTION-N234-FORMAL-001 — Action-only N=2/3/4 independent 1x8 formal training"}}]
+      }
+    },
+    {
+      "object": "block",
+      "type": "paragraph",
+      "paragraph": {
+        "rich_text": [{"type": "text", "text": {"content": "Planned at 2026-08-11T13:00:34+08:00. Status: In Progress / Prelaunch. User authorized consolidating and pushing the current action-only native variable-N implementation, validating it, running one 1 Worker x 8 GPU recovery Gate2, then launching independent N=2, N=3, and N=4 formal 1000-step jobs if and only if Gate2 reaches structured terminal PASS."}}]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [{"type": "text", "text": {"content": "Matrix: N=2 PlaceFood-rf; N=3 pooled ThreeRobotsPlaceShoes-rf plus ThreeRobotsStackCube-rf; N=4 FourRobotsStackCube-rf; seed and split_seed 42; VideoGen=0, HubToken=1, Gaussian=1; no fixed-capacity masked agent set."}}]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [{"type": "text", "text": {"content": "Initial Git state: exp/multi-robot-gaudp at 2823fd94f18c42d19646b350c13695e23afb60f3 with relevant pre-existing dirty changes preserved for review. A dedicated branch and clean pushed commit are required before launch."}}]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [{"type": "text", "text": {"content": "PAI target: workspace 270969, resource quotaksvqq2oh2pg, one Worker x 8 GPU per job. Current workspace has no active jobs; actual scheduling remains subject to live PAI capacity."}}]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [{"type": "text", "text": {"content": "Provenance policy: use Git commit, unique OSS source/output paths, timestamps, file counts/sizes, experiment/run/job IDs. Do not add hash or hash-chain gates."}}]
+      }
+    },
+    {
+      "object": "block",
+      "type": "paragraph",
+      "paragraph": {
+        "rich_text": [{"type": "text", "text": {"content": "Acceptance sequence: code/config tests -> clean push -> unique OSS source -> Notion Planned pages -> Gate2 structured PASS -> three formal submissions -> durable checkpoints and terminal task/count metrics. Running is infrastructure evidence only."}}]
+      }
+    }
+  ]
+}

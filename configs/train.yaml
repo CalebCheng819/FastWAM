@@ -1,0 +1,97 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: null
+  - model: null
+  - task: null
+
+
+output_dir: ./runs/train/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+# dataloading
+batch_size: 2
+num_workers: 4
+
+# scheduler
+lr_scheduler_type: "cosine"
+learning_rate: 1.0e-4
+num_epochs: 1
+max_steps: null
+log_every: 10
+save_every: 100
+eval_every: 50
+eval_num_inference_steps: 10
+# Multi-robot configs use a deterministic held-out loss subset instead of the
+# single-robot video rollout evaluator. Zero keeps that evaluator disabled
+# unless an explicit scale/task profile opts in.
+offline_eval_num_samples: 0
+
+# training
+gradient_accumulation_steps: 1
+mixed_precision: "bf16" # one of: [no, fp16, bf16]
+seed: 42
+max_grad_norm: 1.0
+weight_decay: 0.0
+resume: null
+# A self-contained native full checkpoint may be used as a weight-only warm
+# start when its architecture matches but its training treatment differs (for
+# example joint VideoGen -> action-only policy fine-tuning). This is mutually
+# exclusive with `resume` and never restores optimizer/scheduler/step state.
+init_weights: null
+# Full-state directories without the v1 scientific run contract are refused
+# before Accelerator mutates model/optimizer state.  Set true only for an
+# explicitly audited legacy recovery; formal runs keep this false.
+allow_legacy_resume: false
+trainable_scope: dit
+# `auto` preserves the historical behavior: full weights for a fully trainable
+# DiT and a base-dependent sparse delta for a staged action/hub-only treatment.
+# Formal 32-GPU runs override this to `full`, making every reported weights
+# artifact self-contained even for action-only ablations.
+checkpoint_state_kind: auto
+save_training_state: true
+# When enabled, rank zero hashes the complete post-barrier Accelerate/DeepSpeed
+# state directory into an immutable JSON manifest (path, bytes, SHA-256).
+seal_training_state: false
+save_final_checkpoint: true
+# Formal 32-GPU training publishes a self-contained run-level terminal seal
+# only after the final checkpoint has been strongly read back. Diagnostic and
+# gate phases opt in explicitly so an ordinary local run cannot claim formal
+# completion.
+seal_training_run: false
+# Explicit versioned contract for a formal run. Null preserves the historical
+# 32-GPU/N=4 terminal path and ordinary diagnostic training. The N=2 formal
+# launcher sets action_only_n2_1x8_v1 and supplies a canonical task-scope
+# receipt below; the Trainer then validates reservation/pins before training.
+training_terminal_contract: null
+# Required with action_only_n2_1x8_v1: paid_gate_1step or formal_1k.
+training_run_profile: null
+training_task_scope_receipt: null
+# This flag is owned by the committed N=4 gate scale. It is never a user-side
+# Hydra override surface in the formal launcher.
+formal_n4_fullmodel_gate: false
+# Rehash full weight files while building a formal terminal seal. State shards
+# are already hashed by the adjacent state-tree manifest and are fully re-read
+# by the fresh-process gate/resume validator.
+terminal_rehash_weights: true
+# Operational watchdogs.  Formal multi-node runs override both with a window
+# sized for large checkpoint publication; they are intentionally excluded from
+# the scientific full-state resume contract.
+process_group_timeout_seconds: 1800
+checkpoint_io_timeout_seconds: 1800
+
+# wandb
+wandb:
+  enabled: false
+  workspace: null
+  project: fast-wam
+  name: train
+  group: null
+  mode: online
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

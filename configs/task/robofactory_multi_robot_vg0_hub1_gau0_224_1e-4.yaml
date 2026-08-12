@@ -1,0 +1,28 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_ablation_224_1e-4
+  - _self_
+
+trainable_scope: action
+
+data:
+  train:
+    load_future_video: false
+    gaussian_cache_dir: null
+  val:
+    load_future_video: false
+    gaussian_cache_dir: null
+
+model:
+  training_mode: action_only_cache
+  action_dit_config:
+    hub_enabled: true
+    enable_gaussian: false
+  loss:
+    lambda_video: 0.0
+    lambda_action: 1.0
+
+wandb:
+  group: robofactory-multirobot-videogen-hub-gaussian-2x2x2
+  name: fastwam-robofactory-vg0-hub1-gau0-s42

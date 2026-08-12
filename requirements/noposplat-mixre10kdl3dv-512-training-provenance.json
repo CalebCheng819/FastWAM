@@ -1,0 +1,32 @@
+{
+  "checkpoint": {
+    "filename": "mixRe10kDl3dv_512x512.ckpt",
+    "huggingface_repository": "botaoye/NoPoSplat",
+    "huggingface_revision": "664ba9156f10a6203f0a0fad2f02c069c6894f4f",
+    "sha256": "4a35bc8c341b20859c0621f5238349b55b19a34a5bbeb3daec8d1f4c4603cd08"
+  },
+  "declaration_source": {
+    "repository": "https://github.com/cvg/NoPoSplat",
+    "repository_commit": "a097a78c5bdd0486493f74abb1165614d86ae952",
+    "repository_readme": "https://github.com/cvg/NoPoSplat/blob/a097a78c5bdd0486493f74abb1165614d86ae952/README.md",
+    "statement": "The official checkpoint table declares mixRe10kDl3dv_512x512.ckpt as trained on re10k and dl3dv with two input views."
+  },
+  "declared_training_datasets": [
+    {
+      "kind": "real_world_video",
+      "name": "RealEstate10K"
+    },
+    {
+      "kind": "real_world_multiview_video",
+      "name": "DL3DV-10K"
+    }
+  ],
+  "overlap_assessment": {
+    "declared_dataset_identity_overlap": false,
+    "file_level_overlap_audit": "unavailable_teacher_training_file_inventory",
+    "interpretation": "External pretrained representation; RoboFactory train and validation images are transformed without updating the teacher. This is not target-data teacher training, but an exact teacher-file intersection cannot be proven from the released checkpoint metadata.",
+    "target_dataset": "RoboFactory multi-robot synthetic HDF5 corpus"
+  },
+  "schema_name": "fastwam_external_teacher_training_provenance",
+  "schema_version": 1
+}

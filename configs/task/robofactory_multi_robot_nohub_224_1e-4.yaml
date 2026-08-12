@@ -1,0 +1,9 @@
+# @package _global_
+
+# Backward-compatible alias for the explicit VG0-HUB0 arm.
+defaults:
+  - robofactory_multi_robot_vg0_hub0_224_1e-4
+  - _self_
+
+wandb:
+  name: fastwam-robofactory-multirobot-nohub-s42
