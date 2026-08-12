@@ -149,6 +149,33 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
         self.assertEqual(cells["step0500_h5_policy"].exec_horizon, 5)
         self.assertEqual(cells["step0500_h1_policy"].checkpoint_step, 500)
 
+    def test_checkpoint_panel_selects_only_requested_h5_policy_cells(self) -> None:
+        cells = ablations._selected_cells((250, 500, 750, 1000, 2500, 5000))
+
+        self.assertEqual(
+            [cell.name for cell in cells],
+            [
+                "step0250_h5_policy",
+                "step0500_h5_policy",
+                "step0750_h5_policy",
+                "step1000_h5_policy",
+                "step2500_h5_policy",
+                "step5000_h5_policy",
+            ],
+        )
+        self.assertEqual(
+            [cell.checkpoint_step for cell in cells],
+            [250, 500, 750, 1000, 2500, 5000],
+        )
+        self.assertTrue(all(cell.exec_horizon == 5 for cell in cells))
+        self.assertTrue(all(cell.oracle_intervention == "none" for cell in cells))
+
+    def test_checkpoint_panel_rejects_duplicates_and_unknown_steps(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be unique"):
+            ablations._selected_cells((250, 250))
+        with self.assertRaisesRegex(ValueError, "Unsupported checkpoint"):
+            ablations._selected_cells((125,))
+
     def test_checkpoint_availability_never_substitutes_missing_steps(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

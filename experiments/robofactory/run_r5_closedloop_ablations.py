@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v4"
+SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v5"
 REQUESTED_CHECKPOINT_STEPS = (250, 500, 750, 1000, 2500, 5000)
 REQUIRED_NVIDIA_DRIVER_LIBRARIES = (
     "libEGL_nvidia.so.*",
@@ -50,6 +50,26 @@ CELLS = (
     Cell("step0500_h5_policy", 500, 5, "none"),
     Cell("step0500_h1_policy", 500, 1, "none"),
 )
+
+
+def _selected_cells(checkpoint_steps: Sequence[int] | None) -> tuple[Cell, ...]:
+    """Return the original ablation matrix or a fixed h5 checkpoint panel."""
+    if checkpoint_steps is None:
+        return CELLS
+    steps = tuple(checkpoint_steps)
+    if not steps:
+        raise ValueError("Checkpoint panel requires at least one step")
+    if len(set(steps)) != len(steps):
+        raise ValueError(f"Checkpoint panel steps must be unique: {steps}")
+    unsupported = sorted(set(steps) - set(REQUESTED_CHECKPOINT_STEPS))
+    if unsupported:
+        raise ValueError(
+            f"Unsupported checkpoint panel steps {unsupported}; "
+            f"expected a subset of {REQUESTED_CHECKPOINT_STEPS}"
+        )
+    return tuple(
+        Cell(f"step{step:04d}_h5_policy", step, 5, "none") for step in steps
+    )
 
 
 def _utc_now() -> str:
@@ -200,8 +220,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     panel = _read_json(args.panel)
     seeds = _panel_rows(panel)
     availability = checkpoint_availability(args.checkpoint_dir)
+    cells = _selected_cells(getattr(args, "checkpoint_steps", None))
     available_steps = {item["step"] for item in availability if item["available"]}
-    needed = {cell.checkpoint_step for cell in CELLS}
+    needed = {cell.checkpoint_step for cell in cells}
     missing = sorted(needed - available_steps)
     if missing:
         raise FileNotFoundError(f"Runnable checkpoint steps are missing: {missing}")
@@ -248,7 +269,12 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "max_steps": 300,
         "action_horizon": 32,
         "num_inference_steps": 20,
-        "cells": [asdict(cell) for cell in CELLS],
+        "panel_kind": (
+            "checkpoint_progression"
+            if getattr(args, "checkpoint_steps", None) is not None
+            else "closed_loop_ablation"
+        ),
+        "cells": [asdict(cell) for cell in cells],
         "seeds": seeds,
         "checkpoint_availability": availability,
         "metrics": [
@@ -615,6 +641,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--robofactory-root", type=_path, required=True)
     parser.add_argument("--gaussian-cache", type=_path, required=True)
     parser.add_argument("--checkpoint-dir", type=_path, required=True)
+    parser.add_argument(
+        "--checkpoint-steps",
+        type=int,
+        nargs="+",
+        help=(
+            "Evaluate only these frozen checkpoints with exec_horizon=5 and no "
+            "oracle; omitted means the original replanning/oracle ablation matrix"
+        ),
+    )
     parser.add_argument("--stats", type=_path, required=True)
     parser.add_argument("--context-file", type=_path, required=True)
     parser.add_argument("--model-cache-root", type=_path, required=True)
