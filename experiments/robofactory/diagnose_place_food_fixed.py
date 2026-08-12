@@ -130,6 +130,111 @@ def _flat_action_to_dict(
     }
 
 
+def _dict_action_to_flat(
+    action: Mapping[str, np.ndarray],
+    agent_names: Sequence[str],
+) -> np.ndarray:
+    missing = [name for name in agent_names if name not in action]
+    extra = sorted(set(action).difference(agent_names))
+    if missing or extra:
+        raise ValueError(f"Action agent mismatch: missing={missing} extra={extra}")
+    arrays = [np.asarray(action[name], dtype=np.float32).reshape(-1) for name in agent_names]
+    bad = {
+        name: list(array.shape)
+        for name, array in zip(agent_names, arrays)
+        if array.shape != (ACTION_DIM,)
+    }
+    if bad:
+        raise ValueError(f"Per-agent actions must have shape ({ACTION_DIM},): {bad}")
+    flat = np.ascontiguousarray(np.concatenate(arrays), dtype=np.float32)
+    if not np.isfinite(flat).all():
+        raise FloatingPointError("Executed action contains non-finite values")
+    return flat
+
+
+def apply_oracle_intervention(
+    policy_action: Mapping[str, np.ndarray],
+    expert_action: Mapping[str, np.ndarray],
+    agent_names: Sequence[str],
+    intervention: str,
+) -> dict[str, np.ndarray]:
+    """Replace exactly one requested action component with the expert action."""
+
+    if len(agent_names) != 2:
+        raise ValueError(f"PlaceFood oracle requires two agents, got {agent_names}")
+    policy_flat = _dict_action_to_flat(policy_action, agent_names)
+    expert_flat = _dict_action_to_flat(expert_action, agent_names)
+    executed = policy_flat.copy().reshape(len(agent_names), ACTION_DIM)
+    expert = expert_flat.reshape(len(agent_names), ACTION_DIM)
+    if intervention == "none":
+        pass
+    elif intervention == "robot0_pose":
+        executed[0, ARM_DIMS] = expert[0, ARM_DIMS]
+    elif intervention == "robot0_gripper":
+        executed[0, GRIPPER_DIM] = expert[0, GRIPPER_DIM]
+    elif intervention == "robot1_action":
+        executed[1, :] = expert[1, :]
+    else:
+        raise ValueError(f"Unsupported oracle intervention: {intervention!r}")
+    return _flat_action_to_dict(executed.reshape(-1), agent_names)
+
+
+def select_executed_action(
+    policy_action: Mapping[str, np.ndarray],
+    expert_action: Mapping[str, np.ndarray] | None,
+    agent_names: Sequence[str],
+    intervention: str,
+) -> tuple[dict[str, np.ndarray], bool]:
+    """Return the executed action and whether the requested oracle was applied.
+
+    Held-out expert actions are finite temporal traces.  Once a rollout outlives
+    that trace, an oracle cell must fail over explicitly to the policy instead
+    of indexing stale data or silently repeating the final expert action.
+    """
+
+    if intervention == "none":
+        return apply_oracle_intervention(
+            policy_action, policy_action, agent_names, intervention
+        ), False
+    if expert_action is None:
+        if intervention not in {
+            "robot0_pose",
+            "robot0_gripper",
+            "robot1_action",
+        }:
+            raise ValueError(f"Unsupported oracle intervention: {intervention!r}")
+        return apply_oracle_intervention(
+            policy_action, policy_action, agent_names, "none"
+        ), False
+    return (
+        apply_oracle_intervention(
+            policy_action, expert_action, agent_names, intervention
+        ),
+        True,
+    )
+
+
+def rollout_grasp_metrics(snapshots: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    if not snapshots:
+        raise ValueError("At least one physical snapshot is required")
+    heights = np.asarray([float(item["meat_height"]) for item in snapshots], dtype=np.float64)
+    grasped = np.asarray(
+        [bool(item["robot0_grasping_meat"]) for item in snapshots], dtype=bool
+    )
+    if not np.isfinite(heights).all():
+        raise FloatingPointError("Meat heights contain non-finite values")
+    initial_height = float(heights[0])
+    max_height = float(heights.max())
+    return {
+        "robot0_grasp_ever": bool(grasped.any()),
+        "robot0_grasp_steps": int(grasped.sum()),
+        "robot0_grasp_fraction": float(grasped.mean()),
+        "meat_initial_height_m": initial_height,
+        "meat_max_height_m": max_height,
+        "meat_max_lift_m": max(0.0, max_height - initial_height),
+    }
+
+
 def _build_environment(robofactory_root: Path, task_name: str):
     if str(robofactory_root) not in sys.path:
         sys.path.insert(0, str(robofactory_root))
@@ -591,8 +696,10 @@ def validate_formal_rollout_contract(
     max_steps: int,
     initial_state: str,
     exec_horizon: int,
+    oracle_intervention: str,
     initial_state_explicit: bool,
     exec_horizon_explicit: bool,
+    oracle_intervention_explicit: bool,
 ) -> dict[str, Any]:
     """Fail closed unless one formal rollout cell is fully specified."""
 
@@ -602,10 +709,17 @@ def validate_formal_rollout_contract(
         raise ValueError("Formal rollout requires explicit --initial-state raw|clean")
     if not exec_horizon_explicit or exec_horizon not in {1, 5}:
         raise ValueError("Formal rollout requires explicit --exec-horizon 1|5")
+    allowed_oracles = {"none", "robot0_pose", "robot0_gripper", "robot1_action"}
+    if not oracle_intervention_explicit or oracle_intervention not in allowed_oracles:
+        raise ValueError(
+            "Formal rollout requires explicit --oracle-intervention "
+            "none|robot0_pose|robot0_gripper|robot1_action"
+        )
     return {
         "max_steps": max_steps,
         "initial_state": initial_state,
         "exec_horizon": exec_horizon,
+        "oracle_intervention": oracle_intervention,
         "explicit_cell": True,
     }
 
@@ -693,6 +807,10 @@ def physical_snapshot(
                 None if last_action is None else float(last_action[name][GRIPPER_DIM])
             ),
         }
+    robot0_grasping_meat = _as_bool(
+        unwrapped.agent.agents[0].is_grasping(unwrapped.meat),
+        label="robot0.is_grasping(meat)",
+    )
     base_z = float(_vector(unwrapped.agent.agents[0].robot.pose.p)[2])
     meat_pot_delta = meat - pot
     return {
@@ -702,6 +820,7 @@ def physical_snapshot(
         "meat_pot_xy_distance": float(np.linalg.norm(meat_pot_delta[:2])),
         "meat_pot_xyz_distance": float(np.linalg.norm(meat_pot_delta)),
         "meat_height": float(meat[2]),
+        "robot0_grasping_meat": robot0_grasping_meat,
         "pot_lid_qpos": lid_qpos,
         "pot_lid_qvel": lid_qvel,
         "robot0_base_z": base_z,
@@ -1128,6 +1247,7 @@ def run_rollout(
     args: argparse.Namespace,
     episode: Mapping[str, Any],
     states: Sequence[Mapping[str, Any]],
+    actions: Mapping[str, np.ndarray],
     policy: FastWAMMultiRobotPolicy,
     output_dir: Path,
 ) -> dict[str, Any]:
@@ -1168,6 +1288,7 @@ def run_rollout(
         # or zero bound violations would otherwise leave no JSONL records.
         (output_dir / "policy_queries.jsonl").touch(exist_ok=False)
         (output_dir / "action_bound_violations.jsonl").touch(exist_ok=False)
+        (output_dir / "executed_actions.jsonl").touch(exist_ok=False)
         policy.start_episode(args.policy_seed)
         # Closed loop is live-only.  No persisted expert observation is ever
         # passed to the policy in this function.
@@ -1200,6 +1321,8 @@ def run_rollout(
         _append_jsonl(output_dir / "physical_trace.jsonl", first)
         steps = 0
         queries = 0
+        oracle_requested_steps = 0
+        oracle_applied_steps = 0
         success = bool(first["task_success_from_geometry"])
         termination_reason = "initial_success" if success else "max_steps"
         max_steps = min(int(args.max_steps), int(episode["max_episode_steps"]))
@@ -1222,7 +1345,44 @@ def run_rollout(
             executed = 0
             stop = False
             for chunk_offset in range(execute):
-                action = _flat_action_to_dict(action_chunk[chunk_offset], agent_names)
+                policy_action = _flat_action_to_dict(
+                    action_chunk[chunk_offset], agent_names
+                )
+                expert_available = all(
+                    steps < len(np.asarray(actions[name])) for name in agent_names
+                )
+                expert_action = (
+                    {
+                        name: np.asarray(actions[name][steps], dtype=np.float32)
+                        for name in agent_names
+                    }
+                    if expert_available
+                    else None
+                )
+                if args.oracle_intervention != "none":
+                    oracle_requested_steps += 1
+                action, oracle_applied = select_executed_action(
+                    policy_action,
+                    expert_action,
+                    agent_names,
+                    args.oracle_intervention,
+                )
+                if oracle_applied:
+                    oracle_applied_steps += 1
+                executed_flat = _dict_action_to_flat(action, agent_names)
+                _append_jsonl(
+                    output_dir / "executed_actions.jsonl",
+                    {
+                        "simulator_step": steps,
+                        "query_index": int(trace["query_index"]),
+                        "chunk_offset": chunk_offset,
+                        "oracle_intervention": args.oracle_intervention,
+                        "expert_action_available": expert_available,
+                        "policy_action": policy_action,
+                        "expert_action": expert_action,
+                        "executed_action": action,
+                    },
+                )
                 current = action_bound_records(
                     action,
                     env.action_space,
@@ -1234,7 +1394,7 @@ def run_rollout(
                 for record in current:
                     _append_jsonl(output_dir / "action_bound_violations.jsonl", record)
                 _, _, terminated, truncated, info = env.step(action)
-                policy.record_action(action_chunk[chunk_offset])
+                policy.record_action(executed_flat)
                 steps += 1
                 executed += 1
                 record_frame()
@@ -1279,6 +1439,7 @@ def run_rollout(
         }
         buckets = bucket_bound_violations(violations)
         _atomic_json(output_dir / "action_bound_buckets.json", buckets)
+        grasp_metrics = rollout_grasp_metrics(snapshots)
         result = {
             "status": "completed",
             "success": success,
@@ -1288,8 +1449,21 @@ def run_rollout(
             "termination_reason": termination_reason,
             "initial_state": args.initial_state,
             "exec_horizon": int(args.exec_horizon),
+            "oracle_intervention": args.oracle_intervention,
+            "oracle_requested_steps": oracle_requested_steps,
+            "oracle_applied_steps": oracle_applied_steps,
+            "oracle_fallback_to_policy_steps": (
+                oracle_requested_steps - oracle_applied_steps
+            ),
+            "oracle_coverage_fraction": (
+                float(oracle_applied_steps / oracle_requested_steps)
+                if oracle_requested_steps
+                else None
+            ),
             "observation_source": "live_rerender_only",
             "persisted_expert_rgb_used_for_policy": False,
+            "persisted_expert_actions_used": oracle_applied_steps > 0,
+            **grasp_metrics,
             "initial_state_audit": initial_audit,
             "bound_violations": buckets,
             "video_integrity": video_integrity,
@@ -1298,6 +1472,7 @@ def run_rollout(
                 "multiview_mp4": "rollout_multiview.mp4",
                 "global_mp4": "rollout_global.mp4",
                 "queries": "policy_queries.jsonl",
+                "executed_actions": "executed_actions.jsonl",
                 "physical_trace": "physical_trace.jsonl",
                 "violations": "action_bound_violations.jsonl",
                 "initial_state_audit": "initial_state_audit.json",
@@ -1625,6 +1800,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--teacher-start-timestep", type=int, default=5)
     parser.add_argument("--initial-state", choices=("raw", "clean"), default=None)
     parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=None)
+    parser.add_argument(
+        "--oracle-intervention",
+        choices=("none", "robot0_pose", "robot0_gripper", "robot1_action"),
+        default=None,
+        help=(
+            "Replace exactly one executed action component with the held-out expert "
+            "action at the same simulator step."
+        ),
+    )
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
         "--integrity-mode",
@@ -1654,10 +1838,13 @@ def main() -> None:
     args = _parser().parse_args()
     args.initial_state_explicit = args.initial_state is not None
     args.exec_horizon_explicit = args.exec_horizon is not None
+    args.oracle_intervention_explicit = args.oracle_intervention is not None
     if args.initial_state is None:
         args.initial_state = "clean"
     if args.exec_horizon is None:
         args.exec_horizon = 5
+    if args.oracle_intervention is None:
+        args.oracle_intervention = "none"
     if args.task != "PlaceFood-rf":
         raise ValueError("This diagnostic intentionally supports PlaceFood-rf only")
     if args.integrity_mode == "metadata_no_hash":
@@ -1707,8 +1894,12 @@ def main() -> None:
                 max_steps=int(args.max_steps),
                 initial_state=str(args.initial_state),
                 exec_horizon=int(args.exec_horizon),
+                oracle_intervention=str(args.oracle_intervention),
                 initial_state_explicit=bool(args.initial_state_explicit),
                 exec_horizon_explicit=bool(args.exec_horizon_explicit),
+                oracle_intervention_explicit=bool(
+                    args.oracle_intervention_explicit
+                ),
             )
         if args.mode in ("teacher-forcing", "all"):
             if int(args.teacher_start_timestep) != 5:
@@ -1721,6 +1912,8 @@ def main() -> None:
     args.dataset_root = args.dataset_root.expanduser().resolve(strict=True)
     args.robofactory_root = args.robofactory_root.expanduser().resolve(strict=True)
     args.gaussian_cache = args.gaussian_cache.expanduser().resolve(strict=True)
+    args.checkpoint = args.checkpoint.expanduser().resolve(strict=True)
+    checkpoint_stat = args.checkpoint.stat()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     started_at = _utc_now()
     started = time.monotonic()
@@ -1741,6 +1934,12 @@ def main() -> None:
         "argv": sys.argv,
         "formal_contract_requested": bool(args.formal_contract),
         "formal_rollout_contract": formal_rollout_contract,
+        "policy_request": {
+            "checkpoint_path": str(args.checkpoint),
+            "checkpoint_bytes": checkpoint_stat.st_size,
+            "checkpoint_mtime_ns": checkpoint_stat.st_mtime_ns,
+            "policy_seed": int(args.policy_seed),
+        },
     }
     _atomic_json(args.output_dir / "run_manifest.json", manifest)
     try:
@@ -1802,6 +2001,7 @@ def main() -> None:
         manifest["rollout_cell"] = {
             "initial_state": args.initial_state,
             "exec_horizon": int(args.exec_horizon),
+            "oracle_intervention": args.oracle_intervention,
         }
         manifest["teacher_forcing"] = {
             "sources": ["stored", "live"],
@@ -1817,6 +2017,7 @@ def main() -> None:
                 args=args,
                 episode=episode,
                 states=states,
+                actions=actions,
                 policy=policy,
                 output_dir=args.output_dir / "rollout",
             )

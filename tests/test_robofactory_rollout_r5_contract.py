@@ -9,12 +9,89 @@ from pathlib import Path
 from unittest import mock
 
 import torch
+import numpy as np
 
 from experiments.robofactory import diagnose_place_food_fixed as diagnostic
 from experiments.robofactory import fastwam_multi_robot_policy as policy
 
 
 class R5RolloutContractTests(unittest.TestCase):
+    def test_oracle_interventions_replace_exact_requested_components(self) -> None:
+        names = ("panda-0", "panda-1")
+        policy_action = {
+            "panda-0": np.arange(8, dtype=np.float32),
+            "panda-1": np.arange(8, 16, dtype=np.float32),
+        }
+        expert_action = {
+            "panda-0": np.arange(100, 108, dtype=np.float32),
+            "panda-1": np.arange(108, 116, dtype=np.float32),
+        }
+
+        pose = diagnostic.apply_oracle_intervention(
+            policy_action, expert_action, names, "robot0_pose"
+        )
+        np.testing.assert_array_equal(pose["panda-0"][:7], expert_action["panda-0"][:7])
+        self.assertEqual(pose["panda-0"][7], policy_action["panda-0"][7])
+        np.testing.assert_array_equal(pose["panda-1"], policy_action["panda-1"])
+
+        gripper = diagnostic.apply_oracle_intervention(
+            policy_action, expert_action, names, "robot0_gripper"
+        )
+        np.testing.assert_array_equal(gripper["panda-0"][:7], policy_action["panda-0"][:7])
+        self.assertEqual(gripper["panda-0"][7], expert_action["panda-0"][7])
+        np.testing.assert_array_equal(gripper["panda-1"], policy_action["panda-1"])
+
+        robot1 = diagnostic.apply_oracle_intervention(
+            policy_action, expert_action, names, "robot1_action"
+        )
+        np.testing.assert_array_equal(robot1["panda-0"], policy_action["panda-0"])
+        np.testing.assert_array_equal(robot1["panda-1"], expert_action["panda-1"])
+        np.testing.assert_array_equal(policy_action["panda-0"], np.arange(8))
+
+    def test_rollout_grasp_metrics_use_true_grasp_and_meat_lift(self) -> None:
+        metrics = diagnostic.rollout_grasp_metrics(
+            [
+                {"meat_height": 0.12, "robot0_grasping_meat": False},
+                {"meat_height": 0.14, "robot0_grasping_meat": True},
+                {"meat_height": 0.13, "robot0_grasping_meat": False},
+            ]
+        )
+
+        self.assertTrue(metrics["robot0_grasp_ever"])
+        self.assertEqual(metrics["robot0_grasp_steps"], 1)
+        self.assertAlmostEqual(metrics["robot0_grasp_fraction"], 1.0 / 3.0)
+        self.assertAlmostEqual(metrics["meat_max_lift_m"], 0.02)
+
+    def test_oracle_temporal_trace_exhaustion_falls_back_to_policy(self) -> None:
+        names = ("panda-0", "panda-1")
+        policy_action = {
+            "panda-0": np.arange(8, dtype=np.float32),
+            "panda-1": np.arange(8, 16, dtype=np.float32),
+        }
+
+        executed, applied = diagnostic.select_executed_action(
+            policy_action,
+            None,
+            names,
+            "robot0_gripper",
+        )
+
+        self.assertFalse(applied)
+        np.testing.assert_array_equal(executed["panda-0"], policy_action["panda-0"])
+        np.testing.assert_array_equal(executed["panda-1"], policy_action["panda-1"])
+
+    def test_formal_rollout_requires_explicit_oracle_cell(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit --oracle-intervention"):
+            diagnostic.validate_formal_rollout_contract(
+                max_steps=300,
+                initial_state="clean",
+                exec_horizon=1,
+                oracle_intervention="none",
+                initial_state_explicit=True,
+                exec_horizon_explicit=True,
+                oracle_intervention_explicit=False,
+            )
+
     def test_video_is_staged_locally_and_validated_after_publication(self) -> None:
         import imageio.v2 as imageio
         import numpy as np
