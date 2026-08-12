@@ -29,17 +29,6 @@ import numpy as np
 import torch
 
 try:
-    from .eval_robofactory_multi_robot import (
-        ROBOFACTORY_COMMIT,
-        STEP5000_CHECKPOINT_SHA256,
-        TASK_CONFIGS,
-        _as_bool,
-        _build_environment,
-        _flat_action_to_dict,
-        _reset_environment,
-        _selected_episodes,
-        _source_path,
-    )
     from .fastwam_multi_robot_policy import (
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
@@ -51,17 +40,6 @@ try:
         prepare_observation,
     )
 except ImportError:
-    from eval_robofactory_multi_robot import (  # type: ignore[no-redef]
-        ROBOFACTORY_COMMIT,
-        STEP5000_CHECKPOINT_SHA256,
-        TASK_CONFIGS,
-        _as_bool,
-        _build_environment,
-        _flat_action_to_dict,
-        _reset_environment,
-        _selected_episodes,
-        _source_path,
-    )
     from fastwam_multi_robot_policy import (  # type: ignore[no-redef]
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
@@ -72,6 +50,116 @@ except ImportError:
         encode_compact_agent_gaussian,
         prepare_observation,
     )
+
+
+ROBOFACTORY_COMMIT = "2d34fb38c80cb06550a5dbf99abac2c89f4336ed"
+TASK_CONFIGS = {
+    "PlaceFood-rf": "configs/table/place_food.yaml",
+    "PlaceCubeInCup-rf": "configs/table/place_cube_in_cup.yaml",
+    "StrikeCubeHard-rf": "configs/table/strike_cube_hard.yaml",
+    "ThreeRobotsPlaceShoes-rf": "configs/table/three_robots_place_shoes.yaml",
+    "ThreeRobotsStackCube-rf": "configs/table/three_robots_stack_cube.yaml",
+    "FourRobotsStackCube-rf": "configs/table/four_robots_stack_cube.yaml",
+}
+
+
+def _selected_episodes(
+    panel: Mapping[str, Any],
+    task_name: str,
+    episode_start: int,
+    num_episodes: int,
+) -> list[dict[str, Any]]:
+    if task_name not in TASK_CONFIGS:
+        raise KeyError(
+            f"Unsupported task {task_name!r}; expected one of {sorted(TASK_CONFIGS)}"
+        )
+    records = [
+        dict(record)
+        for record in panel["episodes"]
+        if record.get("task_name") == task_name
+    ]
+    records.sort(key=lambda record: int(record["task_index"]))
+    if episode_start < 0 or num_episodes < 1:
+        raise ValueError("episode_start must be >= 0 and num_episodes must be positive")
+    selected = records[episode_start : episode_start + num_episodes]
+    if len(selected) != num_episodes:
+        raise ValueError(
+            f"Panel has {len(records)} episodes for {task_name}; requested "
+            f"[{episode_start}, {episode_start + num_episodes})"
+        )
+    return selected
+
+
+def _source_path(dataset_root: Path, relative: str) -> Path:
+    source = (dataset_root / relative).resolve(strict=True)
+    try:
+        source.relative_to(dataset_root)
+    except ValueError as error:
+        raise ValueError(f"Source path escapes dataset root: {relative!r}") from error
+    if not source.is_file():
+        raise ValueError(f"Source H5 must be a regular file: {source}")
+    return source
+
+
+def _as_bool(value: Any, *, label: str) -> bool:
+    tensor = torch.as_tensor(value).detach().cpu().reshape(-1)
+    if tensor.numel() != 1:
+        raise ValueError(
+            f"{label} must contain one value, got shape {tuple(tensor.shape)}"
+        )
+    return bool(tensor.item())
+
+
+def _flat_action_to_dict(
+    action: np.ndarray,
+    agent_names: Sequence[str],
+) -> dict[str, np.ndarray]:
+    flat = np.asarray(action, dtype=np.float32).reshape(-1)
+    expected = len(agent_names) * ACTION_DIM
+    if flat.shape != (expected,):
+        raise ValueError(f"Flat action must have shape ({expected},), got {flat.shape}")
+    if not np.isfinite(flat).all():
+        raise FloatingPointError("Policy action contains non-finite values")
+    return {
+        name: np.ascontiguousarray(
+            flat[index * ACTION_DIM : (index + 1) * ACTION_DIM]
+        )
+        for index, name in enumerate(agent_names)
+    }
+
+
+def _build_environment(robofactory_root: Path, task_name: str):
+    if str(robofactory_root) not in sys.path:
+        sys.path.insert(0, str(robofactory_root))
+    os.chdir(robofactory_root)
+    __import__("tasks")
+    import gymnasium as gym
+
+    config = TASK_CONFIGS[task_name]
+    if not (robofactory_root / config).is_file():
+        raise FileNotFoundError(f"Task config is missing: {robofactory_root / config}")
+    return gym.make(
+        task_name,
+        config=config,
+        obs_mode="rgb",
+        reward_mode="dense",
+        control_mode="pd_joint_pos",
+        render_mode="sensors",
+        sensor_configs={"shader_pack": "default"},
+        human_render_camera_configs={"shader_pack": "default"},
+        viewer_camera_configs={"shader_pack": "default"},
+        num_envs=1,
+        sim_backend="auto",
+        render_backend="gpu",
+        enable_shadow=True,
+        parallel_in_single_scene=False,
+    )
+
+
+def _reset_environment(env: Any, episode: Mapping[str, Any]) -> None:
+    reset_kwargs = dict(episode["reset_kwargs"])
+    reset_seed = reset_kwargs.pop("seed", episode["episode_seed"])
+    env.reset(seed=reset_seed, **reset_kwargs)
 
 
 SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v2"

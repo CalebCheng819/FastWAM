@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,23 @@ from experiments.robofactory import fastwam_multi_robot_policy as policy
 
 
 class R5RolloutContractTests(unittest.TestCase):
+    def test_diagnostic_cli_imports_from_a_clean_script_entrypoint(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "experiments/robofactory/diagnose_place_food_fixed.py"),
+                "--help",
+            ],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("--formal-contract", result.stdout)
+
     def test_r5_action_only_model_contract(self) -> None:
         config = policy.compose_r5_action_model_config()
 
