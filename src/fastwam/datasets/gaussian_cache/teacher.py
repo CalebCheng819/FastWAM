@@ -1,8 +1,8 @@
 """Optional external teacher providers for canonical Gaussian extraction.
 
 No Policy-Lightning/NoPoSplat source is vendored here.  The provider imports an
-explicit external checkout only after verifying its exact Git commit and a
-caller-supplied checkpoint SHA-256.
+explicit external checkout only after verifying its exact Git commit and an
+explicit checkpoint provenance contract.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 import torch
 
+from ...nohash_artifacts import regular_file_metadata
 from .manifest import sha256_file
 from .schema import correct_policy_lightning_legacy_covariance_order
 
@@ -57,7 +58,12 @@ def _contains_defaults(value: Any) -> bool:
     return False
 
 
-def _compose_encoder_config(repo_path: Path, config_path: Path):
+def _compose_encoder_config(
+    repo_path: Path,
+    config_path: Path,
+    *,
+    include_hashes: bool = True,
+):
     """Resolve Hydra defaults from the pinned checkout and return encoder config."""
 
     from hydra import compose, initialize_config_dir
@@ -103,7 +109,8 @@ def _compose_encoder_config(repo_path: Path, config_path: Path):
             "compose the pinned config before constructing the teacher"
         )
     OmegaConf.resolve(encoder_config)
-    composition["composed_encoder_sha256"] = _resolved_config_sha256(encoder_config)
+    if include_hashes:
+        composition["composed_encoder_sha256"] = _resolved_config_sha256(encoder_config)
     return encoder_config, composition
 
 
@@ -116,15 +123,28 @@ class ExternalPolicyLightningTeacher:
         repo_path: str | Path,
         expected_commit: str,
         checkpoint_path: str | Path,
-        checkpoint_sha256: str,
+        checkpoint_sha256: str | None = None,
         config_path: str | Path = "config/encoder/noposplat.yaml",
         device: str | torch.device = "cuda",
         require_clean_repo: bool = True,
+        integrity_mode: str = "sha256",
     ) -> None:
         self.repo_path = Path(repo_path).expanduser().resolve()
         self.expected_commit = str(expected_commit).lower()
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-        self.expected_checkpoint_sha256 = str(checkpoint_sha256).lower()
+        self.integrity_mode = str(integrity_mode)
+        if self.integrity_mode not in {"sha256", "metadata_no_hash"}:
+            raise ValueError(f"Unsupported external teacher integrity mode: {self.integrity_mode}")
+        if self.integrity_mode == "sha256":
+            if not checkpoint_sha256:
+                raise ValueError("checkpoint_sha256 is required in sha256 integrity mode")
+            self.expected_checkpoint_sha256 = str(checkpoint_sha256).lower()
+        else:
+            if checkpoint_sha256 is not None:
+                raise ValueError(
+                    "checkpoint_sha256 must be omitted in metadata_no_hash integrity mode"
+                )
+            self.expected_checkpoint_sha256 = None
         config = Path(config_path)
         self.config_path = (self.repo_path / config).resolve() if not config.is_absolute() else config
         self.device = torch.device(device)
@@ -142,12 +162,18 @@ class ExternalPolicyLightningTeacher:
             raise ValueError(f"External teacher checkout is dirty: {self.repo_path}")
         if not self.checkpoint_path.is_file():
             raise FileNotFoundError(f"External teacher checkpoint is missing: {self.checkpoint_path}")
-        actual_checkpoint_sha256 = sha256_file(self.checkpoint_path)
-        if actual_checkpoint_sha256 != self.expected_checkpoint_sha256:
-            raise ValueError(
-                "External teacher checkpoint SHA-256 mismatch: "
-                f"expected={self.expected_checkpoint_sha256} actual={actual_checkpoint_sha256}"
-            )
+        if self.integrity_mode == "sha256":
+            actual_checkpoint_sha256 = sha256_file(self.checkpoint_path)
+            if actual_checkpoint_sha256 != self.expected_checkpoint_sha256:
+                raise ValueError(
+                    "External teacher checkpoint SHA-256 mismatch: "
+                    f"expected={self.expected_checkpoint_sha256} actual={actual_checkpoint_sha256}"
+                )
+            self._checkpoint_sha256 = actual_checkpoint_sha256
+            self._checkpoint_metadata = None
+        else:
+            self._checkpoint_sha256 = None
+            self._checkpoint_metadata = regular_file_metadata(self.checkpoint_path)
         if not self.config_path.is_file():
             raise FileNotFoundError(f"External teacher config is missing: {self.config_path}")
         try:
@@ -159,8 +185,12 @@ class ExternalPolicyLightningTeacher:
             ) from exc
         self._actual_commit = actual_commit
         self._repository_clean = not repository_dirty
-        self._checkpoint_sha256 = actual_checkpoint_sha256
-        self._config_sha256 = sha256_file(self.config_path)
+        if self.integrity_mode == "sha256":
+            self._config_sha256 = sha256_file(self.config_path)
+            self._config_metadata = None
+        else:
+            self._config_sha256 = None
+            self._config_metadata = regular_file_metadata(self.config_path)
         self._remote_url = _git(self.repo_path, "remote", "get-url", "origin")
         self._encoder = self._load_encoder()
 
@@ -184,6 +214,7 @@ class ExternalPolicyLightningTeacher:
             encoder_config, composition = _compose_encoder_config(
                 self.repo_path,
                 self.config_path,
+                include_hashes=self.integrity_mode == "sha256",
             )
             self._config_composition = composition
 
@@ -215,7 +246,11 @@ class ExternalPolicyLightningTeacher:
                     "refusing ambiguous multi-view pairing"
                 )
             self._config_overrides = overrides
-            self._resolved_config_sha256 = _resolved_config_sha256(encoder_config)
+            self._resolved_config_sha256 = (
+                _resolved_config_sha256(encoder_config)
+                if self.integrity_mode == "sha256"
+                else None
+            )
             encoder = get_encoder(encoder_config)
         finally:
             try:
@@ -276,21 +311,19 @@ class ExternalPolicyLightningTeacher:
         return canonical
 
     def provenance(self) -> Mapping[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "kind": "external-policy-lightning",
+            "integrity_mode": self.integrity_mode,
             "repository_url": self._remote_url,
             "repository_commit": self._actual_commit,
             "repository_clean": self._repository_clean,
             "config_relative_path": self._config_relative_path,
-            "config_sha256": self._config_sha256,
             "config_composition": self._config_composition,
-            "resolved_config_sha256": self._resolved_config_sha256,
             "config_overrides": {
                 "coor_type": "unify",
                 "coor_type_paths": self._config_overrides,
             },
             "checkpoint_filename": self.checkpoint_path.name,
-            "checkpoint_sha256": self._checkpoint_sha256,
             "legacy_covariance_layout_corrected": True,
             "missing_weight_keys": self._missing_keys,
             "unexpected_weight_keys": self._unexpected_keys,
@@ -304,3 +337,19 @@ class ExternalPolicyLightningTeacher:
                 "non-commercial research pending separate rights clearance."
             ),
         }
+        if self.integrity_mode == "sha256":
+            result.update(
+                {
+                    "config_sha256": self._config_sha256,
+                    "resolved_config_sha256": self._resolved_config_sha256,
+                    "checkpoint_sha256": self._checkpoint_sha256,
+                }
+            )
+        else:
+            result.update(
+                {
+                    "config_file": self._config_metadata,
+                    "checkpoint_file": self._checkpoint_metadata,
+                }
+            )
+        return result

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose one fixed PlaceFood FastWAM rollout and expert trajectory.
+"""Run one fixed PlaceFood FastWAM closed-loop rollout or expert diagnostic.
 
 The command is intentionally narrow: it binds the held-out panel episode to
 one simulator initial state, records every closed-loop policy query, compares
@@ -43,6 +43,7 @@ try:
     from .fastwam_multi_robot_policy import (
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
+        R5_TRAINING_CODE_COMMIT,
         TRAINING_CODE_COMMIT,
         TRAINING_STATS_SHA256,
         FastWAMMultiRobotPolicy,
@@ -64,6 +65,7 @@ except ImportError:
     from fastwam_multi_robot_policy import (  # type: ignore[no-redef]
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
+        R5_TRAINING_CODE_COMMIT,
         TRAINING_CODE_COMMIT,
         TRAINING_STATS_SHA256,
         FastWAMMultiRobotPolicy,
@@ -72,7 +74,7 @@ except ImportError:
     )
 
 
-SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v1"
+SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v2"
 ACTION_DIM = 8
 ARM_DIMS = tuple(range(7))
 GRIPPER_DIM = 7
@@ -1439,15 +1441,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-state", choices=("raw", "clean"), default=None)
     parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=None)
     parser.add_argument("--checkpoint", type=Path, required=True)
-    parser.add_argument("--checkpoint-sha256", default=STEP5000_CHECKPOINT_SHA256)
+    parser.add_argument(
+        "--integrity-mode",
+        choices=("metadata_no_hash", "sha256"),
+        default="metadata_no_hash",
+        help="R5 uses ordinary file metadata; sha256 is retained only for legacy evaluation.",
+    )
+    parser.add_argument("--checkpoint-sha256")
     parser.add_argument("--stats", type=Path, required=True)
-    parser.add_argument("--stats-sha256", default=TRAINING_STATS_SHA256)
-    parser.add_argument("--context-cache-dir", type=Path, required=True)
+    parser.add_argument("--stats-sha256")
+    parser.add_argument("--context-cache-dir", type=Path)
+    parser.add_argument("--context-file", type=Path)
     parser.add_argument("--model-cache-root", type=Path, required=True)
     parser.add_argument("--policy-lightning-repo", type=Path, required=True)
     parser.add_argument("--policy-lightning-commit", default=POLICY_LIGHTNING_COMMIT)
     parser.add_argument("--noposplat-checkpoint", type=Path, required=True)
-    parser.add_argument("--noposplat-checkpoint-sha256", default=NOPOSPLAT_CHECKPOINT_SHA256)
+    parser.add_argument("--noposplat-checkpoint-sha256")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--teacher-device", default="cuda:0")
     parser.add_argument("--action-horizon", type=int, default=32)
@@ -1466,6 +1475,36 @@ def main() -> None:
         args.exec_horizon = 5
     if args.task != "PlaceFood-rf":
         raise ValueError("This diagnostic intentionally supports PlaceFood-rf only")
+    if args.integrity_mode == "metadata_no_hash":
+        if args.context_file is None:
+            raise ValueError("metadata_no_hash mode requires --context-file")
+        if args.context_cache_dir is not None:
+            raise ValueError(
+                "metadata_no_hash mode accepts the explicit --context-file, not --context-cache-dir"
+            )
+        forbidden_hashes = {
+            "checkpoint_sha256": args.checkpoint_sha256,
+            "stats_sha256": args.stats_sha256,
+            "noposplat_checkpoint_sha256": args.noposplat_checkpoint_sha256,
+        }
+        supplied = sorted(name for name, value in forbidden_hashes.items() if value)
+        if supplied:
+            raise ValueError(
+                "metadata_no_hash mode forbids hash arguments: " + ", ".join(supplied)
+            )
+    else:
+        if args.context_cache_dir is None:
+            raise ValueError("sha256 mode requires --context-cache-dir")
+        if args.context_file is not None:
+            raise ValueError("sha256 mode does not accept --context-file")
+        required_hashes = {
+            "checkpoint_sha256": args.checkpoint_sha256,
+            "stats_sha256": args.stats_sha256,
+            "noposplat_checkpoint_sha256": args.noposplat_checkpoint_sha256,
+        }
+        missing = sorted(name for name, value in required_hashes.items() if not value)
+        if missing:
+            raise ValueError("sha256 mode requires: " + ", ".join(missing))
     for name in (
         "max_steps",
         "max_teacher_states",
@@ -1506,7 +1545,11 @@ def main() -> None:
         "started_at": started_at,
         "provenance_policy": "ordinary Git, run, path, timestamp, size, and version identifiers; no new artifact checksums",
         "base_eval_commit": "f89a7a5b7ca0674c78bca5f329398dfa28fb8758",
-        "training_code_commit": TRAINING_CODE_COMMIT,
+        "training_code_commit": (
+            R5_TRAINING_CODE_COMMIT
+            if args.integrity_mode == "metadata_no_hash"
+            else TRAINING_CODE_COMMIT
+        ),
         "robofactory_expected_commit": ROBOFACTORY_COMMIT,
         "runtime_code_path": str(Path(__file__).resolve().parents[2]),
         "python": {"executable": sys.executable, "version": sys.version, "platform": platform.platform()},
@@ -1518,11 +1561,6 @@ def main() -> None:
     try:
         panel = _load_panel_nohash(args.panel)
         episode = _selected_episodes(panel, args.task, args.episode_start, 1)[0]
-        if int(episode["panel_index"]) != 0 or str(episode["trajectory"]) != "traj_61":
-            raise ValueError(
-                "This diagnostic is pinned to held-out panel_index=0, traj_61; "
-                f"selected panel_index={episode['panel_index']} trajectory={episode['trajectory']}"
-            )
         source = _source_path(args.dataset_root, str(episode["source_path"]))
         if source.stat().st_size != int(episode["source_h5_bytes"]):
             raise ValueError(f"Source H5 byte-size mismatch: {source}")
@@ -1531,9 +1569,9 @@ def main() -> None:
             source, str(episode["trajectory"]), agent_names
         )
         action_count = next(iter(actions.values())).shape[0]
-        if action_count != 268 or len(states) != 269:
+        if action_count < 1 or len(states) != action_count + 1:
             raise ValueError(
-                "Pinned traj_61 must contain exactly 268 actions and 269 states; "
+                "Held-out episode must contain one more state than action; "
                 f"got actions={action_count} states={len(states)}"
             )
         manifest["episode"] = {
@@ -1557,12 +1595,15 @@ def main() -> None:
             stats_path=args.stats,
             expected_stats_sha256=args.stats_sha256,
             context_cache_dir=args.context_cache_dir,
+            context_path=args.context_file,
             task_name=args.task,
             model_cache_root=args.model_cache_root,
             policy_lightning_repo=args.policy_lightning_repo,
             policy_lightning_commit=args.policy_lightning_commit,
             noposplat_checkpoint_path=args.noposplat_checkpoint,
             noposplat_checkpoint_sha256=args.noposplat_checkpoint_sha256,
+            integrity_mode=args.integrity_mode,
+            allowed_agent_counts=(2,),
             device=args.device,
             teacher_device=args.teacher_device,
             action_horizon=args.action_horizon,
@@ -1617,7 +1658,10 @@ def main() -> None:
             )
         summary = {
             "schema_version": SCHEMA_VERSION,
-            "status": "PASS",
+            "status": "COMPLETED",
+            "simulator_success": (
+                None if rollout is None else bool(rollout["success"])
+            ),
             "rollout": rollout,
             "teacher_forcing": teacher_forcing,
             "first_frame_parity": parity,

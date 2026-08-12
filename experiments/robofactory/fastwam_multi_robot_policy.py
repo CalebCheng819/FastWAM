@@ -6,8 +6,8 @@ must pass both ``env.unwrapped.get_obs()`` and
 The observation does not contain articulation root poses, and silently
 substituting zero geometry would change the model that is being evaluated.
 
-The adapter reproduces the training inputs at commit
-``00c0887118e647acf2ec7047dffa26a4231adc9e``:
+The adapter supports the legacy joint checkpoint and the R5 action-only
+checkpoint at commit ``1a690ab49246cbeb841618a86b5bd546f93ddd40``:
 
 * a native, variable-length agent axis (no fixed-capacity mask or padding),
 * global RGB resized from uint8 240x320 to 224x320 with bicubic antialiasing,
@@ -18,13 +18,15 @@ The adapter reproduces the training inputs at commit
 * action de-normalization from ``[N,H,8]`` to RoboFactory's ``[H,N*8]`` order.
 
 Loading is fail-closed on checkpoint, normalization, text-context, external
-teacher commit, and external teacher checkpoint identities.  No simulator or
+teacher commit, and external teacher checkpoint identities.  R5 uses ordinary
+file metadata and pinned paths without computing new hashes.  No simulator or
 formal evaluation is launched by this module.
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -38,8 +40,15 @@ import torch
 import torchvision.transforms.functional as transforms_F
 from omegaconf import OmegaConf
 
+from fastwam.nohash_artifacts import (
+    read_json,
+    read_regular_bytes,
+    regular_file_metadata,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRAINING_CODE_COMMIT = "00c0887118e647acf2ec7047dffa26a4231adc9e"
+R5_TRAINING_CODE_COMMIT = "1a690ab49246cbeb841618a86b5bd546f93ddd40"
 TRAINING_STATS_SHA256 = (
     "92dfdeec62995b625b606d435ffb79ed787c4485348c16c42c3d31875eff64d0"
 )
@@ -97,6 +106,7 @@ class NormalizationStats:
     state_std: torch.Tensor
     path: Path | None = None
     sha256: str | None = None
+    metadata: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -106,7 +116,8 @@ class TextContext:
     context: torch.Tensor
     mask: torch.Tensor
     path: Path
-    sha256: str
+    sha256: str | None = None
+    metadata: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -282,14 +293,30 @@ def _articulation_name(agent_name: str) -> str:
 def load_normalization_stats(
     path: str | Path,
     *,
-    expected_sha256: str = TRAINING_STATS_SHA256,
+    expected_sha256: str | None = TRAINING_STATS_SHA256,
+    integrity_mode: str = "sha256",
+    expected_agent_counts: Sequence[int] = (2, 3, 4),
 ) -> NormalizationStats:
-    resolved, actual_sha256 = require_file_sha256(
-        path,
-        expected_sha256,
-        label="RoboFactory training normalization stats",
-    )
-    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if integrity_mode not in {"sha256", "metadata_no_hash"}:
+        raise ValueError(f"Unsupported normalization integrity_mode: {integrity_mode!r}")
+    if integrity_mode == "sha256":
+        if expected_sha256 is None:
+            raise ValueError("expected_sha256 is required in sha256 mode")
+        resolved, actual_sha256 = require_file_sha256(
+            path,
+            expected_sha256,
+            label="RoboFactory training normalization stats",
+        )
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        metadata = None
+    else:
+        if expected_sha256 is not None:
+            raise ValueError(
+                "expected_sha256 must be omitted in metadata_no_hash mode"
+            )
+        payload, metadata = read_json(path)
+        resolved = Path(metadata["path"])
+        actual_sha256 = None
     if not isinstance(payload, Mapping):
         raise TypeError(f"Normalization stats must be a JSON object: {resolved}")
     fit = payload.get("normalization_fit")
@@ -307,12 +334,14 @@ def load_normalization_stats(
             raise ValueError(
                 f"Normalization stats {key} mismatch: expected={expected!r} got={fit.get(key)!r}"
             )
+    expected_counts = sorted({int(count) for count in expected_agent_counts})
     cardinality = payload.get("cardinality")
     if not isinstance(cardinality, Mapping) or sorted(
         cardinality.get("agent_counts", [])
-    ) != [2, 3, 4]:
+    ) != expected_counts:
         raise ValueError(
-            "Normalization stats must cover the exact trained cardinalities [2, 3, 4]"
+            "Normalization stats cardinality mismatch: "
+            f"expected={expected_counts} got={cardinality.get('agent_counts') if isinstance(cardinality, Mapping) else None}"
         )
 
     tensors: dict[str, torch.Tensor] = {}
@@ -335,33 +364,57 @@ def load_normalization_stats(
         state_std=tensors["state_std"],
         path=resolved,
         sha256=actual_sha256,
+        metadata=metadata,
     )
 
 
 def load_text_context(
-    cache_dir: str | Path,
+    cache_dir: str | Path | None,
     task_name: str,
     *,
     expected_sha256: str | None = None,
+    integrity_mode: str = "sha256",
+    context_path: str | Path | None = None,
 ) -> TextContext:
     canonical_name = canonical_task_name(task_name)
     instruction = DEFAULT_INSTRUCTIONS[canonical_name]
     prompt = DEFAULT_PROMPT.format(task=instruction)
-    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    cache_path = Path(cache_dir).expanduser().resolve() / (
-        f"{prompt_sha256}.t5_len{_CONTEXT_LENGTH}.wan22ti2v5b.pt"
-    )
-    pinned_sha256 = (
-        TRAINING_CONTEXT_SHA256_BY_TASK[canonical_name]
-        if expected_sha256 is None
-        else expected_sha256
-    )
-    resolved, actual_sha256 = require_file_sha256(
-        cache_path,
-        pinned_sha256,
-        label=f"cached T5 context for {canonical_name}",
-    )
-    payload = torch.load(resolved, map_location="cpu", weights_only=True)
+    if integrity_mode not in {"sha256", "metadata_no_hash"}:
+        raise ValueError(f"Unsupported context integrity_mode: {integrity_mode!r}")
+    if integrity_mode == "sha256":
+        if cache_dir is None:
+            raise ValueError("cache_dir is required in sha256 mode")
+        if context_path is not None:
+            raise ValueError("context_path is only accepted in metadata_no_hash mode")
+        prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        cache_path = Path(cache_dir).expanduser().resolve() / (
+            f"{prompt_sha256}.t5_len{_CONTEXT_LENGTH}.wan22ti2v5b.pt"
+        )
+        pinned_sha256 = (
+            TRAINING_CONTEXT_SHA256_BY_TASK[canonical_name]
+            if expected_sha256 is None
+            else expected_sha256
+        )
+        resolved, actual_sha256 = require_file_sha256(
+            cache_path,
+            pinned_sha256,
+            label=f"cached T5 context for {canonical_name}",
+        )
+        payload = torch.load(resolved, map_location="cpu", weights_only=True)
+        metadata = None
+    else:
+        if expected_sha256 is not None:
+            raise ValueError(
+                "expected_sha256 must be omitted in metadata_no_hash mode"
+            )
+        if context_path is None:
+            raise ValueError("context_path is required in metadata_no_hash mode")
+        context_bytes, metadata = read_regular_bytes(context_path)
+        resolved = Path(metadata["path"])
+        actual_sha256 = None
+        payload = torch.load(
+            io.BytesIO(context_bytes), map_location="cpu", weights_only=True
+        )
     if (
         not isinstance(payload, Mapping)
         or "context" not in payload
@@ -392,6 +445,7 @@ def load_text_context(
         mask=mask.contiguous(),
         path=resolved,
         sha256=actual_sha256,
+        metadata=metadata,
     )
 
 
@@ -564,6 +618,26 @@ def compose_step5000_model_config(project_root: str | Path = PROJECT_ROOT):
     return OmegaConf.create(resolved)
 
 
+def compose_r5_action_model_config(project_root: str | Path = PROJECT_ROOT):
+    """Resolve the R5 action-only architecture in metadata-no-hash mode."""
+
+    root = Path(project_root).expanduser().resolve()
+    data = OmegaConf.load(root / "configs/data/robofactory_multi_robot.yaml")
+    model = OmegaConf.load(root / "configs/model/fastwam_multi_robot.yaml")
+    config = OmegaConf.create({"data": data, "model": model})
+    config.model.load_text_encoder = False
+    config.model.skip_dit_load_from_pretrain = True
+    config.model.action_dit_pretrained_path = None
+    config.model.training_mode = "action_only_cache"
+    config.model.checkpoint_integrity_mode = "metadata_no_hash"
+    config.model.action_dit_config.hub_enabled = True
+    config.model.action_dit_config.enable_gaussian = True
+    config.model.loss.lambda_video = 0.0
+    config.model.loss.lambda_action = 1.0
+    resolved = OmegaConf.to_container(config.model, resolve=True)
+    return OmegaConf.create(resolved)
+
+
 @contextmanager
 def _model_asset_environment(model_cache_root: str | Path):
     root = Path(model_cache_root).expanduser().resolve(strict=True)
@@ -592,9 +666,9 @@ class FastWAMMultiRobotPolicy:
         self,
         *,
         checkpoint_path: str | Path,
-        checkpoint_sha256: str,
+        checkpoint_sha256: str | None,
         stats_path: str | Path,
-        context_cache_dir: str | Path,
+        context_cache_dir: str | Path | None,
         task_name: str,
         model_cache_root: str | Path,
         policy_lightning_repo: str | Path,
@@ -608,10 +682,12 @@ class FastWAMMultiRobotPolicy:
         seed: int | None = None,
         rand_device: str = "cpu",
         tiled: bool = False,
-        expected_stats_sha256: str = TRAINING_STATS_SHA256,
+        integrity_mode: str = "sha256",
+        context_path: str | Path | None = None,
+        expected_stats_sha256: str | None = TRAINING_STATS_SHA256,
         expected_context_sha256: str | None = None,
         policy_lightning_commit: str = POLICY_LIGHTNING_COMMIT,
-        noposplat_checkpoint_sha256: str = NOPOSPLAT_CHECKPOINT_SHA256,
+        noposplat_checkpoint_sha256: str | None = NOPOSPLAT_CHECKPOINT_SHA256,
         policy_lightning_config_path: str | Path = "config/encoder/noposplat.yaml",
         allowed_agent_counts: Sequence[int] = (2, 3, 4),
         project_root: str | Path = PROJECT_ROOT,
@@ -621,18 +697,40 @@ class FastWAMMultiRobotPolicy:
             raise FileNotFoundError(
                 f"FastWAM checkpoint is not a regular file: {self.checkpoint_path}"
             )
-        self.expected_checkpoint_sha256 = _normalized_sha256(
-            checkpoint_sha256,
-            field="FastWAM checkpoint SHA-256",
-        )
+        if integrity_mode not in {"sha256", "metadata_no_hash"}:
+            raise ValueError(f"Unsupported policy integrity_mode: {integrity_mode!r}")
+        self.integrity_mode = integrity_mode
+        if self.integrity_mode == "sha256":
+            if checkpoint_sha256 is None:
+                raise ValueError("checkpoint_sha256 is required in sha256 mode")
+            self.expected_checkpoint_sha256 = _normalized_sha256(
+                checkpoint_sha256,
+                field="FastWAM checkpoint SHA-256",
+            )
+            self.checkpoint_metadata = None
+        else:
+            if checkpoint_sha256 is not None:
+                raise ValueError(
+                    "checkpoint_sha256 must be omitted in metadata_no_hash mode"
+                )
+            if noposplat_checkpoint_sha256 is not None:
+                raise ValueError(
+                    "noposplat_checkpoint_sha256 must be omitted in metadata_no_hash mode"
+                )
+            self.expected_checkpoint_sha256 = None
+            self.checkpoint_metadata = regular_file_metadata(self.checkpoint_path)
         self.stats = load_normalization_stats(
             stats_path,
             expected_sha256=expected_stats_sha256,
+            integrity_mode=self.integrity_mode,
+            expected_agent_counts=(2, 3, 4),
         )
         self.text_context = load_text_context(
             context_cache_dir,
             task_name,
             expected_sha256=expected_context_sha256,
+            integrity_mode=self.integrity_mode,
+            context_path=context_path,
         )
         self.allowed_agent_counts = tuple(
             sorted({int(count) for count in allowed_agent_counts})
@@ -641,9 +739,9 @@ class FastWAMMultiRobotPolicy:
             count < 1 for count in self.allowed_agent_counts
         ):
             raise ValueError("allowed_agent_counts must contain positive integers")
-        if self.allowed_agent_counts != (2, 3, 4):
+        if any(count not in (2, 3, 4) for count in self.allowed_agent_counts):
             raise ValueError(
-                "This checkpoint's declared cardinality scope is exactly (2, 3, 4); "
+                "allowed_agent_counts must be a non-empty subset of (2, 3, 4); "
                 f"got {self.allowed_agent_counts}"
             )
         self.device = torch.device(device)
@@ -665,28 +763,41 @@ class FastWAMMultiRobotPolicy:
             ExternalPolicyLightningTeacher,
         )
 
-        model_config = compose_step5000_model_config(project_root)
+        model_config = (
+            compose_r5_action_model_config(project_root)
+            if self.integrity_mode == "metadata_no_hash"
+            else compose_step5000_model_config(project_root)
+        )
         with _model_asset_environment(model_cache_root):
             self.model = instantiate(
                 model_config,
                 model_dtype=model_dtype,
                 device=str(self.device),
             )
+        if self.integrity_mode == "metadata_no_hash":
+            self.model.configure_trainable_parameters("action")
         self.model.load_checkpoint(self.checkpoint_path)
-        actual_checkpoint_sha256 = getattr(
-            self.model,
-            "_loaded_base_checkpoint_sha256",
-            None,
-        )
-        if actual_checkpoint_sha256 is None:
-            actual_checkpoint_sha256 = sha256_file(self.checkpoint_path)
-        if actual_checkpoint_sha256 != self.expected_checkpoint_sha256:
-            raise ValueError(
-                "FastWAM checkpoint SHA-256 mismatch after strict load: "
-                f"expected={self.expected_checkpoint_sha256} "
-                f"actual={actual_checkpoint_sha256} path={self.checkpoint_path}"
+        if self.integrity_mode == "sha256":
+            actual_checkpoint_sha256 = getattr(
+                self.model,
+                "_loaded_base_checkpoint_sha256",
+                None,
             )
-        self.checkpoint_sha256 = actual_checkpoint_sha256
+            if actual_checkpoint_sha256 is None:
+                actual_checkpoint_sha256 = sha256_file(self.checkpoint_path)
+            if actual_checkpoint_sha256 != self.expected_checkpoint_sha256:
+                raise ValueError(
+                    "FastWAM checkpoint SHA-256 mismatch after strict load: "
+                    f"expected={self.expected_checkpoint_sha256} "
+                    f"actual={actual_checkpoint_sha256} path={self.checkpoint_path}"
+                )
+            self.checkpoint_sha256 = actual_checkpoint_sha256
+        else:
+            self.checkpoint_sha256 = None
+            if str(getattr(self.model, "training_mode", "")) != "action_only_cache":
+                raise ValueError("R5 evaluator must instantiate action_only_cache mode")
+            if str(getattr(self.model, "_trainable_scope", "")) != "action":
+                raise ValueError("R5 evaluator must bind trainable_scope=action")
         self.model.eval()
 
         self.teacher: GaussianTeacher = ExternalPolicyLightningTeacher(
@@ -694,6 +805,7 @@ class FastWAMMultiRobotPolicy:
             expected_commit=policy_lightning_commit,
             checkpoint_path=noposplat_checkpoint_path,
             checkpoint_sha256=noposplat_checkpoint_sha256,
+            integrity_mode=self.integrity_mode,
             config_path=policy_lightning_config_path,
             device=self.device if teacher_device is None else teacher_device,
             require_clean_repo=True,
@@ -821,14 +933,16 @@ class FastWAMMultiRobotPolicy:
         }
 
     def provenance(self) -> dict[str, Any]:
-        return {
-            "adapter_training_code_commit": TRAINING_CODE_COMMIT,
+        payload = {
+            "adapter_training_code_commit": (
+                R5_TRAINING_CODE_COMMIT
+                if self.integrity_mode == "metadata_no_hash"
+                else TRAINING_CODE_COMMIT
+            ),
+            "integrity_mode": self.integrity_mode,
             "checkpoint_path": str(self.checkpoint_path),
-            "checkpoint_sha256": self.checkpoint_sha256,
             "normalization_path": str(self.stats.path),
-            "normalization_sha256": self.stats.sha256,
             "context_path": str(self.text_context.path),
-            "context_sha256": self.text_context.sha256,
             "task_name": self.text_context.task_name,
             "allowed_agent_counts": list(self.allowed_agent_counts),
             "action_horizon": self.action_horizon,
@@ -840,6 +954,23 @@ class FastWAMMultiRobotPolicy:
             "gaussian_pairing": "global_agent_unify_v1",
             "gaussian_compaction": "opacity-aware-moment-matching-cell-mean-alpha-v2",
         }
+        if self.integrity_mode == "sha256":
+            payload.update(
+                {
+                    "checkpoint_sha256": self.checkpoint_sha256,
+                    "normalization_sha256": self.stats.sha256,
+                    "context_sha256": self.text_context.sha256,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "checkpoint_file": self.checkpoint_metadata,
+                    "normalization_file": self.stats.metadata,
+                    "context_file": self.text_context.metadata,
+                }
+            )
+        return payload
 
 
 __all__ = [
@@ -848,12 +979,14 @@ __all__ = [
     "PreparedObservation",
     "TextContext",
     "TRAINING_CODE_COMMIT",
+    "R5_TRAINING_CODE_COMMIT",
     "TRAINING_CONTEXT_SHA256_BY_TASK",
     "TRAINING_STATS_SHA256",
     "canonical_task_name",
     "canonicalize_root_pose",
     "camera_rgb_uint8",
     "compose_step5000_model_config",
+    "compose_r5_action_model_config",
     "denormalize_and_flatten_actions",
     "encode_compact_agent_gaussian",
     "extract_agent_state_and_geometry",
