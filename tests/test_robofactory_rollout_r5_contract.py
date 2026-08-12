@@ -10,10 +10,48 @@ from unittest import mock
 
 import torch
 
+from experiments.robofactory import diagnose_place_food_fixed as diagnostic
 from experiments.robofactory import fastwam_multi_robot_policy as policy
 
 
 class R5RolloutContractTests(unittest.TestCase):
+    def test_video_is_staged_locally_and_validated_after_publication(self) -> None:
+        import imageio.v2 as imageio
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "local.mp4"
+            destination = root / "published.mp4"
+            writer = imageio.get_writer(
+                source,
+                fps=20,
+                codec="libx264",
+                pixelformat="yuv420p",
+                macro_block_size=None,
+            )
+            try:
+                for value in (0, 64, 128):
+                    writer.append_data(
+                        np.full((32, 64, 3), value, dtype=np.uint8)
+                    )
+            finally:
+                writer.close()
+
+            report = diagnostic._publish_video(
+                source, destination, expected_frames=3
+            )
+
+            self.assertEqual(report["frames"], 3)
+            self.assertEqual(report["frame_shape"], [32, 64, 3])
+            self.assertTrue(report["encoding_staged_on_local_disk"])
+            self.assertTrue(report["published_readback_validated"])
+            self.assertTrue(destination.is_file())
+            with self.assertRaises(FileExistsError):
+                diagnostic._publish_video(
+                    source, destination, expected_frames=3
+                )
+
     def test_diagnostic_cli_imports_from_a_clean_script_entrypoint(self) -> None:
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(

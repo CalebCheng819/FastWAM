@@ -14,7 +14,9 @@ import json
 import math
 import os
 import platform
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 import uuid
@@ -220,6 +222,79 @@ def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _validate_video(path: Path, *, expected_frames: int) -> dict[str, Any]:
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing symlink video: {path}")
+    resolved = path.resolve(strict=True)
+    stat = resolved.stat()
+    if not resolved.is_file() or stat.st_size <= 0:
+        raise RuntimeError(f"Video is not a non-empty regular file: {resolved}")
+    reader = imageio.get_reader(str(resolved))
+    try:
+        actual_frames = int(reader.count_frames())
+        if actual_frames != expected_frames:
+            raise RuntimeError(
+                f"Video frame count mismatch for {resolved}: "
+                f"expected={expected_frames} actual={actual_frames}"
+            )
+        first = np.asarray(reader.get_data(0))
+        last = np.asarray(reader.get_data(expected_frames - 1))
+    finally:
+        reader.close()
+    if first.ndim != 3 or last.shape != first.shape or first.shape[-1] < 3:
+        raise RuntimeError(
+            f"Video decoded frame shape mismatch for {resolved}: "
+            f"first={first.shape} last={last.shape}"
+        )
+    return {
+        "bytes": int(stat.st_size),
+        "frames": actual_frames,
+        "frame_shape": list(first.shape),
+        "first_and_last_frame_decoded": True,
+    }
+
+
+def _publish_video(
+    source: Path, destination: Path, *, expected_frames: int
+) -> dict[str, Any]:
+    """Validate a local MP4, atomically publish it, then validate OSS readback."""
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite video: {destination}")
+    local_report = _validate_video(source, expected_frames=expected_frames)
+    temporary = destination.parent / (
+        f".{destination.name}.publishing.{os.getpid()}.{uuid.uuid4().hex}"
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o640,
+    )
+    try:
+        with source.open("rb") as source_handle, os.fdopen(
+            descriptor, "wb", closefd=False
+        ) as destination_handle:
+            shutil.copyfileobj(source_handle, destination_handle)
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+    finally:
+        os.close(descriptor)
+    if temporary.stat().st_size != local_report["bytes"]:
+        raise RuntimeError(
+            f"Published video size mismatch before rename: {temporary}"
+        )
+    os.replace(temporary, destination)
+    published_report = _validate_video(destination, expected_frames=expected_frames)
+    if published_report != local_report:
+        raise RuntimeError(
+            f"Published video readback differs from local staging: {destination}"
+        )
+    return {
+        **published_report,
+        "encoding_staged_on_local_disk": True,
+        "published_readback_validated": True,
+    }
 
 
 def _load_panel_nohash(path: Path) -> dict[str, Any]:
@@ -1061,6 +1136,10 @@ def run_rollout(
     env = _build_environment(args.robofactory_root, args.task)
     multiview_writer = None
     global_writer = None
+    video_stage = tempfile.TemporaryDirectory(prefix="fastwam-rollout-video-")
+    video_stage_dir = Path(video_stage.name)
+    multiview_stage_path = video_stage_dir / "rollout_multiview.mp4"
+    global_stage_path = video_stage_dir / "rollout_global.mp4"
     violations: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
     try:
@@ -1095,14 +1174,14 @@ def run_rollout(
         online_obs = env.unwrapped.get_obs()
         policy.update_obs(online_obs, env.unwrapped.get_state_dict())
         multiview_writer = imageio.get_writer(
-            output_dir / "rollout_multiview.mp4",
+            multiview_stage_path,
             fps=FPS,
             codec="libx264",
             pixelformat="yuv420p",
             macro_block_size=None,
         )
         global_writer = imageio.get_writer(
-            output_dir / "rollout_global.mp4",
+            global_stage_path,
             fps=FPS,
             codec="libx264",
             pixelformat="yuv420p",
@@ -1182,6 +1261,22 @@ def run_rollout(
             _append_jsonl(output_dir / "policy_queries.jsonl", query_record)
             if stop:
                 break
+        multiview_writer.close()
+        multiview_writer = None
+        global_writer.close()
+        global_writer = None
+        video_integrity = {
+            "multiview_mp4": _publish_video(
+                multiview_stage_path,
+                output_dir / "rollout_multiview.mp4",
+                expected_frames=len(snapshots),
+            ),
+            "global_mp4": _publish_video(
+                global_stage_path,
+                output_dir / "rollout_global.mp4",
+                expected_frames=len(snapshots),
+            ),
+        }
         buckets = bucket_bound_violations(violations)
         _atomic_json(output_dir / "action_bound_buckets.json", buckets)
         result = {
@@ -1197,6 +1292,7 @@ def run_rollout(
             "persisted_expert_rgb_used_for_policy": False,
             "initial_state_audit": initial_audit,
             "bound_violations": buckets,
+            "video_integrity": video_integrity,
             "elapsed_seconds": time.monotonic() - started,
             "artifacts": {
                 "multiview_mp4": "rollout_multiview.mp4",
@@ -1214,6 +1310,7 @@ def run_rollout(
             multiview_writer.close()
         if global_writer is not None:
             global_writer.close()
+        video_stage.cleanup()
         env.close()
 
 
