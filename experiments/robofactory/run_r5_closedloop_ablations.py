@@ -71,7 +71,7 @@ def _panel_rows(panel: Mapping[str, Any]) -> list[dict[str, int]]:
     episodes = [
         item
         for item in panel.get("episodes", [])
-        if item.get("task") == "PlaceFood-rf"
+        if item.get("task_name", item.get("task")) == "PlaceFood-rf"
     ]
     if len(episodes) < 8:
         raise ValueError(f"PlaceFood panel requires at least 8 episodes, got {len(episodes)}")

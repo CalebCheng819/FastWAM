@@ -43,7 +43,7 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
     def test_panel_rows_freeze_eight_environment_and_policy_seeds(self) -> None:
         panel = {
             "episodes": [
-                {"task": "PlaceFood-rf", "episode_seed": seed}
+                {"task_name": "PlaceFood-rf", "episode_seed": seed}
                 for seed in (333183, 333327, 333225, 333180, 333251, 333130, 333167, 333234)
             ]
         }
@@ -53,6 +53,21 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
         self.assertEqual([row["policy_seed"] for row in rows], list(range(10000, 10008)))
         self.assertEqual(rows[0]["episode_start"], 0)
         self.assertEqual(rows[-1]["episode_start"], 7)
+
+    def test_panel_rows_accept_legacy_task_key_but_ignore_other_tasks(self) -> None:
+        panel = {
+            "episodes": [
+                {"task_name": "PlaceCubeInCup-rf", "episode_seed": 1},
+                *[
+                    {"task": "PlaceFood-rf", "episode_seed": seed}
+                    for seed in range(10, 18)
+                ],
+            ]
+        }
+
+        rows = ablations._panel_rows(panel)
+
+        self.assertEqual([row["environment_seed"] for row in rows], list(range(10, 18)))
 
     def test_completed_output_requires_terminal_cell_and_seed_identity(self) -> None:
         cell = ablations.Cell("cell", 1000, 1, "none")
