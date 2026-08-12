@@ -125,6 +125,24 @@ class B4RolloutContractTests(unittest.TestCase):
                     source, destination, expected_frames=3
                 )
 
+    def test_regular_file_is_staged_and_validated_after_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = (("trace.jsonl", b'{"step":0}\n'), ("empty.jsonl", b""))
+            for name, payload in cases:
+                source = root / f"local-{name}"
+                destination = root / f"published-{name}"
+                source.write_bytes(payload)
+
+                report = diagnostic._publish_staged_file(source, destination)
+
+                self.assertEqual(report["bytes"], len(payload))
+                self.assertTrue(report["staged_on_local_disk"])
+                self.assertTrue(report["published_readback_validated"])
+                self.assertEqual(destination.read_bytes(), payload)
+                with self.assertRaises(FileExistsError):
+                    diagnostic._publish_staged_file(source, destination)
+
     def test_diagnostic_cli_imports_from_a_clean_script_entrypoint(self) -> None:
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(

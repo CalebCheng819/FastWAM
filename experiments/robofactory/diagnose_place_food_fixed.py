@@ -346,6 +346,60 @@ def _publish_video(
     }
 
 
+def _publish_staged_file(source: Path, destination: Path) -> dict[str, Any]:
+    """Atomically publish a local regular file and verify the OSS readback."""
+    if source.is_symlink():
+        raise RuntimeError(f"Refusing symlink source: {source}")
+    resolved_source = source.resolve(strict=True)
+    source_stat = resolved_source.stat()
+    if not resolved_source.is_file():
+        raise RuntimeError(f"Source is not a regular file: {resolved_source}")
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite file: {destination}")
+    temporary = destination.parent / (
+        f".{destination.name}.publishing.{os.getpid()}.{uuid.uuid4().hex}"
+    )
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o640,
+    )
+    try:
+        with resolved_source.open("rb") as source_handle, os.fdopen(
+            descriptor, "wb", closefd=False
+        ) as destination_handle:
+            shutil.copyfileobj(source_handle, destination_handle)
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+    finally:
+        os.close(descriptor)
+    if temporary.stat().st_size != source_stat.st_size:
+        raise RuntimeError(
+            f"Published file size mismatch before rename: {temporary}"
+        )
+    os.replace(temporary, destination)
+    destination_stat = destination.stat()
+    if destination_stat.st_size != source_stat.st_size:
+        raise RuntimeError(f"Published file size mismatch: {destination}")
+    with resolved_source.open("rb") as source_handle, destination.open(
+        "rb"
+    ) as destination_handle:
+        while True:
+            source_chunk = source_handle.read(1024 * 1024)
+            destination_chunk = destination_handle.read(1024 * 1024)
+            if source_chunk != destination_chunk:
+                raise RuntimeError(
+                    f"Published file readback differs from local staging: {destination}"
+                )
+            if not source_chunk:
+                break
+    return {
+        "bytes": int(destination_stat.st_size),
+        "staged_on_local_disk": True,
+        "published_readback_validated": True,
+    }
+
+
 def _load_panel_nohash(path: Path) -> dict[str, Any]:
     resolved = path.expanduser().resolve(strict=True)
     payload = json.loads(resolved.read_text(encoding="utf-8"))
@@ -1470,10 +1524,13 @@ def run_expert_replay(
     env = _build_environment(args.robofactory_root, args.task)
     multiview_writer = None
     global_writer = None
-    video_stage = tempfile.TemporaryDirectory(prefix="fastwam-expert-replay-video-")
-    video_stage_dir = Path(video_stage.name)
-    multiview_stage_path = video_stage_dir / "expert_replay_multiview.mp4"
-    global_stage_path = video_stage_dir / "expert_replay_global.mp4"
+    local_stage = tempfile.TemporaryDirectory(prefix="fastwam-expert-replay-")
+    local_stage_dir = Path(local_stage.name)
+    multiview_stage_path = local_stage_dir / "expert_replay_multiview.mp4"
+    global_stage_path = local_stage_dir / "expert_replay_global.mp4"
+    actions_stage_path = local_stage_dir / "expert_actions.jsonl"
+    physical_trace_stage_path = local_stage_dir / "physical_trace.jsonl"
+    violations_stage_path = local_stage_dir / "action_bound_violations.jsonl"
     violations: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
     try:
@@ -1495,8 +1552,9 @@ def run_expert_replay(
             "other_state_verified_unchanged": True,
         }
         _atomic_json(output_dir / "initial_state_audit.json", initial_audit)
-        (output_dir / "expert_actions.jsonl").touch(exist_ok=False)
-        (output_dir / "action_bound_violations.jsonl").touch(exist_ok=False)
+        actions_stage_path.touch(exist_ok=False)
+        physical_trace_stage_path.touch(exist_ok=False)
+        violations_stage_path.touch(exist_ok=False)
         multiview_writer = imageio.get_writer(
             multiview_stage_path,
             fps=FPS,
@@ -1520,7 +1578,7 @@ def run_expert_replay(
         record_frame()
         first = physical_snapshot(env, simulator_step=0)
         snapshots.append(first)
-        _append_jsonl(output_dir / "physical_trace.jsonl", first)
+        _append_jsonl(physical_trace_stage_path, first)
         steps = 0
         success = bool(first["task_success_from_geometry"])
         termination_reason = "initial_success" if success else "expert_actions_exhausted"
@@ -1540,9 +1598,9 @@ def run_expert_replay(
             )
             violations.extend(current)
             for record in current:
-                _append_jsonl(output_dir / "action_bound_violations.jsonl", record)
+                _append_jsonl(violations_stage_path, record)
             _append_jsonl(
-                output_dir / "expert_actions.jsonl",
+                actions_stage_path,
                 {
                     "simulator_step": steps,
                     "source_timestep": steps,
@@ -1555,7 +1613,7 @@ def run_expert_replay(
             snapshot = physical_snapshot(env, simulator_step=steps, last_action=action)
             snapshot["info_success"] = _as_bool(info["success"], label="info.success")
             snapshots.append(snapshot)
-            _append_jsonl(output_dir / "physical_trace.jsonl", snapshot)
+            _append_jsonl(physical_trace_stage_path, snapshot)
             success = bool(snapshot["info_success"])
             if success:
                 termination_reason = "success"
@@ -1570,6 +1628,18 @@ def run_expert_replay(
         multiview_writer = None
         global_writer.close()
         global_writer = None
+        jsonl_integrity = {
+            "actions": _publish_staged_file(
+                actions_stage_path, output_dir / "expert_actions.jsonl"
+            ),
+            "physical_trace": _publish_staged_file(
+                physical_trace_stage_path, output_dir / "physical_trace.jsonl"
+            ),
+            "violations": _publish_staged_file(
+                violations_stage_path,
+                output_dir / "action_bound_violations.jsonl",
+            ),
+        }
         video_integrity = {
             "multiview_mp4": _publish_video(
                 multiview_stage_path,
@@ -1605,6 +1675,7 @@ def run_expert_replay(
                 float(snapshot["pot_lid_qpos"]) for snapshot in snapshots
             ),
             "bound_violations": buckets,
+            "jsonl_integrity": jsonl_integrity,
             "video_integrity": video_integrity,
             "elapsed_seconds": time.monotonic() - started,
             "artifacts": {
@@ -1623,7 +1694,7 @@ def run_expert_replay(
             multiview_writer.close()
         if global_writer is not None:
             global_writer.close()
-        video_stage.cleanup()
+        local_stage.cleanup()
         env.close()
 
 
