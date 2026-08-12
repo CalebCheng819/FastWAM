@@ -4,7 +4,8 @@ umask 077
 
 EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R1-20260812'
 CONTROL_PYTHON='/mnt/workspace/tools/pai-control-py312/20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python'
-CONTROL_PYTHON_TARGET='/usr/local/bin/python3.12'
+CONTROL_PYTHON_LINK_TARGET='python3'
+CONTROL_PYTHON_RESOLVED_TARGET='/usr/local/bin/python3.12'
 LOCK_ANCHOR='/run'
 LOCK_PARENT='fastwam-dlc-submit-state'
 LOCK_WORKSPACE='workspace-270969'
@@ -22,8 +23,9 @@ read -r -a ssh_fields <<<"${SSH_CONNECTION}"
   || die 'malformed SSH connection ports'
 [[ "$(id -u)" == '0' ]] || die 'must run as root'
 [[ -L "${CONTROL_PYTHON}" ]] || die 'control Python is not a symlink'
-[[ "$(readlink -- "${CONTROL_PYTHON}")" == "${CONTROL_PYTHON_TARGET}" ]] || die 'control Python target changed'
-[[ -x "${CONTROL_PYTHON_TARGET}" ]] || die 'control Python target is not executable'
+[[ "$(readlink -- "${CONTROL_PYTHON}")" == "${CONTROL_PYTHON_LINK_TARGET}" ]] || die 'control Python link target changed'
+[[ "$(readlink -f -- "${CONTROL_PYTHON}")" == "${CONTROL_PYTHON_RESOLVED_TARGET}" ]] || die 'control Python resolved target changed'
+[[ -x "${CONTROL_PYTHON_RESOLVED_TARGET}" ]] || die 'control Python target is not executable'
 "${CONTROL_PYTHON}" -B -I -c 'import alibabacloud_credentials, alibabacloud_pai_dlc20201203, alibabacloud_tea_openapi, alibabacloud_tea_util' \
   || die 'pinned control SDK imports failed'
 

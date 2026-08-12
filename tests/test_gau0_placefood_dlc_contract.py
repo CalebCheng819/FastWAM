@@ -40,6 +40,14 @@ def _provider_job(request: dict) -> dict:
     return job
 
 
+def test_wrapper_freezes_control_python_link_and_resolved_targets():
+    wrapper = (EXPERIMENT / "submit_from_ssh970.sh").read_text(encoding="utf-8")
+    assert "CONTROL_PYTHON_LINK_TARGET='python3'" in wrapper
+    assert "CONTROL_PYTHON_RESOLVED_TARGET='/usr/local/bin/python3.12'" in wrapper
+    assert 'readlink -- "${CONTROL_PYTHON}"' in wrapper
+    assert 'readlink -f -- "${CONTROL_PYTHON}"' in wrapper
+
+
 def test_exact_job_accepts_only_priority7_frozen_projection():
     request = controller.request_body("a" * 40)
     job = _provider_job(request)
