@@ -1,0 +1,30 @@
+{
+  "acceptance": {
+    "aggregate_required": true,
+    "expected_episodes": 16,
+    "infrastructure_errors_allowed": 0,
+    "minimum_successes": 14,
+    "train05_regression_smoke_required": true
+  },
+  "artifact_root": "/oss-chengjuntao/artifacts/fastwam-placefood-expert-replay-20260813-r2",
+  "baseline_notion_page_id": "3ba21e77-89cc-81d7-b642-cf885ad094b4",
+  "data": "RoboFactory PlaceFood-rf frozen train8.json and val8.json panels",
+  "environment": "Alibaba PAI DSW dsw-472471-587bbbff64-bzk54",
+  "evaluation_code_commit": "83ed2272eec8c9c934f324513d862e86ac3176ef",
+  "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-EXPERT-REPLAY-R2-20260813",
+  "mode": "confirmatory_recovery",
+  "notion_page_id": "3ba21e77-89cc-81fa-bd2c-e08de5100984",
+  "notion_page_url": "https://app.notion.com/p/FastWAM-PlaceFood-formal-expert-replay-R1-3ba21e7789cc81fabd2ce08de5100984",
+  "physical_gpu_ids": [0, 1, 2, 3],
+  "predecessor": {
+    "artifact_root": "/oss-chengjuntao/artifacts/fastwam-placefood-expert-replay-20260813-r1",
+    "completed_summaries": 13,
+    "infrastructure_error": "train/episode-05 direct OSS JSONL append failed with OSError errno 22",
+    "status": "INFRASTRUCTURE_FAILED",
+    "successes": 11,
+    "summaries": 14
+  },
+  "provenance_policy": "Git revision, run ID, paths, timestamps, sizes, and artifact metadata; no new artifact checksums",
+  "regression_smoke_root": "/oss-chengjuntao/artifacts/fastwam-placefood-expert-replay-smoke-train05-20260813-r2",
+  "status": "PRELAUNCH"
+}
