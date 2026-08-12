@@ -21,7 +21,7 @@ RUN_ID = "fastwam-gau0-placefood-same8-r1-20260813"
 DISPLAY_NAME = "fw-gau0-placefood-same8-r1"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-SOURCE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau0-placefood-same8-eval-20260813-r6")
+SOURCE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau0-placefood-same8-eval-20260813-r7")
 OUTPUT_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260813-r1")
 DURABLE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260813-r1-controller")
 RESERVATION_PATH = DURABLE_ROOT / "prepared-reservation.json"
@@ -153,6 +153,46 @@ def safe_mkdir(path: Path, mode: int = 0o700) -> None:
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
         fail(f"new directory does not satisfy private-root contract: {path}")
+
+
+def validate_empty_oss_durable_root(path: Path) -> None:
+    """Validate an exact empty OSS control directory without trusting its mode bits.
+
+    The OSS FUSE mount projects newly created directories as 0777 even after a
+    0700 mkdir.  Integrity therefore comes from the frozen path, an ordinary
+    root-owned non-link directory, an empty/closed child set, exclusive
+    O_NOFOLLOW file creation, and stable single-link file reads.  This is an
+    object-integrity contract, not a confidentiality claim.
+    """
+
+    canonical(path)
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != 0
+        or stat.S_IMODE(info.st_mode) not in (0o700, 0o777)
+    ):
+        fail(f"OSS durable root contract failed: {path}")
+    children = sorted(child.name for child in path.iterdir())
+    if children:
+        fail(f"OSS durable root must be empty before prepare: {path}: {children}")
+
+
+def ensure_empty_oss_durable_root(path: Path) -> None:
+    canonical(path.parent)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    validate_empty_oss_durable_root(path)
+
+
+def require_exact_children(path: Path, expected: set[str]) -> None:
+    require_dir(path)
+    actual = {child.name for child in path.iterdir()}
+    if actual != expected:
+        fail(f"directory allowlist mismatch for {path}: {sorted(actual)} != {sorted(expected)}")
 
 
 def file_binding(path: Path, expected_bytes: int, direct: bool) -> dict[str, Any]:
@@ -404,8 +444,10 @@ def prepare(args: argparse.Namespace) -> None:
         fail("platform capacity evidence must be positive")
     if args.platform_oss_free_bytes < 128 * 1024**3:
         fail("platform free space is below the frozen 128 GiB floor")
-    if any(path.exists() or path.is_symlink() for path in (DURABLE_ROOT, LOCAL_ROOT, OUTPUT_ROOT)):
-        fail("prepared/output namespace must be wholly absent")
+    if any(path.exists() or path.is_symlink() for path in (LOCAL_ROOT, OUTPUT_ROOT)):
+        fail("local prepared/output namespace must be wholly absent")
+    if DURABLE_ROOT.exists() or DURABLE_ROOT.is_symlink():
+        validate_empty_oss_durable_root(DURABLE_ROOT)
     source_binding = capture_tree(SOURCE_ROOT, include_contents=True)
     bindings = input_bindings()
     request = request_body(args.source_commit)
@@ -438,8 +480,11 @@ def prepare(args: argparse.Namespace) -> None:
         },
         "request": request,
     }
-    safe_mkdir(DURABLE_ROOT)
+    ensure_empty_oss_durable_root(DURABLE_ROOT)
     write_json_exclusive(RESERVATION_PATH, reservation)
+    if load_json(RESERVATION_PATH) != reservation:
+        fail("prepared reservation direct readback mismatch")
+    require_exact_children(DURABLE_ROOT, {RESERVATION_PATH.name})
     safe_mkdir(LOCAL_ROOT)
     write_json_exclusive(STATE_PATH, {
         "schema": "fastwam-gau0-placefood-same8-local-state-v1",

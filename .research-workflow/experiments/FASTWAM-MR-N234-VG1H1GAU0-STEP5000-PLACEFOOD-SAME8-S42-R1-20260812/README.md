@@ -10,3 +10,11 @@ This frozen experiment evaluates the archived FastWAM GAU0 step-5000 checkpoint 
 - Provider `Succeeded` is insufficient. Scientific completion requires the frozen validator to accept all 16 invocations, the closed output allowlist, the terminal receipt, and the `COMPLETE` marker written last.
 
 The submission request is permanently latched before its one allowed `CreateJob` call and uses DLC Priority 7.
+
+The fixed OSS durable-control directory may expose mount-projected mode `0777`.
+The controller therefore treats it as an object-integrity boundary rather than
+a confidentiality boundary: the path is frozen, it must be an ordinary
+root-owned non-link directory, it must be empty before prepare, reservation
+files are created with `O_EXCL|O_NOFOLLOW`, and every phase enforces a closed
+child allowlist plus stable single-link file reads. The local `/run` state root
+retains the stricter private-mode contract.

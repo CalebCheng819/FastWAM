@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,65 @@ def test_runtime_env_freezes_both_worker_python_targets():
     env = controller.runtime_env("a" * 40)
     assert env["FASTWAM_PYTHON_TARGET"] == str(controller.PYTHON_TARGET)
     assert env["FASTWAM_PYTHON_RESOLVED_TARGET"] == str(controller.PYTHON_RESOLVED_TARGET)
+
+
+def _project_root_ownership(monkeypatch: pytest.MonkeyPatch, *paths: Path) -> None:
+    original_lstat = Path.lstat
+    projected = {str(path) for path in paths}
+
+    def root_owned_lstat(self: Path):
+        info = original_lstat(self)
+        if str(self) not in projected:
+            return info
+        fields = list(info)
+        fields[4] = 0
+        fields[5] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+
+
+def test_oss_durable_root_accepts_only_empty_root_owned_projection(tmp_path: Path, monkeypatch):
+    durable = tmp_path / "durable"
+    durable.mkdir(mode=0o700)
+    durable.chmod(0o777)
+    _project_root_ownership(monkeypatch, durable)
+    controller.validate_empty_oss_durable_root(durable)
+    controller.ensure_empty_oss_durable_root(durable)
+
+    (durable / "unexpected").write_text("x", encoding="utf-8")
+    with pytest.raises(controller.ContractError, match="must be empty before prepare"):
+        controller.validate_empty_oss_durable_root(durable)
+
+
+def test_oss_durable_root_rejects_symlink_and_unrecognized_mode(tmp_path: Path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    linked = tmp_path / "linked"
+    linked.symlink_to(target, target_is_directory=True)
+    with pytest.raises((controller.ContractError, RuntimeError), match="canonical"):
+        controller.validate_empty_oss_durable_root(linked)
+
+    target.chmod(0o755)
+    _project_root_ownership(monkeypatch, target)
+    with pytest.raises(controller.ContractError, match="durable root contract failed"):
+        controller.validate_empty_oss_durable_root(target)
+
+
+def test_prepare_reservation_publication_has_closed_allowlist(tmp_path: Path, monkeypatch):
+    durable = tmp_path / "durable"
+    durable.mkdir(mode=0o700)
+    _project_root_ownership(monkeypatch, durable)
+    controller.ensure_empty_oss_durable_root(durable)
+    reservation = {"schema": "test", "value": 1}
+    path = durable / "prepared-reservation.json"
+    controller.write_json_exclusive(path, reservation)
+    assert controller.load_json(path) == reservation
+    controller.require_exact_children(durable, {path.name})
+
+    (durable / "unexpected.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(controller.ContractError, match="allowlist mismatch"):
+        controller.require_exact_children(durable, {path.name})
 
 
 def test_exact_job_accepts_only_priority7_frozen_projection():
