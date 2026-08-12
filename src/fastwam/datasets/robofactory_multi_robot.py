@@ -226,6 +226,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         split_seed: int = 42,
         randomize_agent_order: bool = True,
         required_agent_counts: Optional[list[int] | tuple[int, ...]] = None,
+        required_task_names: Optional[list[str] | tuple[str, ...]] = None,
         pretrained_norm_stats: Optional[str] = None,
         stats_source_root: Optional[str] = None,
         text_embedding_cache_dir: Optional[str] = None,
@@ -268,6 +269,15 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             count < 1 for count in self.required_agent_counts
         ):
             raise ValueError("required_agent_counts must contain only positive integers")
+        self.required_task_names = (
+            None
+            if required_task_names is None
+            else tuple(sorted({str(name).strip() for name in required_task_names}))
+        )
+        if self.required_task_names is not None and (
+            not self.required_task_names or any(not name for name in self.required_task_names)
+        ):
+            raise ValueError("required_task_names must contain only non-empty task names")
         # By default, normalization provenance remains bound to the dataset
         # root exactly as before.  A node-local staging caller may explicitly
         # name the canonical root recorded by the stats file; in that case the
@@ -494,6 +504,11 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                     if (
                         self.required_agent_counts is not None
                         and agent_count not in self.required_agent_counts
+                    ):
+                        continue
+                    if (
+                        self.required_task_names is not None
+                        and task_name not in self.required_task_names
                     ):
                         continue
                     if length < self.action_horizon:

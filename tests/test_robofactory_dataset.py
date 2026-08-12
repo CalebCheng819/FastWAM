@@ -901,6 +901,48 @@ def test_required_agent_counts_select_scope_and_preserve_full_source_provenance(
     }
 
 
+def test_required_task_names_selects_windows_without_changing_source_provenance(tmp_path):
+    first_task = "SyntheticFirst-rf"
+    second_task = "SyntheticSecond-rf"
+    instructions = {
+        first_task: "two robots complete the first synthetic task",
+        second_task: "two robots complete the second synthetic task",
+    }
+    _, cache_dir = _write_demo(
+        tmp_path,
+        task_name=first_task,
+        num_agents=2,
+        instruction=instructions[first_task],
+    )
+    _write_demo(
+        tmp_path,
+        task_name=second_task,
+        num_agents=2,
+        instruction=instructions[second_task],
+    )
+    stats_path = tmp_path / "unified_stats.json"
+    stats_path.write_text(
+        json.dumps(compute_robofactory_stats(str(tmp_path))),
+        encoding="utf-8",
+    )
+
+    selected = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        val_set_proportion=0.0,
+        is_training_set=True,
+        required_agent_counts=[2],
+        required_task_names=[second_task],
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map=instructions,
+    )
+
+    assert set(selected.task_ids) == {second_task}
+    assert selected._source_metadata["files"] == 2
+    assert selected._source_metadata["trajectories"] == 2
+
+
 def test_n4_gate_selection_and_main_n234_scope_use_same_source(tmp_path):
     instructions = {}
     cache_dir = None

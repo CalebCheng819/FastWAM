@@ -423,6 +423,18 @@ def _bare_b4_loss_model(
     return model
 
 
+def _enable_pose_focus_loss(model):
+    model.pose_focus_loss_enabled = True
+    model.pose_focus_active_agent_id = 0
+    model.pose_focus_active_arm_weight = 4.0
+    model.pose_focus_other_arm_weight = 1.0
+    model.pose_focus_gripper_weight = 1.0
+    model.pose_focus_first_steps = 2
+    model.pose_focus_first_steps_weight = 2.0
+    model.pose_focus_gripper_dim = 2
+    return model
+
+
 def _b4_targets_for_action(action):
     gripper = action[..., -1]
     delta = torch.zeros_like(gripper)
@@ -535,6 +547,85 @@ def test_b4_default_off_preserves_original_flow_objective():
     )
     assert torch.equal(actual, expected)
     assert metrics == {}
+
+
+def test_pose_focus_flow_tracks_semantic_agent_through_permutation():
+    model = _enable_pose_focus_loss(_bare_b4_loss_model(enabled=False))
+    target = torch.zeros(1, 2, 3, 3)
+    timestep = torch.tensor([500.0])
+    not_pad = torch.zeros(1, 2, 3, dtype=torch.bool)
+
+    canonical = torch.zeros_like(target)
+    canonical[:, 0, 0, 0] = 1.0
+    canonical_loss = model._multi_action_loss(
+        pred_action=canonical,
+        target_action=target,
+        timestep_action=timestep,
+        action_is_pad=not_pad,
+        agent_ids=torch.tensor([[0, 1]]),
+    )
+
+    permuted = canonical[:, [1, 0]]
+    permuted_loss = model._multi_action_loss(
+        pred_action=permuted,
+        target_action=target,
+        timestep_action=timestep,
+        action_is_pad=not_pad,
+        agent_ids=torch.tensor([[1, 0]]),
+    )
+    assert torch.equal(canonical_loss, permuted_loss)
+
+
+def test_pose_focus_flow_emphasizes_active_early_arm_and_ignores_padding():
+    model = _enable_pose_focus_loss(_bare_b4_loss_model(enabled=False))
+    target = torch.zeros(1, 2, 3, 3)
+    timestep = torch.tensor([500.0])
+    ids = torch.tensor([[0, 1]])
+    not_pad = torch.zeros(1, 2, 3, dtype=torch.bool)
+
+    active_early = torch.zeros_like(target)
+    active_early[:, 0, 0, 0] = 1.0
+    other_early = torch.zeros_like(target)
+    other_early[:, 1, 0, 0] = 1.0
+    active_loss = model._multi_action_loss(
+        pred_action=active_early,
+        target_action=target,
+        timestep_action=timestep,
+        action_is_pad=not_pad,
+        agent_ids=ids,
+    )
+    other_loss = model._multi_action_loss(
+        pred_action=other_early,
+        target_action=target,
+        timestep_action=timestep,
+        action_is_pad=not_pad,
+        agent_ids=ids,
+    )
+    assert torch.allclose(active_loss / other_loss, torch.tensor(8.0))
+
+    padded = not_pad.clone()
+    padded[:, 0, 0] = True
+    padded_loss = model._multi_action_loss(
+        pred_action=active_early,
+        target_action=target,
+        timestep_action=timestep,
+        action_is_pad=padded,
+        agent_ids=ids,
+    )
+    assert padded_loss == 0.0
+
+
+def test_pose_focus_flow_requires_exactly_one_active_agent():
+    model = _enable_pose_focus_loss(_bare_b4_loss_model(enabled=False))
+    action = torch.zeros(1, 2, 3, 3)
+    with pytest.raises(ValueError, match="active semantic agent exactly once"):
+        model._multi_action_loss(
+            pred_action=action,
+            target_action=action,
+            timestep_action=torch.tensor([500.0]),
+            action_is_pad=None,
+            agent_ids=torch.tensor([[1, 1]]),
+        )
 
 
 @pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
@@ -706,6 +797,55 @@ def test_multi_robot_runtime_forwards_b4_loss_contract(monkeypatch):
     assert captured["b4_gripper_dim"] == 7
     assert captured["b4_gripper_action_mean"] == 0.24164481092854787
     assert captured["b4_gripper_action_std"] == 0.9469631616807775
+
+
+def test_multi_robot_runtime_forwards_pose_focus_loss_contract(monkeypatch):
+    from fastwam import runtime
+
+    captured = {}
+
+    def fake_from_pretrained(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        FastWAMMultiRobot,
+        "from_wan22_pretrained",
+        staticmethod(fake_from_pretrained),
+    )
+    runtime.create_multi_robot_fastwam(
+        model_id="unused",
+        tokenizer_model_id="unused",
+        video_dit_config={"text_dim": 16},
+        action_dit_config={},
+        video_scheduler={},
+        action_scheduler={
+            "train_shift": 5.0,
+            "infer_shift": 5.0,
+            "num_train_timesteps": 1000,
+        },
+        loss={
+            "pose_focus": {
+                "enabled": True,
+                "active_agent_id": 0,
+                "active_arm_weight": 4.0,
+                "other_arm_weight": 1.0,
+                "gripper_weight": 1.0,
+                "first_steps": 5,
+                "first_steps_weight": 2.0,
+                "gripper_dim": 7,
+            }
+        },
+        device="cpu",
+    )
+    assert captured["pose_focus_loss_enabled"] is True
+    assert captured["pose_focus_active_agent_id"] == 0
+    assert captured["pose_focus_active_arm_weight"] == 4.0
+    assert captured["pose_focus_other_arm_weight"] == 1.0
+    assert captured["pose_focus_gripper_weight"] == 1.0
+    assert captured["pose_focus_first_steps"] == 5
+    assert captured["pose_focus_first_steps_weight"] == 2.0
+    assert captured["pose_focus_gripper_dim"] == 7
 
 
 def test_geometry_action_preprocessing_is_permutation_equivariant():

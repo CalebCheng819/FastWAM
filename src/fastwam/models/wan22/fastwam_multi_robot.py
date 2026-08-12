@@ -54,6 +54,14 @@ class FastWAMMultiRobot(FastWAM):
         b4_event_temperature: float = 0.05,
         b4_closed_temperature: float = 0.1,
         b4_background_weight: float = 0.25,
+        pose_focus_loss_enabled: bool = False,
+        pose_focus_active_agent_id: int = 0,
+        pose_focus_active_arm_weight: float = 1.0,
+        pose_focus_other_arm_weight: float = 1.0,
+        pose_focus_gripper_weight: float = 1.0,
+        pose_focus_first_steps: int = 0,
+        pose_focus_first_steps_weight: float = 1.0,
+        pose_focus_gripper_dim: int = -1,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -169,6 +177,42 @@ class FastWAMMultiRobot(FastWAM):
         if not 0.0 < self.b4_background_weight <= 1.0:
             raise ValueError("b4_background_weight must be in (0, 1]")
 
+        self.pose_focus_loss_enabled = bool(pose_focus_loss_enabled)
+        self.pose_focus_active_agent_id = int(pose_focus_active_agent_id)
+        self.pose_focus_active_arm_weight = float(pose_focus_active_arm_weight)
+        self.pose_focus_other_arm_weight = float(pose_focus_other_arm_weight)
+        self.pose_focus_gripper_weight = float(pose_focus_gripper_weight)
+        self.pose_focus_first_steps = int(pose_focus_first_steps)
+        self.pose_focus_first_steps_weight = float(pose_focus_first_steps_weight)
+        pose_focus_gripper_dim = int(pose_focus_gripper_dim)
+        if pose_focus_gripper_dim < 0:
+            pose_focus_gripper_dim += action_dim
+        self.pose_focus_gripper_dim = pose_focus_gripper_dim
+        pose_focus_finite = {
+            "pose_focus_active_arm_weight": self.pose_focus_active_arm_weight,
+            "pose_focus_other_arm_weight": self.pose_focus_other_arm_weight,
+            "pose_focus_gripper_weight": self.pose_focus_gripper_weight,
+            "pose_focus_first_steps_weight": self.pose_focus_first_steps_weight,
+        }
+        invalid_pose_focus = [
+            name for name, value in pose_focus_finite.items() if not math.isfinite(value)
+        ]
+        if invalid_pose_focus:
+            raise ValueError(f"Pose-focus loss values must be finite: {invalid_pose_focus}")
+        if self.pose_focus_active_agent_id < 0:
+            raise ValueError("pose_focus_active_agent_id must be non-negative")
+        if any(value <= 0.0 for value in pose_focus_finite.values()):
+            raise ValueError("Pose-focus loss weights must be positive")
+        if self.pose_focus_first_steps < 0:
+            raise ValueError("pose_focus_first_steps must be non-negative")
+        if not 0 <= self.pose_focus_gripper_dim < action_dim:
+            raise ValueError(
+                f"pose_focus_gripper_dim={pose_focus_gripper_dim} is invalid for "
+                f"action_dim={action_dim}"
+            )
+        if self.pose_focus_loss_enabled and self.b4_aux_loss_enabled:
+            raise ValueError("Pose-focus and B4 auxiliary losses cannot be enabled together")
+
     @classmethod
     def from_wan22_pretrained(
         cls,
@@ -210,6 +254,14 @@ class FastWAMMultiRobot(FastWAM):
         b4_event_temperature: float = 0.05,
         b4_closed_temperature: float = 0.1,
         b4_background_weight: float = 0.25,
+        pose_focus_loss_enabled: bool = False,
+        pose_focus_active_agent_id: int = 0,
+        pose_focus_active_arm_weight: float = 1.0,
+        pose_focus_other_arm_weight: float = 1.0,
+        pose_focus_gripper_weight: float = 1.0,
+        pose_focus_first_steps: int = 0,
+        pose_focus_first_steps_weight: float = 1.0,
+        pose_focus_gripper_dim: int = -1,
     ) -> "FastWAMMultiRobot":
         if video_dit_config is None or "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config` with `text_dim` is required.")
@@ -283,6 +335,14 @@ class FastWAMMultiRobot(FastWAM):
             b4_event_temperature=b4_event_temperature,
             b4_closed_temperature=b4_closed_temperature,
             b4_background_weight=b4_background_weight,
+            pose_focus_loss_enabled=pose_focus_loss_enabled,
+            pose_focus_active_agent_id=pose_focus_active_agent_id,
+            pose_focus_active_arm_weight=pose_focus_active_arm_weight,
+            pose_focus_other_arm_weight=pose_focus_other_arm_weight,
+            pose_focus_gripper_weight=pose_focus_gripper_weight,
+            pose_focus_first_steps=pose_focus_first_steps,
+            pose_focus_first_steps_weight=pose_focus_first_steps_weight,
+            pose_focus_gripper_dim=pose_focus_gripper_dim,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -622,15 +682,69 @@ class FastWAMMultiRobot(FastWAM):
         target_action: torch.Tensor,
         timestep_action: torch.Tensor,
         action_is_pad: Optional[torch.Tensor],
+        agent_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        token_loss = F.mse_loss(
+        element_loss = F.mse_loss(
             pred_action.float(), target_action.float(), reduction="none"
-        ).mean(dim=-1)
-        valid = torch.ones_like(token_loss, dtype=torch.bool)
-        if action_is_pad is not None:
-            valid = ~action_is_pad
-        valid_f = valid.to(dtype=token_loss.dtype)
-        per_sample = (token_loss * valid_f).sum(dim=(1, 2)) / valid_f.sum(dim=(1, 2)).clamp(min=1.0)
+        )
+        if getattr(self, "pose_focus_loss_enabled", False):
+            if agent_ids is None:
+                raise ValueError("Pose-focus loss requires semantic agent_ids")
+            expected_ids_shape = pred_action.shape[:2]
+            if agent_ids.shape != expected_ids_shape:
+                raise ValueError(
+                    f"agent_ids must be {expected_ids_shape} for pose-focus loss, "
+                    f"got {tuple(agent_ids.shape)}"
+                )
+            active = agent_ids.to(device=element_loss.device).eq(
+                self.pose_focus_active_agent_id
+            )
+            if not bool(active.sum(dim=1).eq(1).all().item()):
+                raise ValueError(
+                    "Every pose-focus sample must contain the active semantic agent exactly once"
+                )
+            action_dim = element_loss.shape[-1]
+            arm = torch.ones(action_dim, dtype=torch.bool, device=element_loss.device)
+            arm[self.pose_focus_gripper_dim] = False
+            active_arm = active[:, :, None, None] & arm[None, None, None, :]
+            other_arm = (~active)[:, :, None, None] & arm[None, None, None, :]
+            element_weight = torch.full_like(
+                element_loss, self.pose_focus_gripper_weight
+            )
+            element_weight = torch.where(
+                other_arm,
+                torch.as_tensor(
+                    self.pose_focus_other_arm_weight,
+                    device=element_loss.device,
+                    dtype=element_loss.dtype,
+                ),
+                element_weight,
+            )
+            active_weight = torch.full_like(
+                element_loss, self.pose_focus_active_arm_weight
+            )
+            first_steps = min(self.pose_focus_first_steps, element_loss.shape[2])
+            if first_steps:
+                active_weight[:, :, :first_steps] *= self.pose_focus_first_steps_weight
+            element_weight = torch.where(active_arm, active_weight, element_weight)
+            valid = torch.ones(
+                element_loss.shape[:-1], dtype=torch.bool, device=element_loss.device
+            )
+            if action_is_pad is not None:
+                valid = ~action_is_pad
+            element_weight = element_weight * valid[..., None].to(element_loss.dtype)
+            per_sample = (element_loss * element_weight).sum(dim=(1, 2, 3)) / (
+                element_weight.sum(dim=(1, 2, 3)).clamp(min=1.0)
+            )
+        else:
+            token_loss = element_loss.mean(dim=-1)
+            valid = torch.ones_like(token_loss, dtype=torch.bool)
+            if action_is_pad is not None:
+                valid = ~action_is_pad
+            valid_f = valid.to(dtype=token_loss.dtype)
+            per_sample = (token_loss * valid_f).sum(dim=(1, 2)) / valid_f.sum(
+                dim=(1, 2)
+            ).clamp(min=1.0)
         weight = self.train_action_scheduler.training_weight(timestep_action).to(
             device=per_sample.device, dtype=per_sample.dtype
         )
@@ -931,6 +1045,7 @@ class FastWAMMultiRobot(FastWAM):
             target_action=target_action,
             timestep_action=timestep_action,
             action_is_pad=inputs["action_is_pad"],
+            agent_ids=inputs.get("agent_ids"),
         )
         if not getattr(self, "b4_aux_loss_enabled", False):
             return flow_loss, {}

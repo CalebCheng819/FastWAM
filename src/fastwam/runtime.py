@@ -197,6 +197,7 @@ def create_multi_robot_fastwam(
     action_scheduler = _as_dict(action_scheduler, name="action_scheduler")
     loss = _as_dict(loss, name="loss")
     b4_loss = _as_dict(loss.get("b4"), name="loss.b4")
+    pose_focus_loss = _as_dict(loss.get("pose_focus"), name="loss.pose_focus")
     required_scheduler_keys = {"train_shift", "infer_shift", "num_train_timesteps"}
     missing_keys = required_scheduler_keys - set(action_scheduler)
     if missing_keys:
@@ -261,6 +262,22 @@ def create_multi_robot_fastwam(
         b4_event_temperature=float(b4_loss.get("event_temperature", 0.05)),
         b4_closed_temperature=float(b4_loss.get("closed_temperature", 0.1)),
         b4_background_weight=float(b4_loss.get("background_weight", 0.25)),
+        pose_focus_loss_enabled=bool(pose_focus_loss.get("enabled", False)),
+        pose_focus_active_agent_id=int(pose_focus_loss.get("active_agent_id", 0)),
+        pose_focus_active_arm_weight=float(
+            pose_focus_loss.get("active_arm_weight", 1.0)
+        ),
+        pose_focus_other_arm_weight=float(
+            pose_focus_loss.get("other_arm_weight", 1.0)
+        ),
+        pose_focus_gripper_weight=float(
+            pose_focus_loss.get("gripper_weight", 1.0)
+        ),
+        pose_focus_first_steps=int(pose_focus_loss.get("first_steps", 0)),
+        pose_focus_first_steps_weight=float(
+            pose_focus_loss.get("first_steps_weight", 1.0)
+        ),
+        pose_focus_gripper_dim=int(pose_focus_loss.get("gripper_dim", -1)),
     )
 
 

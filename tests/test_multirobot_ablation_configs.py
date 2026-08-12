@@ -12,6 +12,7 @@ TEST_GAUSSIAN_MANIFEST_SHA256 = "1" * 64
 TEST_GAUSSIAN_SELECTION_SHA256 = "2" * 64
 TEST_GAUSSIAN_SOURCE_IDENTITY_SHA256 = "3" * 64
 TEST_B4_BASE_CHECKPOINT = "/oss/test/fastwam-vg1hub1gau1-step-005000.pt"
+TEST_POSE_FOCUS_BASE_CHECKPOINT = "/oss/test/fastwam-action-r5-step-001000.pt"
 
 ARMS = {
     "robofactory_multi_robot_vg0_hub0_gau0_224_1e-4": {
@@ -442,6 +443,66 @@ def test_b4_24gpu_profile_is_action_only_weight_warm_start(monkeypatch):
             cfg["data"][split]["gaussian_cache_expected_source_identity_sha256"]
             is None
         )
+        assert "max_agents" not in cfg["data"][split]
+
+
+def test_pose_focus_24gpu_profile_targets_placefood_robot0_pose(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    for name in (
+        "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT",
+        TEST_POSE_FOCUS_BASE_CHECKPOINT,
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_pose_focus_r5_224_5e-6",
+        "+scale=robofactory_multi_robot_24gpu_pose_focus",
+    )
+
+    assert cfg["resume"] == TEST_POSE_FOCUS_BASE_CHECKPOINT
+    assert cfg["weights_only_warm_start"] == {
+        "enabled": True,
+        "expected_source_training_mode": "action_only_cache",
+        "expected_source_trainable_scope": "action",
+        "expected_source_state_kind": "full",
+    }
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["lambda_action"] == 1.0
+    assert cfg["model"]["loss"]["pose_focus"] == {
+        "enabled": True,
+        "active_agent_id": 0,
+        "active_arm_weight": 4.0,
+        "other_arm_weight": 1.0,
+        "gripper_weight": 1.0,
+        "first_steps": 5,
+        "first_steps_weight": 2.0,
+        "gripper_dim": 7,
+    }
+    assert "b4" not in cfg["model"]["loss"]
+    assert cfg["learning_rate"] == 5.0e-6
+    assert cfg["max_steps"] == 1000
+    assert cfg["save_every"] == 500
+    assert cfg["eval_every"] == 500
+    assert cfg["offline_eval_num_samples"] == 24
+    assert cfg["gradient_accumulation_steps"] == 1
+    assert cfg["checkpoint_state_kind"] == "full"
+    assert cfg["provenance_mode"] == "stat_cmp"
+    assert cfg["save_training_state"] is True
+    assert cfg["seal_training_state"] is False
+    assert cfg["seal_training_run"] is False
+    assert cfg["terminal_rehash_weights"] is False
+
+    for split in ("train", "val"):
+        assert cfg["data"][split]["required_agent_counts"] == [2]
+        assert cfg["data"][split]["required_task_names"] == ["PlaceFood-rf"]
+        assert cfg["data"][split]["load_future_video"] is False
+        assert cfg["data"][split]["gaussian_cache_verify"] == "stat_cmp"
         assert "max_agents" not in cfg["data"][split]
 
 
