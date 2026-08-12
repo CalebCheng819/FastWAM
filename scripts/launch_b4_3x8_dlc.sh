@@ -255,7 +255,7 @@ PY
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   require_exact_env FASTWAM_B4_PROVENANCE_MODE "stat_cmp"
   require_exact_env FASTWAM_B4_INPUT_CACHE_ROOT "/tmp/fastwam-b4-input-cache"
-  require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT "/cpfs/user/chengjuntao"
+  require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao"
   require_exact_env FASTWAM_B4_CPFS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/cpfs-whole-file-bundle.sha256"
   require_exact_env FASTWAM_B4_OSS_SOURCE_ROOT "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
   require_exact_env FASTWAM_B4_OSS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"

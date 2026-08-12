@@ -401,6 +401,64 @@ class T:
             self.assertEqual(persisted["destination_path"], str(destination))
             self.assertIn("newest_source_mtime_ns", persisted)
 
+    def test_stat_cmp_cache_accepts_regular_lock_file_but_not_symlinked_roots(self) -> None:
+        helper = load_stat_cmp_helper()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            lock_file = (
+                source
+                / "checkpoints/FastWAM/model-cache/.lock"
+                / "DiffSynth-Studio___Wan-Series-Converted-Safetensors"
+            )
+            dataset_file = source / "datasets/robofactory_multi_robot/sample.h5"
+            lock_file.parent.mkdir(parents=True)
+            dataset_file.parent.mkdir(parents=True)
+            lock_file.write_bytes(b"")
+            dataset_file.write_bytes(b"fixture")
+            allowlist = root / "selection.sha256"
+            allowlist.write_text(
+                "opaque checkpoints/FastWAM/model-cache/.lock/"
+                "DiffSynth-Studio___Wan-Series-Converted-Safetensors\n"
+                "opaque datasets/robofactory_multi_robot/sample.h5\n",
+                encoding="utf-8",
+            )
+            destination = root / "cache"
+            ready = helper.stage_allowlisted_tree(
+                source_root=source,
+                allowlist=allowlist,
+                destination=destination,
+                run_id="run-b4",
+                attempt_id="attempt-3",
+                source_label="oss_cpfs_mirror",
+            )
+            self.assertEqual(ready["file_count"], 2)
+            self.assertTrue((destination / lock_file.relative_to(source)).is_file())
+            self.assertEqual(
+                (destination / dataset_file.relative_to(source)).read_bytes(), b"fixture"
+            )
+
+            linked_source = root / "linked-source"
+            linked_source.mkdir()
+            (linked_source / "checkpoints").symlink_to(source / "checkpoints", target_is_directory=True)
+            linked_allowlist = root / "linked-selection.sha256"
+            linked_allowlist.write_text(
+                "opaque checkpoints/FastWAM/model-cache/.lock/"
+                "DiffSynth-Studio___Wan-Series-Converted-Safetensors\n",
+                encoding="utf-8",
+            )
+            linked_destination = root / "linked-cache"
+            with self.assertRaises(RuntimeError):
+                helper.stage_allowlisted_tree(
+                    source_root=linked_source,
+                    allowlist=linked_allowlist,
+                    destination=linked_destination,
+                    run_id="run-b4",
+                    attempt_id="attempt-3",
+                    source_label="fixture",
+                )
+            self.assertFalse(linked_destination.exists())
+
     def test_stat_cmp_cache_rejects_traversal_and_symlinks(self) -> None:
         helper = load_stat_cmp_helper()
         with tempfile.TemporaryDirectory() as directory:
@@ -512,6 +570,10 @@ class T:
             self.assertEqual(request["Envs"]["FASTWAM_SOURCE_CHECKOUT_ROOT"], "/tmp/fastwam-source-checkouts")
             self.assertEqual(request["Envs"]["FASTWAM_B4_PROVENANCE_MODE"], "stat_cmp")
             self.assertEqual(
+                request["Envs"]["FASTWAM_B4_CPFS_SOURCE_ROOT"],
+                "/oss-chengjuntao/cpfs-user-chengjuntao",
+            )
+            self.assertEqual(
                 request["Envs"]["FASTWAM_B4_INPUT_CACHE_ROOT"],
                 "/tmp/fastwam-b4-input-cache",
             )
@@ -596,6 +658,16 @@ class T:
         self.assertIn(
             "unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK",
             LAUNCHER.read_text(encoding="utf-8"),
+        )
+        launcher_source = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn(
+            'require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT '
+            '"/oss-chengjuntao/cpfs-user-chengjuntao"',
+            launcher_source,
+        )
+        self.assertNotIn(
+            'require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT "/cpfs/user/chengjuntao"',
+            launcher_source,
         )
 
 
