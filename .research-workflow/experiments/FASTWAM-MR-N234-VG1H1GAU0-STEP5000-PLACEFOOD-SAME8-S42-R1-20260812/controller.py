@@ -21,7 +21,7 @@ RUN_ID = "fastwam-gau0-placefood-same8-r1-20260813"
 DISPLAY_NAME = "fw-gau0-placefood-same8-r1"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-SOURCE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau0-placefood-same8-eval-20260813-r5")
+SOURCE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau0-placefood-same8-eval-20260813-r6")
 OUTPUT_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260813-r1")
 DURABLE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260813-r1-controller")
 RESERVATION_PATH = DURABLE_ROOT / "prepared-reservation.json"
@@ -47,7 +47,8 @@ CONTEXT_BYTES = 1051869
 MODEL_CACHE_ROOT = Path("/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache")
 NVIDIA_GRAPHICS_ROOT = Path("/cpfs/user/chengjuntao/fastwam-deploy/nvidia-graphics-570.153.02")
 PYTHON = Path("/cpfs/user/chengjuntao/venvs/fastwam-gaudp-py310-20260802/bin/python")
-PYTHON_TARGET = Path("/cpfs/user/chengjuntao/runtimes/uv-python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10")
+PYTHON_TARGET = Path("/cpfs/user/chengjuntao/runtimes/uv-python/cpython-3.10-linux-x86_64-gnu/bin/python3.10")
+PYTHON_RESOLVED_TARGET = Path("/cpfs/user/chengjuntao/runtimes/uv-python/cpython-3.10.20-linux-x86_64-gnu/bin/python3.10")
 BASELINE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-multirobot-eval-f89a7a5/PlaceFood-rf/smoke8-f89a7a5-attempt2")
 TRAINING_SOURCE_COMMIT = "dd64664c0a97f1c24c3824159dd8a267120bdd5e"
 TRAINING_JOB_ID = "dlc1hqocuisxxdkb"
@@ -254,7 +255,9 @@ def validate_python() -> None:
     info = PYTHON.lstat()
     if not stat.S_ISLNK(info.st_mode) or os.readlink(PYTHON) != str(PYTHON_TARGET):
         fail("pinned Python symlink target changed")
-    target = require_file(PYTHON_TARGET)
+    if PYTHON.resolve(strict=True) != PYTHON_RESOLVED_TARGET:
+        fail("pinned Python resolved target changed")
+    target = require_file(PYTHON_RESOLVED_TARGET)
     if not target.st_mode & stat.S_IXUSR:
         fail("pinned Python target is not executable")
 
@@ -308,6 +311,7 @@ def runtime_env(source_commit: str) -> dict[str, str]:
         "FASTWAM_NVIDIA_GRAPHICS_ROOT": str(NVIDIA_GRAPHICS_ROOT),
         "FASTWAM_PYTHON": str(PYTHON),
         "FASTWAM_PYTHON_TARGET": str(PYTHON_TARGET),
+        "FASTWAM_PYTHON_RESOLVED_TARGET": str(PYTHON_RESOLVED_TARGET),
         "FASTWAM_BASELINE_ROOT": str(BASELINE_ROOT),
         "FASTWAM_TRAINING_SOURCE_COMMIT": TRAINING_SOURCE_COMMIT,
         "FASTWAM_TRAINING_JOB_ID": TRAINING_JOB_ID,

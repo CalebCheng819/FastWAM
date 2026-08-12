@@ -48,6 +48,41 @@ def test_wrapper_freezes_control_python_link_and_resolved_targets():
     assert 'readlink -f -- "${CONTROL_PYTHON}"' in wrapper
 
 
+def test_validate_python_freezes_immediate_and_final_targets(tmp_path: Path, monkeypatch):
+    final = tmp_path / "python3.10-final"
+    final.write_bytes(b"#!/bin/sh\nexit 0\n")
+    final.chmod(0o700)
+    intermediate = tmp_path / "python3.10"
+    intermediate.symlink_to(final)
+    entry = tmp_path / "python"
+    entry.symlink_to(intermediate)
+
+    monkeypatch.setattr(controller, "PYTHON", entry)
+    monkeypatch.setattr(controller, "PYTHON_TARGET", intermediate)
+    monkeypatch.setattr(controller, "PYTHON_RESOLVED_TARGET", final)
+    controller.validate_python()
+
+    entry.unlink()
+    entry.symlink_to(final)
+    with pytest.raises(controller.ContractError, match="symlink target changed"):
+        controller.validate_python()
+
+    entry.unlink()
+    entry.symlink_to(intermediate)
+    wrong_final = tmp_path / "wrong-final"
+    wrong_final.write_bytes(b"#!/bin/sh\nexit 0\n")
+    wrong_final.chmod(0o700)
+    monkeypatch.setattr(controller, "PYTHON_RESOLVED_TARGET", wrong_final)
+    with pytest.raises(controller.ContractError, match="resolved target changed"):
+        controller.validate_python()
+
+
+def test_runtime_env_freezes_both_worker_python_targets():
+    env = controller.runtime_env("a" * 40)
+    assert env["FASTWAM_PYTHON_TARGET"] == str(controller.PYTHON_TARGET)
+    assert env["FASTWAM_PYTHON_RESOLVED_TARGET"] == str(controller.PYTHON_RESOLVED_TARGET)
+
+
 def test_exact_job_accepts_only_priority7_frozen_projection():
     request = controller.request_body("a" * 40)
     job = _provider_job(request)
