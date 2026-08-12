@@ -34,7 +34,7 @@ try:
     from .fastwam_multi_robot_policy import (
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
-        R5_TRAINING_CODE_COMMIT,
+        B4_TRAINING_CODE_COMMIT,
         TRAINING_CODE_COMMIT,
         TRAINING_STATS_SHA256,
         FastWAMMultiRobotPolicy,
@@ -45,7 +45,7 @@ except ImportError:
     from fastwam_multi_robot_policy import (  # type: ignore[no-redef]
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
-        R5_TRAINING_CODE_COMMIT,
+        B4_TRAINING_CODE_COMMIT,
         TRAINING_CODE_COMMIT,
         TRAINING_STATS_SHA256,
         FastWAMMultiRobotPolicy,
@@ -1821,7 +1821,7 @@ def main() -> None:
         "provenance_policy": "ordinary Git, run, path, timestamp, size, and version identifiers; no new artifact checksums",
         "base_eval_commit": "f89a7a5b7ca0674c78bca5f329398dfa28fb8758",
         "training_code_commit": (
-            R5_TRAINING_CODE_COMMIT
+            B4_TRAINING_CODE_COMMIT
             if args.integrity_mode == "metadata_no_hash"
             else TRAINING_CODE_COMMIT
         ),

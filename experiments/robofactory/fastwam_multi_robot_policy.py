@@ -49,6 +49,7 @@ from fastwam.nohash_artifacts import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRAINING_CODE_COMMIT = "00c0887118e647acf2ec7047dffa26a4231adc9e"
 R5_TRAINING_CODE_COMMIT = "1a690ab49246cbeb841618a86b5bd546f93ddd40"
+B4_TRAINING_CODE_COMMIT = "6ad834248f0fbc1d070c9be97627364174af143c"
 TRAINING_STATS_SHA256 = (
     "92dfdeec62995b625b606d435ffb79ed787c4485348c16c42c3d31875eff64d0"
 )
@@ -621,6 +622,12 @@ def compose_step5000_model_config(project_root: str | Path = PROJECT_ROOT):
 def compose_r5_action_model_config(project_root: str | Path = PROJECT_ROOT):
     """Resolve the R5 action-only architecture in metadata-no-hash mode."""
 
+    return compose_b4_action_model_config(project_root)
+
+
+def compose_b4_action_model_config(project_root: str | Path = PROJECT_ROOT):
+    """Resolve the B4 action-only architecture in metadata-no-hash mode."""
+
     root = Path(project_root).expanduser().resolve()
     data = OmegaConf.load(root / "configs/data/robofactory_multi_robot.yaml")
     model = OmegaConf.load(root / "configs/model/fastwam_multi_robot.yaml")
@@ -764,7 +771,7 @@ class FastWAMMultiRobotPolicy:
         )
 
         model_config = (
-            compose_r5_action_model_config(project_root)
+            compose_b4_action_model_config(project_root)
             if self.integrity_mode == "metadata_no_hash"
             else compose_step5000_model_config(project_root)
         )
@@ -935,7 +942,7 @@ class FastWAMMultiRobotPolicy:
     def provenance(self) -> dict[str, Any]:
         payload = {
             "adapter_training_code_commit": (
-                R5_TRAINING_CODE_COMMIT
+                B4_TRAINING_CODE_COMMIT
                 if self.integrity_mode == "metadata_no_hash"
                 else TRAINING_CODE_COMMIT
             ),
@@ -980,6 +987,7 @@ __all__ = [
     "TextContext",
     "TRAINING_CODE_COMMIT",
     "R5_TRAINING_CODE_COMMIT",
+    "B4_TRAINING_CODE_COMMIT",
     "TRAINING_CONTEXT_SHA256_BY_TASK",
     "TRAINING_STATS_SHA256",
     "canonical_task_name",
@@ -987,6 +995,7 @@ __all__ = [
     "camera_rgb_uint8",
     "compose_step5000_model_config",
     "compose_r5_action_model_config",
+    "compose_b4_action_model_config",
     "denormalize_and_flatten_actions",
     "encode_compact_agent_gaussian",
     "extract_agent_state_and_geometry",

@@ -14,7 +14,7 @@ from experiments.robofactory import diagnose_place_food_fixed as diagnostic
 from experiments.robofactory import fastwam_multi_robot_policy as policy
 
 
-class R5RolloutContractTests(unittest.TestCase):
+class B4RolloutContractTests(unittest.TestCase):
     @staticmethod
     def _split_panel(*, split: str, ordinal: int) -> dict[str, object]:
         fraction = diagnostic._split_fraction_from_ordinal(ordinal, 42)
@@ -142,8 +142,8 @@ class R5RolloutContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("--formal-contract", result.stdout)
 
-    def test_r5_action_only_model_contract(self) -> None:
-        config = policy.compose_r5_action_model_config()
+    def test_b4_action_only_model_contract(self) -> None:
+        config = policy.compose_b4_action_model_config()
 
         self.assertEqual(config.training_mode, "action_only_cache")
         self.assertEqual(config.checkpoint_integrity_mode, "metadata_no_hash")
@@ -154,6 +154,16 @@ class R5RolloutContractTests(unittest.TestCase):
         self.assertTrue(config.action_dit_config.enable_gaussian)
         self.assertEqual(float(config.loss.lambda_video), 0.0)
         self.assertEqual(float(config.loss.lambda_action), 1.0)
+        self.assertEqual(
+            policy.B4_TRAINING_CODE_COMMIT,
+            "6ad834248f0fbc1d070c9be97627364174af143c",
+        )
+
+    def test_r5_config_alias_matches_b4_contract(self) -> None:
+        self.assertEqual(
+            policy.compose_r5_action_model_config(),
+            policy.compose_b4_action_model_config(),
+        )
 
     def test_metadata_no_hash_stats_and_context_never_call_sha256(self) -> None:
         stats_payload = {
