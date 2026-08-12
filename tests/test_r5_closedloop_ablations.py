@@ -16,6 +16,7 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
         contract = {
             "source_root": "/frozen/fastwam",
             "robofactory_root": "/robofactory",
+            "nvidia_driver_lib_dir": "/nvidia/driver-lib",
         }
         cell = ablations.Cell("cell", 1000, 1, "none")
         seed = {
@@ -28,7 +29,11 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
         gpu_pool.put(2)
 
         with (
-            mock.patch.dict(os.environ, {"PYTHONPATH": "src"}, clear=False),
+            mock.patch.dict(
+                os.environ,
+                {"PYTHONPATH": "src", "LD_LIBRARY_PATH": "/cuda/lib64"},
+                clear=False,
+            ),
             mock.patch.object(ablations, "_run_command", return_value=["/python"]),
             mock.patch.object(Path, "exists", return_value=False),
             mock.patch.object(Path, "mkdir"),
@@ -52,6 +57,24 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
             subprocess_env["PYTHONPATH"],
             os.pathsep.join(("/frozen/fastwam/src", "src")),
         )
+        self.assertEqual(
+            subprocess_env["LD_LIBRARY_PATH"],
+            os.pathsep.join(("/nvidia/driver-lib", "/cuda/lib64")),
+        )
+
+    def test_nvidia_driver_library_dir_requires_absolute_complete_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            ablations._nvidia_driver_library_dir(Path("driver-lib"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(ValueError, "lacks required libraries"):
+                ablations._nvidia_driver_library_dir(root)
+            for pattern in ablations.REQUIRED_NVIDIA_DRIVER_LIBRARIES:
+                (root / pattern.replace("*", "570.153.02")).write_bytes(b"driver")
+
+            resolved = ablations._nvidia_driver_library_dir(root)
+
+        self.assertEqual(resolved, str(root))
 
     def test_matrix_separates_replanning_oracles_and_checkpoints(self) -> None:
         cells = {cell.name: cell for cell in ablations.CELLS}

@@ -22,8 +22,14 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v2"
+SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v3"
 REQUESTED_CHECKPOINT_STEPS = (250, 500, 750, 1000, 2500, 5000)
+REQUIRED_NVIDIA_DRIVER_LIBRARIES = (
+    "libEGL_nvidia.so.*",
+    "libGLX_nvidia.so.*",
+    "libnvidia-glvkspirv.so.*",
+    "libnvidia-rtcore.so.*",
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,25 @@ def _python_paths(path: Path) -> tuple[str, str]:
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError(f"Python executable is missing or not executable: {executable}")
     return str(executable), str(executable.resolve(strict=True))
+
+
+def _nvidia_driver_library_dir(path: Path) -> str:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"NVIDIA driver library directory must be absolute: {path}")
+    resolved = expanded.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"NVIDIA driver library directory is not a directory: {resolved}")
+    missing = [
+        pattern
+        for pattern in REQUIRED_NVIDIA_DRIVER_LIBRARIES
+        if not any(candidate.is_file() for candidate in resolved.glob(pattern))
+    ]
+    if missing:
+        raise ValueError(
+            f"NVIDIA driver library directory lacks required libraries: {missing}"
+        )
+    return str(resolved)
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -151,6 +176,9 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     if missing:
         raise FileNotFoundError(f"Runnable checkpoint steps are missing: {missing}")
     python_executable, python_realpath = _python_paths(args.python)
+    nvidia_driver_lib_dir = _nvidia_driver_library_dir(
+        args.nvidia_driver_lib_dir
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "experiment_id": args.experiment_id,
@@ -162,6 +190,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "python": python_executable,
         "python_realpath": python_realpath,
+        "nvidia_driver_lib_dir": nvidia_driver_lib_dir,
         "panel": str(args.panel.resolve(strict=True)),
         "dataset_root": str(args.dataset_root.resolve(strict=True)),
         "robofactory_root": str(args.robofactory_root.resolve(strict=True)),
@@ -351,6 +380,14 @@ def _one_run(
         if not inherited_pythonpath
         else os.pathsep.join((source_pythonpath, inherited_pythonpath))
     )
+    inherited_ld_library_path = env.get("LD_LIBRARY_PATH")
+    env["LD_LIBRARY_PATH"] = (
+        contract["nvidia_driver_lib_dir"]
+        if not inherited_ld_library_path
+        else os.pathsep.join(
+            (contract["nvidia_driver_lib_dir"], inherited_ld_library_path)
+        )
+    )
     try:
         with log_path.open("x", encoding="utf-8") as log:
             process = subprocess.run(
@@ -535,6 +572,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-cache-root", type=_path, required=True)
     parser.add_argument("--policy-lightning-repo", type=_path, required=True)
     parser.add_argument("--noposplat-checkpoint", type=_path, required=True)
+    parser.add_argument("--nvidia-driver-lib-dir", type=_path, required=True)
     parser.add_argument("--gpus", type=int, nargs="+", default=[0, 1, 2, 3])
     return parser
 
