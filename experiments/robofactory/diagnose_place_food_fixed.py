@@ -34,8 +34,6 @@ try:
     from .fastwam_multi_robot_policy import (
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
-        B4_TRAINING_CODE_COMMIT,
-        TRAINING_CODE_COMMIT,
         TRAINING_STATS_SHA256,
         FastWAMMultiRobotPolicy,
         encode_compact_agent_gaussian,
@@ -45,8 +43,6 @@ except ImportError:
     from fastwam_multi_robot_policy import (  # type: ignore[no-redef]
         NOPOSPLAT_CHECKPOINT_SHA256,
         POLICY_LIGHTNING_COMMIT,
-        B4_TRAINING_CODE_COMMIT,
-        TRAINING_CODE_COMMIT,
         TRAINING_STATS_SHA256,
         FastWAMMultiRobotPolicy,
         encode_compact_agent_gaussian,
@@ -1717,6 +1713,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=None)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument(
+        "--training-code-commit",
+        required=True,
+        help="Git commit used to train the selected checkpoint",
+    )
+    parser.add_argument(
         "--integrity-mode",
         choices=("metadata_no_hash", "sha256"),
         default="metadata_no_hash",
@@ -1820,11 +1821,7 @@ def main() -> None:
         "started_at": started_at,
         "provenance_policy": "ordinary Git, run, path, timestamp, size, and version identifiers; no new artifact checksums",
         "base_eval_commit": "f89a7a5b7ca0674c78bca5f329398dfa28fb8758",
-        "training_code_commit": (
-            B4_TRAINING_CODE_COMMIT
-            if args.integrity_mode == "metadata_no_hash"
-            else TRAINING_CODE_COMMIT
-        ),
+        "training_code_commit": str(args.training_code_commit),
         "robofactory_expected_commit": ROBOFACTORY_COMMIT,
         "runtime_code_path": str(Path(__file__).resolve().parents[2]),
         "python": {"executable": sys.executable, "version": sys.version, "platform": platform.platform()},

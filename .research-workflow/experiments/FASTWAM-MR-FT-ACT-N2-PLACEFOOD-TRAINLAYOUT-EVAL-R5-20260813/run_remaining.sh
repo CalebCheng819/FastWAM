@@ -13,6 +13,15 @@ smoke_dir="$output_root/train/episode-00"
 aggregate="$output_root/aggregate.json"
 logs_dir="$output_root/logs"
 
+if [[ "$output_root" != /oss-chengjuntao/* ]]; then
+  echo "output-root must be under /oss-chengjuntao" >&2
+  exit 2
+fi
+if ! mountpoint -q /oss-chengjuntao || [[ ! -w /oss-chengjuntao ]]; then
+  echo "/oss-chengjuntao is not a writable mount" >&2
+  exit 3
+fi
+
 if [[ ! -d "$smoke_dir" || ! -f "$smoke_dir/summary.json" || ! -f "$smoke_dir/run_manifest.json" ]]; then
   echo "train episode 00 smoke output is not present" >&2
   exit 3
@@ -46,6 +55,15 @@ if not isinstance(episode, dict) or episode.get("split") != "train" or int(episo
     raise SystemExit("smoke episode identity mismatch")
 PY
 
+gpu_count=${FASTWAM_EVAL_GPU_COUNT:-}
+if [[ -z "$gpu_count" ]]; then
+  gpu_count=$(nvidia-smi --list-gpus | wc -l)
+fi
+if [[ ! "$gpu_count" =~ ^[1-8]$ ]]; then
+  echo "FASTWAM_EVAL_GPU_COUNT must resolve to an integer from 1 through 8" >&2
+  exit 5
+fi
+
 mkdir -- "$logs_dir"
 
 run_worker() {
@@ -64,17 +82,22 @@ run_worker() {
   done
 }
 
-run_worker 0 train:1 train:5 val:1 val:5 &
-pid0=$!
-run_worker 1 train:2 train:6 val:2 val:6 &
-pid1=$!
-run_worker 2 train:3 train:7 val:3 val:7 &
-pid2=$!
-run_worker 3 train:4 val:0 val:4 &
-pid3=$!
+tokens=(
+  train:1 train:2 train:3 train:4 train:5 train:6 train:7
+  val:0 val:1 val:2 val:3 val:4 val:5 val:6 val:7
+)
+pids=()
+for ((gpu = 0; gpu < gpu_count; gpu++)); do
+  worker_tokens=()
+  for ((index = gpu; index < ${#tokens[@]}; index += gpu_count)); do
+    worker_tokens+=("${tokens[$index]}")
+  done
+  run_worker "$gpu" "${worker_tokens[@]}" &
+  pids+=("$!")
+done
 
 status=0
-for pid in "$pid0" "$pid1" "$pid2" "$pid3"; do
+for pid in "${pids[@]}"; do
   if ! wait "$pid"; then
     status=1
   fi
@@ -86,4 +109,8 @@ fi
 
 exec "$python_bin" -B "$script_dir/aggregate_results.py" \
   --root "$output_root" \
+  --expected-checkpoint \
+  /oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt \
+  --expected-training-code-commit 1a690ab49246cbeb841618a86b5bd546f93ddd40 \
+  --comparison "R5 PlaceFood-rf task-specific checkpoint on frozen train-layout and validation-layout panels" \
   --output "$aggregate"

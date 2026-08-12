@@ -141,6 +141,7 @@ class B4RolloutContractTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("--formal-contract", result.stdout)
+        self.assertIn("--training-code-commit", result.stdout)
 
     def test_b4_launcher_pins_and_validates_vulkan_runtime(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -162,6 +163,7 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertIn(
             'export __EGL_VENDOR_LIBRARY_FILENAMES="$egl_vendor"', launcher
         )
+        self.assertIn(policy.B4_TRAINING_CODE_COMMIT, launcher)
 
     def test_b4_batch_runner_supports_actual_gpu_count(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -176,7 +178,36 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertIn("nvidia-smi --list-gpus", runner)
         self.assertIn('for ((gpu = 0; gpu < gpu_count; gpu++))', runner)
         self.assertIn("--expected-checkpoint", runner)
+        self.assertIn("--expected-training-code-commit", runner)
         self.assertIn("step_002500.pt", runner)
+
+    def test_r5_launcher_pins_vulkan_and_training_commit(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        launcher = (
+            root
+            / ".research-workflow/experiments"
+            / "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-TRAINLAYOUT-EVAL-R5-20260813"
+            / "run_one.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("FASTWAM_NVIDIA_GRAPHICS_ROOT", launcher)
+        self.assertIn('export VK_ICD_FILENAMES="$vulkan_icd"', launcher)
+        self.assertIn("1a690ab49246cbeb841618a86b5bd546f93ddd40", launcher)
+        self.assertIn("/oss-chengjuntao/*", launcher)
+
+    def test_r5_batch_runner_supports_actual_gpu_count(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        runner = (
+            root
+            / ".research-workflow/experiments"
+            / "FASTWAM-MR-FT-ACT-N2-PLACEFOOD-TRAINLAYOUT-EVAL-R5-20260813"
+            / "run_remaining.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("FASTWAM_EVAL_GPU_COUNT", runner)
+        self.assertIn("nvidia-smi --list-gpus", runner)
+        self.assertIn('for ((gpu = 0; gpu < gpu_count; gpu++))', runner)
+        self.assertIn("--expected-training-code-commit", runner)
 
     def test_b4_action_only_model_contract(self) -> None:
         config = policy.compose_b4_action_model_config()

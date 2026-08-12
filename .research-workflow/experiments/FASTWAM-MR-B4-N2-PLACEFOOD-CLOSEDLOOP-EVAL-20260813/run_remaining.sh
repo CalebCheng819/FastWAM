@@ -95,5 +95,6 @@ exec "$python_bin" -B "$aggregate_script" \
   --root "$output_root" \
   --expected-checkpoint \
   /oss-chengjuntao/artifacts/fastwam-mr-n234-b4-phase-gripcontact-actft-s42-24g-r4-20260812/checkpoints/weights/step_002500.pt \
+  --expected-training-code-commit 6ad834248f0fbc1d070c9be97627364174af143c \
   --comparison "B4 checkpoint on frozen PlaceFood-rf train-layout and validation-layout panels" \
   --output "$aggregate"

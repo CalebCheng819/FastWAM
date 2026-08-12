@@ -104,6 +104,7 @@ exec "$python_bin" -B "$evaluator" \
   --initial-state raw \
   --exec-horizon 5 \
   --checkpoint "$checkpoint" \
+  --training-code-commit 6ad834248f0fbc1d070c9be97627364174af143c \
   --integrity-mode metadata_no_hash \
   --stats "$stats" \
   --context-file "$context_file" \

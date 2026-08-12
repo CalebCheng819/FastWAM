@@ -23,6 +23,7 @@ EXPECTED_CHECKPOINT = (
     "fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/"
     "step_001000.pt"
 )
+EXPECTED_TRAINING_CODE_COMMIT = "1a690ab49246cbeb841618a86b5bd546f93ddd40"
 EXPECTED_FORMAL_ROLLOUT_CONTRACT = {
     "max_steps": 300,
     "initial_state": "raw",
@@ -61,6 +62,7 @@ def _episode(
     index: int,
     *,
     expected_checkpoint: str,
+    expected_training_code_commit: str,
 ) -> dict[str, Any]:
     episode_dir = root / split / f"episode-{index:02d}"
     summary = _load_json(episode_dir / "summary.json")
@@ -88,6 +90,8 @@ def _episode(
         raise ValueError(f"formal rollout contract was not requested: {episode_dir}")
     if manifest.get("formal_rollout_contract") != EXPECTED_FORMAL_ROLLOUT_CONTRACT:
         raise ValueError(f"formal rollout contract mismatch: {episode_dir}")
+    if manifest.get("training_code_commit") != expected_training_code_commit:
+        raise ValueError(f"training code commit mismatch: {episode_dir}")
     argv = manifest.get("argv")
     if not isinstance(argv, list) or "--formal-contract" not in argv:
         raise ValueError(f"formal evaluator argv is absent: {episode_dir}")
@@ -96,6 +100,11 @@ def _episode(
             raise ValueError(f"evaluator argument mismatch for {flag}: {episode_dir}")
     if _single_argv_value(argv, "--checkpoint", episode_dir) != expected_checkpoint:
         raise ValueError(f"evaluator checkpoint mismatch: {episode_dir}")
+    if (
+        _single_argv_value(argv, "--training-code-commit", episode_dir)
+        != expected_training_code_commit
+    ):
+        raise ValueError(f"evaluator training code commit mismatch: {episode_dir}")
     if not isinstance(selected, dict):
         raise ValueError(f"selected episode metadata is absent: {episode_dir}")
     if selected.get("split") != split:
@@ -159,6 +168,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--expected-checkpoint", default=EXPECTED_CHECKPOINT)
     parser.add_argument(
+        "--expected-training-code-commit",
+        default=EXPECTED_TRAINING_CODE_COMMIT,
+    )
+    parser.add_argument(
         "--comparison",
         default=(
             "same R5 FastWAM checkpoint and evaluator; only the recorded "
@@ -173,6 +186,7 @@ def main() -> None:
             split,
             index,
             expected_checkpoint=args.expected_checkpoint,
+            expected_training_code_commit=args.expected_training_code_commit,
         )
         for split in EXPECTED_SPLITS
         for index in range(EXPECTED_EPISODES_PER_SPLIT)
