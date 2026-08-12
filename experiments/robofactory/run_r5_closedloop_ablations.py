@@ -13,6 +13,7 @@ import concurrent.futures
 import json
 import os
 import queue
+import stat
 import subprocess
 import sys
 import time
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v3"
+SCHEMA_VERSION = "fastwam-r5-closedloop-ablations-v4"
 REQUESTED_CHECKPOINT_STEPS = (250, 500, 750, 1000, 2500, 5000)
 REQUIRED_NVIDIA_DRIVER_LIBRARIES = (
     "libEGL_nvidia.so.*",
@@ -90,6 +91,35 @@ def _nvidia_driver_library_dir(path: Path) -> str:
             f"NVIDIA driver library directory lacks required libraries: {missing}"
         )
     return str(resolved)
+
+
+def _nvidia_graphics_manifest(
+    path: Path, *, label: str, expected_library_prefix: str
+) -> str:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"{label} must be an absolute path: {path}")
+    candidate = Path(os.path.abspath(expanded))
+    metadata = candidate.lstat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular non-symlink file: {candidate}")
+    payload = _read_json(candidate)
+    library_value = payload.get("ICD", {}).get("library_path")
+    if not isinstance(library_value, str) or not library_value:
+        raise ValueError(f"{label} lacks ICD.library_path: {candidate}")
+    library = Path(library_value)
+    if not library.is_absolute():
+        raise ValueError(f"{label} library_path must be absolute: {library_value}")
+    library_metadata = library.lstat()
+    if not stat.S_ISREG(library_metadata.st_mode):
+        raise ValueError(
+            f"{label} library_path must be a regular non-symlink file: {library}"
+        )
+    if not library.name.startswith(expected_library_prefix):
+        raise ValueError(
+            f"{label} library_path has unexpected library identity: {library}"
+        )
+    return str(candidate.resolve(strict=True))
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -179,6 +209,16 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
     nvidia_driver_lib_dir = _nvidia_driver_library_dir(
         args.nvidia_driver_lib_dir
     )
+    nvidia_vulkan_icd = _nvidia_graphics_manifest(
+        args.nvidia_vulkan_icd,
+        label="NVIDIA Vulkan ICD",
+        expected_library_prefix="libGLX_nvidia.so.",
+    )
+    nvidia_egl_vendor_json = _nvidia_graphics_manifest(
+        args.nvidia_egl_vendor_json,
+        label="NVIDIA EGL vendor JSON",
+        expected_library_prefix="libEGL_nvidia.so.",
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "experiment_id": args.experiment_id,
@@ -191,6 +231,8 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
         "python": python_executable,
         "python_realpath": python_realpath,
         "nvidia_driver_lib_dir": nvidia_driver_lib_dir,
+        "nvidia_vulkan_icd": nvidia_vulkan_icd,
+        "nvidia_egl_vendor_json": nvidia_egl_vendor_json,
         "panel": str(args.panel.resolve(strict=True)),
         "dataset_root": str(args.dataset_root.resolve(strict=True)),
         "robofactory_root": str(args.robofactory_root.resolve(strict=True)),
@@ -388,6 +430,12 @@ def _one_run(
             (contract["nvidia_driver_lib_dir"], inherited_ld_library_path)
         )
     )
+    env["VK_ICD_FILENAMES"] = str(contract["nvidia_vulkan_icd"])
+    env["VK_DRIVER_FILES"] = str(contract["nvidia_vulkan_icd"])
+    env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+    env["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(
+        contract["nvidia_egl_vendor_json"]
+    )
     try:
         with log_path.open("x", encoding="utf-8") as log:
             process = subprocess.run(
@@ -573,6 +621,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy-lightning-repo", type=_path, required=True)
     parser.add_argument("--noposplat-checkpoint", type=_path, required=True)
     parser.add_argument("--nvidia-driver-lib-dir", type=_path, required=True)
+    parser.add_argument("--nvidia-vulkan-icd", type=_path, required=True)
+    parser.add_argument("--nvidia-egl-vendor-json", type=_path, required=True)
     parser.add_argument("--gpus", type=int, nargs="+", default=[0, 1, 2, 3])
     return parser
 

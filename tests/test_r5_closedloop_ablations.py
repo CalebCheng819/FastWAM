@@ -17,6 +17,8 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
             "source_root": "/frozen/fastwam",
             "robofactory_root": "/robofactory",
             "nvidia_driver_lib_dir": "/nvidia/driver-lib",
+            "nvidia_vulkan_icd": "/nvidia/nvidia_icd.json",
+            "nvidia_egl_vendor_json": "/nvidia/10_nvidia.json",
         }
         cell = ablations.Cell("cell", 1000, 1, "none")
         seed = {
@@ -61,6 +63,17 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
             subprocess_env["LD_LIBRARY_PATH"],
             os.pathsep.join(("/nvidia/driver-lib", "/cuda/lib64")),
         )
+        self.assertEqual(
+            subprocess_env["VK_ICD_FILENAMES"], "/nvidia/nvidia_icd.json"
+        )
+        self.assertEqual(
+            subprocess_env["VK_DRIVER_FILES"], "/nvidia/nvidia_icd.json"
+        )
+        self.assertEqual(subprocess_env["__GLX_VENDOR_LIBRARY_NAME"], "nvidia")
+        self.assertEqual(
+            subprocess_env["__EGL_VENDOR_LIBRARY_FILENAMES"],
+            "/nvidia/10_nvidia.json",
+        )
 
     def test_nvidia_driver_library_dir_requires_absolute_complete_directory(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be absolute"):
@@ -75,6 +88,50 @@ class R5ClosedLoopAblationTests(unittest.TestCase):
             resolved = ablations._nvidia_driver_library_dir(root)
 
         self.assertEqual(resolved, str(root))
+
+    def test_nvidia_graphics_manifest_pins_regular_expected_library(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            driver = root / "libGLX_nvidia.so.570.153.02"
+            driver.write_bytes(b"driver")
+            manifest = root / "nvidia_icd.json"
+            manifest.write_text(
+                json.dumps({"ICD": {"library_path": str(driver)}}),
+                encoding="utf-8",
+            )
+
+            resolved = ablations._nvidia_graphics_manifest(
+                manifest,
+                label="NVIDIA Vulkan ICD",
+                expected_library_prefix="libGLX_nvidia.so.",
+            )
+
+            self.assertEqual(resolved, str(manifest))
+
+    def test_nvidia_graphics_manifest_rejects_symlink_and_wrong_library(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wrong = root / "libEGL_mesa.so.0"
+            wrong.write_bytes(b"mesa")
+            manifest = root / "nvidia_icd.json"
+            manifest.write_text(
+                json.dumps({"ICD": {"library_path": str(wrong)}}),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "unexpected library identity"):
+                ablations._nvidia_graphics_manifest(
+                    manifest,
+                    label="NVIDIA Vulkan ICD",
+                    expected_library_prefix="libGLX_nvidia.so.",
+                )
+            linked = root / "linked.json"
+            linked.symlink_to(manifest)
+            with self.assertRaisesRegex(ValueError, "regular non-symlink"):
+                ablations._nvidia_graphics_manifest(
+                    linked,
+                    label="NVIDIA Vulkan ICD",
+                    expected_library_prefix="libGLX_nvidia.so.",
+                )
 
     def test_matrix_separates_replanning_oracles_and_checkpoints(self) -> None:
         cells = {cell.name: cell for cell in ablations.CELLS}
