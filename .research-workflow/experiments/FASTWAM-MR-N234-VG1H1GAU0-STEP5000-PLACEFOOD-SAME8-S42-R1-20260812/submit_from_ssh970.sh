@@ -17,8 +17,9 @@ die() {
 
 [[ -n "${SSH_CONNECTION:-}" ]] || die 'must be invoked through SSH'
 read -r -a ssh_fields <<<"${SSH_CONNECTION}"
-[[ "${#ssh_fields[@]}" == '4' && "${ssh_fields[3]}" == '970' ]] \
-  || die 'must be invoked through the frozen SSH970 endpoint'
+[[ "${#ssh_fields[@]}" == '4' ]] || die 'malformed SSH connection metadata'
+[[ "${ssh_fields[1]}" =~ ^[0-9]+$ && "${ssh_fields[3]}" =~ ^[0-9]+$ ]] \
+  || die 'malformed SSH connection ports'
 [[ "$(id -u)" == '0' ]] || die 'must run as root'
 [[ -L "${CONTROL_PYTHON}" ]] || die 'control Python is not a symlink'
 [[ "$(readlink -- "${CONTROL_PYTHON}")" == "${CONTROL_PYTHON_TARGET}" ]] || die 'control Python target changed'
