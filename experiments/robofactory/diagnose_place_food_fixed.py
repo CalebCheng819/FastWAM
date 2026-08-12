@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one fixed PlaceFood FastWAM closed-loop rollout or expert diagnostic.
 
-The command is intentionally narrow: it binds the held-out panel episode to
+The command is intentionally narrow: it binds one frozen panel episode to
 one simulator initial state, records every closed-loop policy query, compares
 the persisted and online first-frame Gaussian inputs, and evaluates the same
 policy by teacher forcing over the episode's stored expert states.
@@ -55,6 +55,10 @@ except ImportError:
 
 
 ROBOFACTORY_COMMIT = "2d34fb38c80cb06550a5dbf99abac2c89f4336ed"
+LEGACY_HELDOUT_PANEL_SCHEMA = "fastwam-robofactory-heldout-panel-v1"
+SPLIT_PANEL_SCHEMA = "fastwam-robofactory-split-panel-nohash-v1"
+SPLIT_KEY_SCHEME = "sorted_trajectory_ordinal_splitmix64_v1"
+_UINT64_MASK = (1 << 64) - 1
 TASK_CONFIGS = {
     "PlaceFood-rf": "configs/table/place_food.yaml",
     "PlaceCubeInCup-rf": "configs/table/place_cube_in_cup.yaml",
@@ -63,6 +67,26 @@ TASK_CONFIGS = {
     "ThreeRobotsStackCube-rf": "configs/table/three_robots_stack_cube.yaml",
     "FourRobotsStackCube-rf": "configs/table/four_robots_stack_cube.yaml",
 }
+
+
+def _mix_uint64(*values: int) -> int:
+    """Mirror the dataset's no-hash integer split mixer exactly."""
+
+    state = 0x9E3779B97F4A7C15
+    for value in values:
+        state = (
+            state
+            + (int(value) & _UINT64_MASK)
+            + 0x9E3779B97F4A7C15
+        ) & _UINT64_MASK
+        state = ((state ^ (state >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+        state = ((state ^ (state >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+        state ^= state >> 31
+    return state & _UINT64_MASK
+
+
+def _split_fraction_from_ordinal(ordinal: int, seed: int) -> float:
+    return _mix_uint64(seed, ordinal) / float(2**64)
 
 
 def _selected_episodes(
@@ -300,10 +324,76 @@ def _publish_video(
 def _load_panel_nohash(path: Path) -> dict[str, Any]:
     resolved = path.expanduser().resolve(strict=True)
     payload = json.loads(resolved.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != "fastwam-robofactory-heldout-panel-v1":
-        raise ValueError(f"Unexpected held-out panel schema: {payload.get('schema_version')!r}")
+    schema = payload.get("schema_version")
+    if schema not in {LEGACY_HELDOUT_PANEL_SCHEMA, SPLIT_PANEL_SCHEMA}:
+        raise ValueError(f"Unexpected rollout panel schema: {schema!r}")
     if not isinstance(payload.get("episodes"), list):
-        raise TypeError("Held-out panel must contain an episodes list")
+        raise TypeError("Rollout panel must contain an episodes list")
+    if schema == LEGACY_HELDOUT_PANEL_SCHEMA:
+        return payload
+
+    split = payload.get("split")
+    if split not in {"train", "val"}:
+        raise ValueError(f"Split panel must declare split=train or val, got {split!r}")
+    if payload.get("split_key_scheme") != SPLIT_KEY_SCHEME:
+        raise ValueError(
+            "Split panel key scheme mismatch: "
+            f"{payload.get('split_key_scheme')!r}"
+        )
+    split_seed = int(payload.get("split_seed"))
+    val_set_proportion = float(payload.get("val_set_proportion"))
+    if not 0.0 < val_set_proportion < 1.0:
+        raise ValueError("val_set_proportion must be strictly between zero and one")
+    if not payload["episodes"]:
+        raise ValueError("Split panel episodes must not be empty")
+    paired_policy_seeds = payload.get("paired_policy_seeds")
+    if not isinstance(paired_policy_seeds, list):
+        raise TypeError("Split panel must contain a paired_policy_seeds list")
+    if len(paired_policy_seeds) != len(payload["episodes"]):
+        raise ValueError(
+            "paired_policy_seeds length must equal the split panel episode count"
+        )
+    normalized_policy_seeds = [int(value) for value in paired_policy_seeds]
+    if len(set(normalized_policy_seeds)) != len(normalized_policy_seeds):
+        raise ValueError("paired_policy_seeds must be unique")
+
+    identities: set[tuple[str, str]] = set()
+    ordinals: set[int] = set()
+    for expected_index, record in enumerate(payload["episodes"]):
+        if not isinstance(record, Mapping):
+            raise TypeError("Every split panel episode must be an object")
+        task_index = int(record["task_index"])
+        panel_index = int(record["panel_index"])
+        if task_index != expected_index or panel_index != expected_index:
+            raise ValueError(
+                "Split panel task_index and panel_index must match list order: "
+                f"position={expected_index} task_index={task_index} "
+                f"panel_index={panel_index}"
+            )
+        ordinal = int(record["global_ordinal"])
+        if ordinal < 0 or ordinal in ordinals:
+            raise ValueError(f"Invalid or duplicate global_ordinal: {ordinal}")
+        ordinals.add(ordinal)
+        recorded_fraction = float(record["split_fraction"])
+        expected_fraction = _split_fraction_from_ordinal(ordinal, split_seed)
+        if recorded_fraction != expected_fraction:
+            raise ValueError(
+                f"Split fraction mismatch at global_ordinal={ordinal}: "
+                f"recorded={recorded_fraction!r} expected={expected_fraction!r}"
+            )
+        expected_split = (
+            "val" if expected_fraction < val_set_proportion else "train"
+        )
+        if record.get("split") != split or expected_split != split:
+            raise ValueError(
+                f"Episode split mismatch at global_ordinal={ordinal}: "
+                f"panel={split!r} episode={record.get('split')!r} "
+                f"computed={expected_split!r}"
+            )
+        identity = (str(record["source_path"]), str(record["trajectory"]))
+        if identity in identities:
+            raise ValueError(f"Duplicate episode identity: {identity!r}")
+        identities.add(identity)
     return payload
 
 
@@ -1745,7 +1835,25 @@ def main() -> None:
     _atomic_json(args.output_dir / "run_manifest.json", manifest)
     try:
         panel = _load_panel_nohash(args.panel)
+        manifest["panel"] = {
+            "path": str(args.panel.expanduser().resolve(strict=True)),
+            "schema_version": str(panel["schema_version"]),
+            "split": panel.get("split"),
+            "split_seed": panel.get("split_seed"),
+            "val_set_proportion": panel.get("val_set_proportion"),
+            "split_key_scheme": panel.get("split_key_scheme"),
+            "episode_count": len(panel["episodes"]),
+        }
         episode = _selected_episodes(panel, args.task, args.episode_start, 1)[0]
+        if panel["schema_version"] == SPLIT_PANEL_SCHEMA:
+            expected_policy_seed = int(
+                panel["paired_policy_seeds"][int(episode["panel_index"])]
+            )
+            if int(args.policy_seed) != expected_policy_seed:
+                raise ValueError(
+                    "Policy seed does not match the frozen split-panel pairing: "
+                    f"got={args.policy_seed} expected={expected_policy_seed}"
+                )
         source = _source_path(args.dataset_root, str(episode["source_path"]))
         if source.stat().st_size != int(episode["source_h5_bytes"]):
             raise ValueError(f"Source H5 byte-size mismatch: {source}")
@@ -1761,6 +1869,7 @@ def main() -> None:
             )
         manifest["episode"] = {
             "task": args.task,
+            "policy_seed": int(args.policy_seed),
             "panel_index": int(episode["panel_index"]),
             "task_index": int(episode["task_index"]),
             "episode_id": int(episode["episode_id"]),
@@ -1772,6 +1881,9 @@ def main() -> None:
             "agent_names": agent_names,
             "expert_actions": next(iter(actions.values())).shape[0],
             "expert_states": len(states),
+            "split": episode.get("split"),
+            "global_ordinal": episode.get("global_ordinal"),
+            "split_fraction": episode.get("split_fraction"),
         }
         init_started = time.monotonic()
         policy = FastWAMMultiRobotPolicy(

@@ -15,6 +15,79 @@ from experiments.robofactory import fastwam_multi_robot_policy as policy
 
 
 class R5RolloutContractTests(unittest.TestCase):
+    @staticmethod
+    def _split_panel(*, split: str, ordinal: int) -> dict[str, object]:
+        fraction = diagnostic._split_fraction_from_ordinal(ordinal, 42)
+        return {
+            "schema_version": diagnostic.SPLIT_PANEL_SCHEMA,
+            "split": split,
+            "split_seed": 42,
+            "val_set_proportion": 0.1,
+            "split_key_scheme": diagnostic.SPLIT_KEY_SCHEME,
+            "paired_policy_seeds": [10000],
+            "episodes": [
+                {
+                    "task_name": "PlaceFood-rf",
+                    "task_index": 0,
+                    "panel_index": 0,
+                    "episode_id": 100,
+                    "episode_seed": 333219,
+                    "source_path": "demos/PlaceFood-rf/example.h5",
+                    "source_h5_bytes": 123,
+                    "trajectory": "traj_100",
+                    "agent_names": ["panda-0", "panda-1"],
+                    "global_ordinal": ordinal,
+                    "split_fraction": fraction,
+                    "split": split,
+                }
+            ],
+        }
+
+    def test_split_panel_recomputes_and_accepts_val_membership(self) -> None:
+        panel = self._split_panel(split="val", ordinal=1190)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.json"
+            path.write_text(json.dumps(panel), encoding="utf-8")
+            loaded = diagnostic._load_panel_nohash(path)
+
+        self.assertEqual(loaded["split"], "val")
+        self.assertEqual(loaded["episodes"][0]["global_ordinal"], 1190)
+
+    def test_split_panel_rejects_mislabeled_membership(self) -> None:
+        panel = self._split_panel(split="train", ordinal=1190)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.json"
+            path.write_text(json.dumps(panel), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Episode split mismatch"):
+                diagnostic._load_panel_nohash(path)
+
+    def test_split_panel_rejects_fraction_drift(self) -> None:
+        panel = self._split_panel(split="val", ordinal=1190)
+        panel["episodes"][0]["split_fraction"] = 0.09
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.json"
+            path.write_text(json.dumps(panel), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Split fraction mismatch"):
+                diagnostic._load_panel_nohash(path)
+
+    def test_split_panel_rejects_policy_seed_cardinality_drift(self) -> None:
+        panel = self._split_panel(split="val", ordinal=1190)
+        panel["paired_policy_seeds"] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.json"
+            path.write_text(json.dumps(panel), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "length must equal"):
+                diagnostic._load_panel_nohash(path)
+
+    def test_split_panel_rejects_index_order_drift(self) -> None:
+        panel = self._split_panel(split="val", ordinal=1190)
+        panel["episodes"][0]["panel_index"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "panel.json"
+            path.write_text(json.dumps(panel), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must match list order"):
+                diagnostic._load_panel_nohash(path)
+
     def test_video_is_staged_locally_and_validated_after_publication(self) -> None:
         import imageio.v2 as imageio
         import numpy as np
