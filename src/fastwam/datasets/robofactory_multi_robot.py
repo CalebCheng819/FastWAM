@@ -42,6 +42,16 @@ B4_TARGET_ACTION_PHASE_NAMES = (
 )
 B4_GRIPPER_EVENT_NAMES = ("none", "closing", "opening")
 
+# PlaceFood semantic labels are used only by the phase-balanced window sampler.
+# They are derived from simulator state stored in successful demonstrations and
+# are never returned as model inputs or required by deployment.
+PLACEFOOD_TASK_PHASE_NAMES = (
+    "pregrasp",
+    "transport",
+    "target_approach",
+    "release",
+)
+
 
 def derive_b4_target_action_proxies(
     gripper_commands: torch.Tensor | np.ndarray,
@@ -118,6 +128,73 @@ def derive_b4_target_action_proxies(
     if squeeze_agent_axis:
         result = {key: value.squeeze(0) for key, value in result.items()}
     return result
+
+
+def derive_placefood_task_phases(
+    meat_states: torch.Tensor | np.ndarray,
+    target_states: torch.Tensor | np.ndarray,
+    gripper_commands: torch.Tensor | np.ndarray,
+    *,
+    lift_threshold: float = 0.03,
+    target_xy_threshold: float = 0.10,
+    release_command_threshold: float = 0.0,
+) -> torch.Tensor:
+    """Derive exclusive PlaceFood sampling phases for target actions.
+
+    ``meat_states[t]`` and ``target_states[t]`` describe the state before
+    ``action[t]``. The returned labels therefore align exactly with target
+    actions and have shape ``[T]``. Only XYZ columns are consumed.
+    """
+
+    lift_threshold = float(lift_threshold)
+    target_xy_threshold = float(target_xy_threshold)
+    release_command_threshold = float(release_command_threshold)
+    if not np.isfinite(lift_threshold) or lift_threshold <= 0.0:
+        raise ValueError("lift_threshold must be finite and positive")
+    if not np.isfinite(target_xy_threshold) or target_xy_threshold <= 0.0:
+        raise ValueError("target_xy_threshold must be finite and positive")
+    if not np.isfinite(release_command_threshold):
+        raise ValueError("release_command_threshold must be finite")
+
+    meat = torch.as_tensor(meat_states, dtype=torch.float32)
+    target = torch.as_tensor(target_states, dtype=torch.float32)
+    commands = torch.as_tensor(gripper_commands, dtype=torch.float32)
+    if meat.ndim != 2 or meat.shape[1] < 3:
+        raise ValueError(f"meat_states must have shape [S,D>=3], got {tuple(meat.shape)}")
+    if target.ndim != 2 or target.shape[1] < 3:
+        raise ValueError(
+            f"target_states must have shape [S,D>=3], got {tuple(target.shape)}"
+        )
+    if commands.ndim != 1:
+        raise ValueError(
+            f"gripper_commands must have shape [T], got {tuple(commands.shape)}"
+        )
+    horizon = int(commands.shape[0])
+    if meat.shape[0] < horizon or target.shape[0] < horizon:
+        raise ValueError(
+            "PlaceFood states must include the pre-action state for every command: "
+            f"meat={meat.shape[0]} target={target.shape[0]} actions={horizon}"
+        )
+    meat = meat[:horizon, :3]
+    target = target[:horizon, :3]
+    if not bool(torch.isfinite(meat).all().item()):
+        raise ValueError("meat_states contains non-finite values")
+    if not bool(torch.isfinite(target).all().item()):
+        raise ValueError("target_states contains non-finite values")
+    if not bool(torch.isfinite(commands).all().item()):
+        raise ValueError("gripper_commands contains non-finite values")
+
+    lifted = meat[:, 2] - meat[0, 2] >= lift_threshold
+    near_target = torch.linalg.vector_norm(meat[:, :2] - target[:, :2], dim=-1) <= (
+        target_xy_threshold
+    )
+    opening = commands > release_command_threshold
+
+    phase = torch.zeros(horizon, dtype=torch.long)
+    phase[lifted] = 1
+    phase[lifted & near_target] = 2
+    phase[lifted & near_target & opening] = 3
+    return phase
 
 
 def _plain_mapping(value: Optional[Mapping[str, str] | DictConfig]) -> dict[str, str]:
@@ -244,6 +321,10 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         b4_proxy_closed_command_threshold: float = -0.8,
         b4_proxy_stable_steps: int = 4,
         b4_phase_agent_id: Optional[int] = None,
+        phase_label_source: str = "gripper_command",
+        placefood_lift_threshold: float = 0.03,
+        placefood_target_xy_threshold: float = 0.10,
+        placefood_release_command_threshold: float = 0.0,
     ):
         self.root_dir = Path(root_dir).expanduser().resolve()
         if not self.root_dir.exists():
@@ -325,12 +406,31 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         )
         if self.b4_phase_agent_id is not None and self.b4_phase_agent_id < 0:
             raise ValueError("b4_phase_agent_id must be non-negative when configured")
+        self.phase_label_source = str(phase_label_source).strip().lower()
+        if self.phase_label_source not in {"gripper_command", "placefood_task_state"}:
+            raise ValueError(
+                "phase_label_source must be 'gripper_command' or "
+                f"'placefood_task_state', got {phase_label_source!r}"
+            )
+        self.placefood_lift_threshold = float(placefood_lift_threshold)
+        self.placefood_target_xy_threshold = float(placefood_target_xy_threshold)
+        self.placefood_release_command_threshold = float(
+            placefood_release_command_threshold
+        )
         # Validate the public proxy parameters once, before opening source data.
         derive_b4_target_action_proxies(
             torch.zeros(1, 1),
             event_delta_threshold=self.b4_proxy_event_delta_threshold,
             closed_command_threshold=self.b4_proxy_closed_command_threshold,
             stable_steps=self.b4_proxy_stable_steps,
+        )
+        derive_placefood_task_phases(
+            torch.zeros(1, 3),
+            torch.zeros(1, 3),
+            torch.zeros(1),
+            lift_threshold=self.placefood_lift_threshold,
+            target_xy_threshold=self.placefood_target_xy_threshold,
+            release_command_threshold=self.placefood_release_command_threshold,
         )
         self._h5_handles: dict[str, h5py.File] = {}
         self._gaussian_cache: Optional[GaussianCache] = None
@@ -560,6 +660,37 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                         stable_steps=self.b4_proxy_stable_steps,
                     )
                     trajectory_phase = trajectory_proxy["phase"]
+                    phase_names = B4_TARGET_ACTION_PHASE_NAMES
+                    if self.phase_label_source == "placefood_task_state":
+                        if task_name != "PlaceFood-rf":
+                            raise ValueError(
+                                "phase_label_source='placefood_task_state' is valid only "
+                                f"for PlaceFood-rf, got {task_name!r}"
+                            )
+                        if phase_gripper_commands.shape[0] != 1:
+                            raise ValueError(
+                                "PlaceFood task-state phases require exactly one selected "
+                                "phase agent; configure b4_phase_agent_id"
+                            )
+                        meat_path = "env_states/actors/meat"
+                        target_path = "env_states/articulations/None"
+                        if meat_path not in group or target_path not in group:
+                            raise KeyError(
+                                "PlaceFood task-state phases require "
+                                f"{meat_path!r} and {target_path!r} in "
+                                f"{h5_path}:{trajectory_name}"
+                            )
+                        trajectory_phase = derive_placefood_task_phases(
+                            np.asarray(group[meat_path], dtype=np.float32),
+                            np.asarray(group[target_path], dtype=np.float32),
+                            phase_gripper_commands[0],
+                            lift_threshold=self.placefood_lift_threshold,
+                            target_xy_threshold=self.placefood_target_xy_threshold,
+                            release_command_threshold=(
+                                self.placefood_release_command_threshold
+                            ),
+                        ).unsqueeze(0)
+                        phase_names = PLACEFOOD_TASK_PHASE_NAMES
                     split_trajectory_count += 1
                     for start in range(
                         0,
@@ -579,7 +710,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                                 "agent_names": tuple(agent_names),
                                 "agent_count": agent_count,
                                 "b4_phase_labels": tuple(
-                                    B4_TARGET_ACTION_PHASE_NAMES[int(phase_id)]
+                                    phase_names[int(phase_id)]
                                     for phase_id in sorted(target_phase_ids)
                                 ),
                             }
@@ -815,7 +946,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         return str(self.entries[index]["task_name"])
 
     def get_b4_phase_labels(self, index: int) -> tuple[str, ...]:
-        """Return target-action proxy labels without loading a sample payload."""
+        """Return configured sampling-phase labels without loading a sample."""
 
         return tuple(self.entries[index]["b4_phase_labels"])
 
@@ -832,6 +963,23 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             "event_delta_threshold": self.b4_proxy_event_delta_threshold,
             "closed_command_threshold": self.b4_proxy_closed_command_threshold,
             "stable_steps": self.b4_proxy_stable_steps,
+            "phase_agent_id": self.b4_phase_agent_id,
+        }
+
+    @property
+    def phase_sampling_schema(self) -> dict[str, Any]:
+        """Machine-readable statement of the labels used by the sampler."""
+
+        if self.phase_label_source == "gripper_command":
+            return self.b4_proxy_schema
+        return {
+            "source": "placefood_demo_meat_target_pose_and_gripper_command",
+            "used_as_model_input": False,
+            "target_index_semantics": "state[t]_labels_action[t]",
+            "phase_names": list(PLACEFOOD_TASK_PHASE_NAMES),
+            "lift_threshold": self.placefood_lift_threshold,
+            "target_xy_threshold": self.placefood_target_xy_threshold,
+            "release_command_threshold": self.placefood_release_command_threshold,
             "phase_agent_id": self.b4_phase_agent_id,
         }
 

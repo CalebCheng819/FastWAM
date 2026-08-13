@@ -464,6 +464,24 @@ def test_pose_phase_x0_profile_samples_robot0_phase_and_adds_clean_loss(monkeypa
     assert cfg["model"]["loss"]["lambda_video"] == 0.0
 
 
+def test_placefood_semantic_phase_p5_changes_sampling_labels_only(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT", TEST_POSE_FOCUS_BASE_CHECKPOINT
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_semantic_phase_p5_224_5e-6",
+        "+scale=robofactory_multi_robot_24gpu_pose_focus",
+    )
+
+    assert cfg["phase_balanced_fraction"] == 0.5
+    assert cfg["data"]["train"]["phase_label_source"] == "placefood_task_state"
+    assert cfg["data"]["val"]["phase_label_source"] == "placefood_task_state"
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["pose_focus"]["lambda_clean_arm_x0"] == 1.0
+
+
 def test_pose_focus_24gpu_profile_targets_placefood_robot0_pose(monkeypatch):
     monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
     for name in (

@@ -1,0 +1,72 @@
+# @package _global_
+
+# P5 keeps the P2 architecture/loss/deployment inputs and changes only training
+# window sampling using task-semantic phases derived from stored demonstrations.
+defaults:
+  - robofactory_multi_robot_vg1_hub1_gau1_224_1e-4
+  - _self_
+
+trainable_scope: action
+learning_rate: 5.0e-6
+max_steps: 1000
+save_every: 500
+eval_every: 500
+offline_eval_num_samples: 24
+provenance_mode: stat_cmp
+phase_balanced_fraction: 0.5
+
+resume: ${oc.env:FASTWAM_POSE_FOCUS_BASE_CHECKPOINT}
+weights_only_warm_start:
+  enabled: true
+  expected_source_training_mode: action_only_cache
+  expected_source_trainable_scope: action
+  expected_source_state_kind: full
+
+data:
+  train:
+    required_agent_counts: [2]
+    required_task_names: [PlaceFood-rf]
+    load_future_video: false
+    b4_phase_agent_id: 0
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+    phase_label_source: placefood_task_state
+    placefood_lift_threshold: 0.03
+    placefood_target_xy_threshold: 0.10
+    placefood_release_command_threshold: 0.0
+  val:
+    required_agent_counts: [2]
+    required_task_names: [PlaceFood-rf]
+    load_future_video: false
+    b4_phase_agent_id: 0
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+    phase_label_source: placefood_task_state
+    placefood_lift_threshold: 0.03
+    placefood_target_xy_threshold: 0.10
+    placefood_release_command_threshold: 0.0
+
+model:
+  training_mode: action_only_cache
+  loss:
+    lambda_video: 0.0
+    lambda_action: 1.0
+    pose_focus:
+      enabled: true
+      active_agent_id: 0
+      active_arm_weight: 4.0
+      other_arm_weight: 1.0
+      gripper_weight: 1.0
+      first_steps: 5
+      first_steps_weight: 2.0
+      gripper_dim: 7
+      lambda_clean_arm_x0: 1.0
+      clean_arm_huber_beta: 0.1
+
+wandb:
+  group: robofactory-placefood-semantic-phase-p5
+  name: fastwam-placefood-semantic-phase-p5-s42-24g-r1

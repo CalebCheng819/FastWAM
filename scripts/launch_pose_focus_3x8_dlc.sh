@@ -156,8 +156,6 @@ RUN_ID="${RUN_ID:-}"
 ATTEMPT_ID="${FASTWAM_POSE_FOCUS_ATTEMPT_ID:-}"
 REPO_ROOT="${FASTWAM_POSE_FOCUS_REPO_ROOT:-}"
 OUTPUT_DIR="${FASTWAM_POSE_FOCUS_OUTPUT_DIR:-}"
-SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt}"
-EXPECTED_WEIGHT_BYTES="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES:-12047407619}"
 DATASET_ROOT="${FASTWAM_POSE_FOCUS_DATASET_ROOT:-/cpfs/user/chengjuntao/datasets/robofactory_multi_robot}"
 STATS_SOURCE_ROOT="${DATASET_ROOT}"
 STATS_PATH="${FASTWAM_POSE_FOCUS_STATS_PATH:-${DATASET_ROOT}/fastwam_multi_robot_n234_train_s42_stats_v2.json}"
@@ -171,8 +169,17 @@ TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focu
 SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
 case "${TASK_PROFILE}" in
   robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6) ;;
+  robofactory_placefood_semantic_phase_p5_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
+R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
+P2_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-phase-x0-r5-s42-24g-r1-20260813/checkpoints/weights/step_001000.pt"
+CANONICAL_SOURCE="${R5_SOURCE}"
+if [[ "${TASK_PROFILE}" == "robofactory_placefood_semantic_phase_p5_224_5e-6" ]]; then
+  CANONICAL_SOURCE="${P2_SOURCE}"
+fi
+SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-${CANONICAL_SOURCE}}"
+EXPECTED_WEIGHT_BYTES="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES:-12047407619}"
 
 require_env RUN_ID
 require_env FASTWAM_POSE_FOCUS_ATTEMPT_ID
@@ -222,9 +229,9 @@ else
     die "active POSE_FOCUS source checkout is dirty"
 fi
 
-CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
 if [[ "${TEST_MODE}" != "1" ]]; then
-  [[ "${SOURCE_WEIGHT}" == "${CANONICAL_SOURCE}" ]] || die "production source must be the audited R5 step_001000 weight file"
+  [[ "${SOURCE_WEIGHT}" == "${CANONICAL_SOURCE}" ]] || \
+    die "production source does not match the audited source for ${TASK_PROFILE}"
   [[ "${EXPECTED_WEIGHT_BYTES}" == "12047407619" ]] || die "production source byte count must remain 12047407619"
 fi
 [[ "${SOURCE_WEIGHT}" == *.pt ]] || die "source must be a weight .pt file, not a training-state directory"
@@ -395,13 +402,27 @@ task_expected = {
     "model.loss.pose_focus.gripper_dim": 7,
     "model.loss.pose_focus.clean_arm_huber_beta": 0.1,
 }
-if task_path.stem == "robofactory_placefood_pose_phase_x0_r5_224_5e-6":
+if task_path.stem in {
+    "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+    "robofactory_placefood_semantic_phase_p5_224_5e-6",
+}:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
         "data.train.b4_phase_agent_id": 0,
         "data.val.b4_phase_agent_id": 0,
         "model.loss.pose_focus.lambda_clean_arm_x0": 1.0,
     })
+    if task_path.stem == "robofactory_placefood_semantic_phase_p5_224_5e-6":
+        task_expected.update({
+            "data.train.phase_label_source": "placefood_task_state",
+            "data.val.phase_label_source": "placefood_task_state",
+            "data.train.placefood_lift_threshold": 0.03,
+            "data.val.placefood_lift_threshold": 0.03,
+            "data.train.placefood_target_xy_threshold": 0.10,
+            "data.val.placefood_target_xy_threshold": 0.10,
+            "data.train.placefood_release_command_threshold": 0.0,
+            "data.val.placefood_release_command_threshold": 0.0,
+        })
 else:
     task_expected["model.loss.pose_focus.lambda_clean_arm_x0"] = 0.0
 scale_expected = {

@@ -16,6 +16,7 @@ RENDERER = REPO / "scripts" / "render_pose_focus_3x8_dlc_job.py"
 STAT_CMP_HELPER = REPO / "scripts" / "b4_stat_cmp_cache.py"
 TASK_NAME = "robofactory_placefood_pose_focus_r5_224_5e-6.yaml"
 P2_TASK_NAME = "robofactory_placefood_pose_phase_x0_r5_224_5e-6.yaml"
+P5_TASK_NAME = "robofactory_placefood_semantic_phase_p5_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
 
 
@@ -37,6 +38,9 @@ class PoseFocusLauncherTests(unittest.TestCase):
         )
         (repo / "configs" / "task" / P2_TASK_NAME).write_bytes(
             (REPO / "configs" / "task" / P2_TASK_NAME).read_bytes()
+        )
+        (repo / "configs" / "task" / P5_TASK_NAME).write_bytes(
+            (REPO / "configs" / "task" / P5_TASK_NAME).read_bytes()
         )
         (repo / "configs" / "scale" / SCALE_NAME).write_bytes(
             (REPO / "configs" / "scale" / SCALE_NAME).read_bytes()
@@ -187,6 +191,25 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 "FASTWAM_B4_ATTEMPT_ID conflicts with "
                 "FASTWAM_POSE_FOCUS_ATTEMPT_ID",
                 result.stderr,
+            )
+
+    def test_dry_run_resolves_p5_semantic_phase_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_POSE_FOCUS_TASK_PROFILE"] = P5_TASK_NAME.removesuffix(".yaml")
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "task=robofactory_placefood_semantic_phase_p5_224_5e-6",
+                result.stdout,
             )
 
     def test_renderer_pins_priority7_3x8_and_oss_contract(self) -> None:

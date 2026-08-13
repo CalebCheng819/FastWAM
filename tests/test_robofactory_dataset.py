@@ -19,9 +19,11 @@ from fastwam.datasets.gaussian_cache import (
 from fastwam.datasets.gaussian_cache.selection import write_normalized_selection_index
 from fastwam.datasets.robofactory_multi_robot import (
     B4_TARGET_ACTION_PHASE_NAMES,
+    PLACEFOOD_TASK_PHASE_NAMES,
     RoboFactoryMultiRobotDataset,
     compute_robofactory_stats,
     derive_b4_target_action_proxies,
+    derive_placefood_task_phases,
     gaussian_source_identity_sha256,
 )
 
@@ -213,6 +215,78 @@ def test_b4_target_action_proxy_semantics_are_explicit_and_auditable():
     assert proxy["event_target"].tolist() == [0, 1, 1, 0, 1, 0, 0, 0, 0, 2]
     assert proxy["closed_target"].tolist() == [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]
     assert proxy["stable_closed_proxy"].tolist() == [0, 0, 0, 0, 0, 0, 0, 0, 1, 0]
+
+
+def test_placefood_task_phases_align_pre_action_state_with_target_action():
+    meat = torch.tensor(
+        [
+            [0.00, 0.00, 0.00],
+            [0.00, 0.00, 0.02],
+            [0.00, 0.00, 0.04],
+            [0.05, 0.00, 0.05],
+            [0.19, 0.00, 0.05],
+            [0.19, 0.00, 0.05],
+        ]
+    )
+    target = torch.tensor([[0.20, 0.00, 0.08]] * 6)
+    gripper = torch.tensor([1.0, -1.0, -1.0, -1.0, -1.0, 1.0])
+
+    phases = derive_placefood_task_phases(
+        meat,
+        target,
+        gripper,
+        lift_threshold=0.03,
+        target_xy_threshold=0.10,
+    )
+
+    assert phases.tolist() == [0, 0, 1, 1, 2, 3]
+
+
+def test_placefood_task_state_labels_affect_sampling_index_only(tmp_path):
+    task_name = "PlaceFood-rf"
+    instruction = "two robots place food in the target"
+    stats_path, cache_dir = _write_demo(
+        tmp_path,
+        task_name=task_name,
+        num_agents=2,
+        instruction=instruction,
+    )
+    h5_path = tmp_path / task_name / "motionplanning" / "demo.h5"
+    with h5py.File(h5_path, "r+") as handle:
+        trajectory = handle["traj_0"]
+        env_states = trajectory["env_states"]
+        actors = env_states.create_group("actors")
+        meat = np.zeros((41, 13), dtype=np.float32)
+        meat[12:, 2] = 0.04
+        meat[24:, 0] = 0.16
+        actors.create_dataset("meat", data=meat)
+        target = np.zeros((41, 15), dtype=np.float32)
+        target[:, 0] = 0.20
+        target[:, 2] = 0.08
+        env_states["articulations"].create_dataset("None", data=target)
+        commands = np.full(40, -1.0, dtype=np.float32)
+        commands[28:] = 1.0
+        trajectory["actions/panda-0"][:, 7] = commands
+
+    dataset = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        window_stride=8,
+        val_set_proportion=0.0,
+        is_training_set=True,
+        randomize_agent_order=False,
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={task_name: instruction},
+        b4_phase_agent_id=0,
+        phase_label_source="placefood_task_state",
+    )
+
+    assert set(dataset.get_b4_phase_labels(0)) == set(PLACEFOOD_TASK_PHASE_NAMES)
+    assert dataset.phase_sampling_schema["used_as_model_input"] is False
+    sample = dataset[0]
+    assert "placefood_task_phase" not in sample
+    assert sample["action"].shape == (2, 32, 8)
 
 
 def test_b4_targets_use_t_plus_h_and_follow_native_agent_order(tmp_path):

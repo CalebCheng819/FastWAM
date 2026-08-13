@@ -32,6 +32,7 @@ LAUNCHER_PATH = "scripts/launch_pose_focus_3x8_dlc.sh"
 TASK_PROFILES = (
     "robofactory_placefood_pose_focus_r5_224_5e-6",
     "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+    "robofactory_placefood_semantic_phase_p5_224_5e-6",
 )
 
 
@@ -225,7 +226,7 @@ def main() -> int:
             },
         ],
         "Description": (
-            "PlaceFood R5 action-only continuation: "
+            "PlaceFood action-only continuation: "
             f"{args.task_profile}, 3 workers x 8 GPUs, 1000 steps"
         ),
         "DisplayName": args.run_id,
@@ -260,13 +261,21 @@ def main() -> int:
             "EnableSanityCheck": False,
             "Tags": {
                 "experiment": "POSE_FOCUS",
-                "initialization": "R5-action-step1000-weights-only",
+                "initialization": (
+                    "P2-action-step1000-weights-only"
+                    if args.task_profile == TASK_PROFILES[2]
+                    else "R5-action-step1000-weights-only"
+                ),
                 "optimizer": "fresh",
                 "task": "PlaceFood-rf",
                 "objective": (
-                    "robot0-phase-clean-x0"
-                    if args.task_profile == TASK_PROFILES[1]
-                    else "active-agent-continuous-pose"
+                    "placefood-task-semantic-phase-sampling"
+                    if args.task_profile == TASK_PROFILES[2]
+                    else (
+                        "robot0-phase-clean-x0"
+                        if args.task_profile == TASK_PROFILES[1]
+                        else "active-agent-continuous-pose"
+                    )
                 ),
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "3x8-world24",
