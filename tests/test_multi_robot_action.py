@@ -949,6 +949,24 @@ def _native_full_payload(
     }
 
 
+def _legacy_native_v2_full_payload(model):
+    metadata = model._multi_robot_architecture_metadata()
+    legacy_metadata = {
+        key: metadata[key]
+        for key in model._LEGACY_NATIVE_V2_ARCHITECTURE_KEYS
+    }
+    return {
+        "format": "fastwam_multi_robot_v2",
+        "step": 5000,
+        "torch_dtype": str(model.torch_dtype),
+        "trainable_scope": "dit",
+        "training_mode": "joint",
+        "base_checkpoint": "/frozen/official/base.pt",
+        "multi_robot_architecture": legacy_metadata,
+        "mot": _cloned_state(model.mot),
+    }
+
+
 def _legacy_mot_payload(model):
     state = _cloned_state(model.mot)
     action_prefix = "mixtures.action."
@@ -1057,6 +1075,69 @@ def test_native_v2_full_state_is_exact(tmp_path, corruption):
 
     with pytest.raises(ValueError, match=f"{corruption}_mismatches|{corruption}="):
         target.load_checkpoint(checkpoint)
+
+
+def test_exact_legacy_native_v2_gau0_full_checkpoint_loads_without_hash(tmp_path):
+    source = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    checkpoint = tmp_path / "legacy-native-v2-full.pt"
+    torch.save(_legacy_native_v2_full_payload(source), checkpoint)
+    target = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+
+    target.load_checkpoint(checkpoint, record_checkpoint_sha256=False)
+
+    assert target._loaded_base_checkpoint == str(checkpoint.resolve())
+    assert target._loaded_base_checkpoint_sha256 is None
+    for key, value in source.mot.state_dict().items():
+        assert torch.equal(value, target.mot.state_dict()[key]), key
+
+
+def test_legacy_native_v2_full_checkpoint_is_rejected_for_gau1(tmp_path):
+    source = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    checkpoint = tmp_path / "legacy-native-v2-gau1.pt"
+    torch.save(_legacy_native_v2_full_payload(source), checkpoint)
+    target = _bare_checkpoint_model(
+        enable_gaussian=True,
+        training_mode="joint",
+        trainable_scope="dit",
+    )
+
+    with pytest.raises(ValueError, match="missing 'action_attention_topology'"):
+        target.load_checkpoint(checkpoint, record_checkpoint_sha256=False)
+
+
+@pytest.mark.parametrize(
+    "corruption", ["top_level_extra", "metadata_missing", "state_missing"]
+)
+def test_legacy_native_v2_full_checkpoint_remains_fail_closed(
+    tmp_path, corruption
+):
+    source = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+    payload = _legacy_native_v2_full_payload(source)
+    if corruption == "top_level_extra":
+        payload["untracked"] = True
+        error = "missing 'action_attention_topology'"
+    elif corruption == "metadata_missing":
+        payload["multi_robot_architecture"].pop("hub_token_ratio")
+        error = "missing 'action_attention_topology'"
+    else:
+        payload["mot"].pop(next(iter(payload["mot"])))
+        error = "missing="
+    checkpoint = tmp_path / f"legacy-native-v2-{corruption}.pt"
+    torch.save(payload, checkpoint)
+    target = _bare_checkpoint_model(
+        training_mode="joint", trainable_scope="dit"
+    )
+
+    with pytest.raises(ValueError, match=error):
+        target.load_checkpoint(checkpoint, record_checkpoint_sha256=False)
 
 
 def test_sparse_v2_round_trip_pins_base_and_exact_trainable_names(tmp_path):

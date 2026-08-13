@@ -897,9 +897,96 @@ class FastWAMMultiRobot(FastWAM):
                 f"(count={len(dtype_mismatches)})"
             )
 
-    @staticmethod
-    def _native_checkpoint_state_kind(payload: dict[str, Any], path) -> str:
+    _LEGACY_NATIVE_V2_FULL_TOP_LEVEL_KEYS = frozenset(
+        {
+            "base_checkpoint",
+            "format",
+            "mot",
+            "multi_robot_architecture",
+            "step",
+            "torch_dtype",
+            "trainable_scope",
+            "training_mode",
+        }
+    )
+    _LEGACY_NATIVE_V2_ARCHITECTURE_KEYS = frozenset(
+        {
+            "agent_encoding_mode",
+            "agent_geometry_dim",
+            "agent_geometry_schema",
+            "agent_set_representation",
+            "hub_enabled",
+            "hub_token_policy",
+            "hub_token_ratio",
+        }
+    )
+
+    def _is_legacy_native_v2_full_checkpoint(
+        self, payload: dict[str, Any]
+    ) -> bool:
+        """Recognize the exact pre-state_kind GAU0 full-checkpoint envelope.
+
+        The original native-v2 GAU0 trainer wrote a complete ``mot`` state but
+        predated both ``state_kind`` and the expanded parameter-free
+        architecture metadata.  Compatibility is intentionally limited to its
+        exact top-level/schema shape, joint DIT training, and a GAU0 target.
+        The caller still validates every tensor key, shape and dtype before a
+        strict state-dict load.
+        """
+
+        if self.action_expert.enable_gaussian:
+            return False
+        if set(payload) != self._LEGACY_NATIVE_V2_FULL_TOP_LEVEL_KEYS:
+            return False
+        if payload.get("format") != "fastwam_multi_robot_v2":
+            return False
+        if payload.get("training_mode") != "joint":
+            return False
+        if payload.get("trainable_scope") != "dit":
+            return False
+        if not isinstance(payload.get("mot"), dict):
+            return False
+        if not isinstance(payload.get("base_checkpoint"), str) or not payload[
+            "base_checkpoint"
+        ]:
+            return False
+        if (
+            not isinstance(payload.get("step"), int)
+            or isinstance(payload["step"], bool)
+            or payload["step"] < 0
+        ):
+            return False
+        if not isinstance(payload.get("torch_dtype"), str) or not payload[
+            "torch_dtype"
+        ]:
+            return False
+
+        received = payload.get("multi_robot_architecture")
+        if not isinstance(received, dict):
+            return False
+        if set(received) != self._LEGACY_NATIVE_V2_ARCHITECTURE_KEYS:
+            return False
+        expected = self._multi_robot_architecture_metadata()
+        for key in self._LEGACY_NATIVE_V2_ARCHITECTURE_KEYS:
+            expected_value = expected[key]
+            received_value = received[key]
+            if isinstance(expected_value, float):
+                try:
+                    matches = abs(float(received_value) - expected_value) <= 1e-12
+                except (TypeError, ValueError):
+                    return False
+            else:
+                matches = received_value == expected_value
+            if not matches:
+                return False
+        return True
+
+    def _native_checkpoint_state_kind(
+        self, payload: dict[str, Any], path
+    ) -> str:
         state_kind = payload.get("state_kind")
+        if state_kind is None and self._is_legacy_native_v2_full_checkpoint(payload):
+            state_kind = "full"
         if state_kind not in {"full", "sparse_delta"}:
             raise ValueError(
                 "Native v2 checkpoint must declare state_kind='full' or "
@@ -1256,6 +1343,8 @@ class FastWAMMultiRobot(FastWAM):
         received = payload.get("multi_robot_architecture")
         if not isinstance(received, dict):
             raise ValueError(f"v2 checkpoint is missing multi_robot_architecture: {path}")
+        if self._is_legacy_native_v2_full_checkpoint(payload):
+            return
         expected = self._multi_robot_architecture_metadata()
         for key, expected_value in expected.items():
             if key not in received:
