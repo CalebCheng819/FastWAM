@@ -905,6 +905,10 @@ def physical_snapshot(
                 None if last_action is None else float(last_action[name][GRIPPER_DIM])
             ),
         }
+    robot0_grasping_meat = _as_bool(
+        unwrapped.agent.agents[0].is_grasping(unwrapped.meat),
+        label="robot0.is_grasping(meat)",
+    )
     base_z = float(_vector(unwrapped.agent.agents[0].robot.pose.p)[2])
     meat_pot_delta = meat - pot
     return {
@@ -914,6 +918,7 @@ def physical_snapshot(
         "meat_pot_xy_distance": float(np.linalg.norm(meat_pot_delta[:2])),
         "meat_pot_xyz_distance": float(np.linalg.norm(meat_pot_delta)),
         "meat_height": float(meat[2]),
+        "robot0_grasping_meat": robot0_grasping_meat,
         "pot_lid_qpos": lid_qpos,
         "pot_lid_qvel": lid_qvel,
         "robot0_base_z": base_z,
@@ -926,6 +931,31 @@ def physical_snapshot(
             else float(np.linalg.norm(tcp_positions[0] - tcp_positions[1]))
         ),
         "agents": robots,
+    }
+
+
+def rollout_grasp_metrics(snapshots: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize physical grasp and lift without changing rollout control."""
+
+    if not snapshots:
+        raise ValueError("At least one physical snapshot is required")
+    heights = np.asarray(
+        [float(item["meat_height"]) for item in snapshots], dtype=np.float64
+    )
+    grasped = np.asarray(
+        [bool(item["robot0_grasping_meat"]) for item in snapshots], dtype=bool
+    )
+    if not np.isfinite(heights).all():
+        raise FloatingPointError("Meat heights contain non-finite values")
+    initial_height = float(heights[0])
+    max_height = float(heights.max())
+    return {
+        "robot0_grasp_ever": bool(grasped.any()),
+        "robot0_grasp_steps": int(grasped.sum()),
+        "robot0_grasp_fraction": float(grasped.mean()),
+        "meat_initial_height_m": initial_height,
+        "meat_max_height_m": max_height,
+        "meat_max_lift_m": max(0.0, max_height - initial_height),
     }
 
 
@@ -1491,6 +1521,7 @@ def run_rollout(
         }
         buckets = bucket_bound_violations(violations)
         _atomic_json(output_dir / "action_bound_buckets.json", buckets)
+        grasp_metrics = rollout_grasp_metrics(snapshots)
         result = {
             "status": "completed",
             "success": success,
@@ -1502,6 +1533,7 @@ def run_rollout(
             "exec_horizon": int(args.exec_horizon),
             "observation_source": "live_rerender_only",
             "persisted_expert_rgb_used_for_policy": False,
+            **grasp_metrics,
             "initial_state_audit": initial_audit,
             "bound_violations": buckets,
             "video_integrity": video_integrity,
