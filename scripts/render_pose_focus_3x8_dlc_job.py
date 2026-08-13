@@ -32,6 +32,7 @@ LAUNCHER_PATH = "scripts/launch_pose_focus_3x8_dlc.sh"
 TASK_PROFILES = (
     "robofactory_placefood_pose_focus_r5_224_5e-6",
     "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+    "robofactory_placefood_gaussian_spatial_p4_224_5e-6",
 )
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
@@ -251,7 +252,7 @@ def main() -> int:
             },
         ],
         "Description": (
-            "PlaceFood R5 action-only continuation: "
+            "PlaceFood R5 action-only treatment: "
             f"{args.task_profile}, 3 workers x 8 GPUs, 1000 steps"
         ),
         "DisplayName": args.run_id,
@@ -292,7 +293,11 @@ def main() -> int:
                 "objective": (
                     "robot0-phase-clean-x0"
                     if args.task_profile == TASK_PROFILES[1]
-                    else "active-agent-continuous-pose"
+                    else (
+                        "robot0-gaussian-spatial-cross-attention"
+                        if args.task_profile == TASK_PROFILES[2]
+                        else "active-agent-continuous-pose"
+                    )
                 ),
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "3x8-world24",

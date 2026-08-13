@@ -17,6 +17,8 @@ def _tiny_action_expert(
     hub_enabled=True,
     agent_encoding_mode="geometry",
     enable_gaussian=False,
+    gaussian_conditioning_mode="pooled_residual",
+    gaussian_residual_floor=0.0,
 ):
     return MultiAgentActionDiT(
         action_dim=3,
@@ -31,6 +33,8 @@ def _tiny_action_expert(
         gaussian_height=28,
         gaussian_width=40,
         gaussian_stem_dim=8,
+        gaussian_conditioning_mode=gaussian_conditioning_mode,
+        gaussian_residual_floor=gaussian_residual_floor,
         hidden_dim=32,
         ffn_dim=64,
         text_dim=16,
@@ -105,6 +109,23 @@ def test_gaussian_agent_adapter_accepts_fp16_native_cardinalities(num_agents):
     assert embedding.shape == (2, num_agents, 32)
     assert embedding.dtype == adapter.stem[0].weight.dtype
     assert torch.isfinite(embedding).all()
+
+
+@pytest.mark.parametrize("num_agents", [1, 2, 4])
+def test_gaussian_agent_adapter_retains_coordinate_aware_spatial_tokens(num_agents):
+    torch.manual_seed(31 + num_agents)
+    adapter = GaussianAgentAdapter(
+        hidden_dim=32,
+        in_channels=13,
+        input_height=28,
+        input_width=40,
+        stem_dim=8,
+    ).eval()
+    gaussian = torch.zeros(2, num_agents, 13, 28, 40).half()
+    spatial = adapter.forward_spatial(gaussian)
+    assert spatial.shape == (2, num_agents, 20, 32)
+    assert torch.isfinite(spatial).all()
+    assert not torch.equal(spatial[..., 0, :], spatial[..., -1, :])
 
 
 @pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
@@ -226,6 +247,72 @@ def test_gaussian_gate_and_adapter_gradients_are_finite():
     assert adapter_gradients
     assert all(gradient is not None for gradient in adapter_gradients)
     assert all(torch.isfinite(gradient).all() for gradient in adapter_gradients)
+
+
+def test_spatial_gaussian_has_adapter_gradients_at_zero_learned_gate():
+    torch.manual_seed(37)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).train()
+    assert model.gaussian_gate is not None
+    assert torch.equal(model.gaussian_gate, torch.zeros_like(model.gaussian_gate))
+    data = _inputs(3)
+    pre = model.pre_dit(
+        data["action"],
+        data["timestep"],
+        data["context"],
+        data["context_mask"],
+        agent_states=data["state"],
+        agent_geometry=data["geometry"],
+        agent_ids=data["ids"],
+        agent_gaussian=data["gaussian"],
+    )
+    pre["tokens"].square().mean().backward()
+    assert model.gaussian_gate.grad is not None
+    assert torch.isfinite(model.gaussian_gate.grad).all()
+    gradients = [parameter.grad for parameter in model.gaussian_adapter.parameters()]
+    assert gradients
+    assert all(gradient is not None for gradient in gradients)
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    assert any(torch.count_nonzero(gradient).item() for gradient in gradients)
+
+
+def test_spatial_gaussian_conditioning_is_agent_permutation_equivariant():
+    torch.manual_seed(41)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    data = _inputs(4)
+    shared = model.pre_dit(
+        data["action"],
+        data["timestep"],
+        data["context"],
+        data["context_mask"],
+        agent_states=data["state"],
+        agent_geometry=data["geometry"],
+        agent_ids=data["ids"],
+        agent_gaussian=data["gaussian"],
+    )
+    permutation = torch.tensor([3, 0, 2, 1])
+    permuted = model.pre_dit(
+        data["action"][:, permutation],
+        data["timestep"],
+        data["context"],
+        data["context_mask"],
+        agent_states=data["state"][:, permutation],
+        agent_geometry=data["geometry"][:, permutation],
+        agent_ids=data["ids"][:, permutation],
+        agent_gaussian=data["gaussian"][:, permutation],
+    )
+    horizon = data["action"].shape[2]
+    inverse = torch.argsort(permutation)
+    shared_action = shared["tokens"][:, : 4 * horizon].reshape(1, 4, horizon, -1)
+    permuted_action = permuted["tokens"][:, : 4 * horizon].reshape(1, 4, horizon, -1)
+    assert torch.allclose(shared_action, permuted_action[:, inverse])
 
 
 def test_gaussian_enabled_requires_exact_shape_and_disabled_ignores_field():
@@ -1192,13 +1279,22 @@ def test_factorized_attention_uses_only_sparse_unmasked_blocks():
     )
 
 
-def _tiny_mot_pair(*, enable_gaussian=False):
+def _tiny_mot_pair(
+    *,
+    enable_gaussian=False,
+    gaussian_conditioning_mode="pooled_residual",
+    gaussian_residual_floor=0.0,
+):
     return MoT(
         mixtures={
             "video": _tiny_action_expert(
                 hub_enabled=False, agent_encoding_mode="none"
             ),
-            "action": _tiny_action_expert(enable_gaussian=enable_gaussian),
+            "action": _tiny_action_expert(
+                enable_gaussian=enable_gaussian,
+                gaussian_conditioning_mode=gaussian_conditioning_mode,
+                gaussian_residual_floor=gaussian_residual_floor,
+            ),
         },
         mot_checkpoint_mixed_attn=False,
     )
@@ -1466,12 +1562,18 @@ def test_legacy_fixed_hub_bank_converts_to_shared_seed():
 def _bare_checkpoint_model(
     *,
     enable_gaussian=False,
+    gaussian_conditioning_mode="pooled_residual",
+    gaussian_residual_floor=0.0,
     training_mode="action_only_cache",
     trainable_scope="action",
 ):
     model = FastWAMMultiRobot.__new__(FastWAMMultiRobot)
     torch.nn.Module.__init__(model)
-    model.mot = _tiny_mot_pair(enable_gaussian=enable_gaussian)
+    model.mot = _tiny_mot_pair(
+        enable_gaussian=enable_gaussian,
+        gaussian_conditioning_mode=gaussian_conditioning_mode,
+        gaussian_residual_floor=gaussian_residual_floor,
+    )
     model.action_expert = model.mot.mixtures["action"]
     model.video_expert = model.mot.mixtures["video"]
     model.training_mode = training_mode
@@ -1504,8 +1606,16 @@ def _bare_checkpoint_model(
     return model
 
 
-def _bare_gaussian_checkpoint_model():
-    return _bare_checkpoint_model(enable_gaussian=True)
+def _bare_gaussian_checkpoint_model(
+    *,
+    gaussian_conditioning_mode="pooled_residual",
+    gaussian_residual_floor=0.0,
+):
+    return _bare_checkpoint_model(
+        enable_gaussian=True,
+        gaussian_conditioning_mode=gaussian_conditioning_mode,
+        gaussian_residual_floor=gaussian_residual_floor,
+    )
 
 
 def _cloned_state(module):
@@ -1968,6 +2078,79 @@ def test_gaussian_v2_metadata_pins_adapter_architecture():
                 "multi_robot_architecture": stale_metadata,
             },
             "stale-v2.pt",
+        )
+
+
+def test_gaussian_spatial_v2_accepts_exact_pooled_v1_upgrade_contract():
+    source = _bare_gaussian_checkpoint_model()
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+    payload = _native_full_payload(source)
+
+    target._validate_multi_robot_checkpoint_metadata(
+        payload,
+        "pooled-v1.pt",
+        validate_treatment=False,
+        architecture_upgrade="gaussian_spatial_v2_from_pooled_v1",
+    )
+
+
+def test_gaussian_spatial_v2_loads_exact_pooled_v1_tensors(tmp_path):
+    torch.manual_seed(739)
+    source = _bare_gaussian_checkpoint_model()
+    checkpoint = tmp_path / "pooled-v1.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+    target._checkpoint_provenance_mode = "stat_cmp"
+
+    target._load_checkpoint_with_role(
+        checkpoint,
+        load_role="base_dependency",
+        active_paths=set(),
+        validate_trainable_scope=False,
+        architecture_upgrade="gaussian_spatial_v2_from_pooled_v1",
+    )
+
+    target_state = target.mot.state_dict()
+    for key, source_value in source.mot.state_dict().items():
+        assert torch.equal(target_state[key], source_value)
+
+
+def test_gaussian_spatial_v2_rejects_pooled_v1_without_explicit_upgrade():
+    source = _bare_gaussian_checkpoint_model()
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+
+    with pytest.raises(ValueError, match="gaussian_conditioning"):
+        target._validate_multi_robot_checkpoint_metadata(
+            _native_full_payload(source),
+            "pooled-v1.pt",
+            validate_treatment=False,
+        )
+
+
+def test_gaussian_spatial_v2_upgrade_rejects_nonexact_source_contract():
+    source = _bare_gaussian_checkpoint_model()
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+    payload = _native_full_payload(source)
+    payload["multi_robot_architecture"]["gaussian_stem_dim"] += 1
+
+    with pytest.raises(ValueError, match="exact pooled-v1 source contract"):
+        target._validate_multi_robot_checkpoint_metadata(
+            payload,
+            "wrong-pooled-v1.pt",
+            validate_treatment=False,
+            architecture_upgrade="gaussian_spatial_v2_from_pooled_v1",
         )
 
 

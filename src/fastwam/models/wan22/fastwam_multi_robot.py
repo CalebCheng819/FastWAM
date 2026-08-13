@@ -2004,21 +2004,81 @@ class FastWAMMultiRobot(FastWAM):
             "enable_gaussian": self.action_expert.enable_gaussian,
         }
         if self.action_expert.enable_gaussian:
-            metadata.update(
-                {
-                    "gaussian_conditioning": "agent_local_residual_v1",
-                    "gaussian_shape": [
-                        self.action_expert.gaussian_channels,
-                        self.action_expert.gaussian_height,
-                        self.action_expert.gaussian_width,
-                    ],
-                    "gaussian_hidden_dim": self.action_expert.hidden_dim,
-                    "gaussian_stem_dim": self.action_expert.gaussian_stem_dim,
-                    "gaussian_adapter_version": "conv_gn_silu_pool_v1",
-                    "gaussian_gate_init": 0.0,
-                }
-            )
+            gaussian_metadata = {
+                "gaussian_shape": [
+                    self.action_expert.gaussian_channels,
+                    self.action_expert.gaussian_height,
+                    self.action_expert.gaussian_width,
+                ],
+                "gaussian_hidden_dim": self.action_expert.hidden_dim,
+                "gaussian_stem_dim": self.action_expert.gaussian_stem_dim,
+                "gaussian_gate_init": 0.0,
+            }
+            if self.action_expert.gaussian_conditioning_mode == "pooled_residual":
+                gaussian_metadata.update(
+                    {
+                        "gaussian_conditioning": "agent_local_residual_v1",
+                        "gaussian_adapter_version": "conv_gn_silu_pool_v1",
+                    }
+                )
+            else:
+                gaussian_metadata.update(
+                    {
+                        "gaussian_conditioning": "agent_local_spatial_cross_attention_v2",
+                        "gaussian_adapter_version": "conv_gn_silu_spatial_reuse_v2",
+                        "gaussian_spatial_position_encoding": "sincos_2d_v1",
+                        "gaussian_residual_floor": self.action_expert.gaussian_residual_floor,
+                        "gaussian_attention_temperature": (
+                            self.action_expert.gaussian_attention_temperature
+                        ),
+                    }
+                )
+            metadata.update(gaussian_metadata)
         return metadata
+
+    def _validate_architecture_upgrade(
+        self,
+        received: dict[str, Any],
+        expected: dict[str, Any],
+        *,
+        upgrade: str,
+        path,
+    ) -> None:
+        if upgrade != "gaussian_spatial_v2_from_pooled_v1":
+            raise ValueError(
+                f"Unsupported checkpoint architecture upgrade {upgrade!r}: {path}"
+            )
+        if expected.get("gaussian_conditioning") != "agent_local_spatial_cross_attention_v2":
+            raise ValueError(
+                "gaussian_spatial_v2_from_pooled_v1 requires a spatial-v2 target: "
+                f"{path}"
+            )
+        allowed_source = dict(expected)
+        for key in (
+            "gaussian_spatial_position_encoding",
+            "gaussian_residual_floor",
+            "gaussian_attention_temperature",
+        ):
+            allowed_source.pop(key, None)
+        allowed_source.update(
+            {
+                "gaussian_conditioning": "agent_local_residual_v1",
+                "gaussian_adapter_version": "conv_gn_silu_pool_v1",
+            }
+        )
+        if received != allowed_source:
+            mismatches = {
+                key: {
+                    "expected_source": allowed_source.get(key),
+                    "observed": received.get(key),
+                }
+                for key in sorted(set(received) | set(allowed_source))
+                if received.get(key) != allowed_source.get(key)
+            }
+            raise ValueError(
+                "Checkpoint does not match the exact pooled-v1 source contract for "
+                f"gaussian_spatial_v2_from_pooled_v1: {mismatches} in {path}"
+            )
 
     def _validate_gaussian_v2_state(
         self,
@@ -2081,6 +2141,7 @@ class FastWAMMultiRobot(FastWAM):
         *,
         validate_treatment: bool = True,
         validate_trainable_scope: bool = True,
+        architecture_upgrade: str | None = None,
     ) -> None:
         if payload.get("format") != "fastwam_multi_robot_v2":
             return
@@ -2109,6 +2170,14 @@ class FastWAMMultiRobot(FastWAM):
         if not isinstance(received, dict):
             raise ValueError(f"v2 checkpoint is missing multi_robot_architecture: {path}")
         expected = self._multi_robot_architecture_metadata()
+        if architecture_upgrade is not None:
+            self._validate_architecture_upgrade(
+                received,
+                expected,
+                upgrade=architecture_upgrade,
+                path=path,
+            )
+            return
         for key, expected_value in expected.items():
             if key not in received:
                 raise ValueError(f"Checkpoint metadata is missing {key!r}: {path}")
@@ -2207,6 +2276,7 @@ class FastWAMMultiRobot(FastWAM):
         load_role: str,
         active_paths: set[Path],
         validate_trainable_scope: bool = True,
+        architecture_upgrade: str | None = None,
     ):
         checkpoint_path = Path(path).expanduser().resolve(strict=True)
         if not checkpoint_path.is_file():
@@ -2247,6 +2317,7 @@ class FastWAMMultiRobot(FastWAM):
                 checkpoint_path,
                 validate_treatment=load_role == "top_level",
                 validate_trainable_scope=validate_trainable_scope,
+                architecture_upgrade=architecture_upgrade,
             )
             state_kind = self._native_checkpoint_state_kind(payload, checkpoint_path)
             if load_role == "base_dependency" and state_kind != "full":

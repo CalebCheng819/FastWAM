@@ -155,6 +155,20 @@ class Wan22Trainer:
         self.weights_only_warm_start_expected_source_state_kind = str(
             warm_start_cfg.get("expected_source_state_kind", "full")
         ).strip().lower()
+        self.weights_only_warm_start_architecture_upgrade = warm_start_cfg.get(
+            "architecture_upgrade"
+        )
+        if self.weights_only_warm_start_architecture_upgrade is not None:
+            self.weights_only_warm_start_architecture_upgrade = str(
+                self.weights_only_warm_start_architecture_upgrade
+            ).strip()
+            if self.weights_only_warm_start_architecture_upgrade not in {
+                "gaussian_spatial_v2_from_pooled_v1"
+            }:
+                raise ValueError(
+                    "Unsupported weights_only_warm_start architecture_upgrade: "
+                    f"{self.weights_only_warm_start_architecture_upgrade!r}"
+                )
         if self.weights_only_warm_start_enabled:
             if self.weights_only_warm_start_expected_source_training_mode not in {
                 "action_only_cache",
@@ -1726,13 +1740,22 @@ class Wan22Trainer:
                 "weights_only_warm_start requires the native FastWAM multi-robot "
                 "strict checkpoint loader"
             )
-        loader(
-            str(resolved_path),
-            optimizer=None,
-            load_role="base_dependency",
-            active_paths=set(),
-            validate_trainable_scope=False,
+        loader_kwargs = {
+            "optimizer": None,
+            "load_role": "base_dependency",
+            "active_paths": set(),
+            "validate_trainable_scope": False,
+        }
+        architecture_upgrade = getattr(
+            self,
+            "weights_only_warm_start_architecture_upgrade",
+            None,
         )
+        if architecture_upgrade is not None:
+            loader_kwargs["architecture_upgrade"] = (
+                architecture_upgrade
+            )
+        loader(str(resolved_path), **loader_kwargs)
         logger.info(
             "Validated explicit weights-only warm start: path=%s "
             "source_training_mode=%s source_trainable_scope=%s source_state_kind=%s",

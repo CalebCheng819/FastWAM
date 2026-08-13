@@ -172,7 +172,7 @@ DRY_RUN="${FASTWAM_POSE_FOCUS_DRY_RUN:-0}"
 TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focus_r5_224_5e-6}"
 SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
 case "${TASK_PROFILE}" in
-  robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6) ;;
+  robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6|robofactory_placefood_gaussian_spatial_p4_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 
@@ -353,6 +353,11 @@ import yaml
 task_path, scale_path = map(pathlib.Path, sys.argv[1:])
 task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
 scale = yaml.safe_load(scale_path.read_text(encoding="utf-8"))
+is_gaussian_spatial = task_path.stem == "robofactory_placefood_gaussian_spatial_p4_224_5e-6"
+contract_task = task
+if is_gaussian_spatial:
+    parent_path = task_path.with_name("robofactory_placefood_pose_focus_r5_224_5e-6.yaml")
+    contract_task = yaml.safe_load(parent_path.read_text(encoding="utf-8"))
 
 def value_at(mapping, dotted):
     value = mapping
@@ -418,7 +423,7 @@ scale_expected = {
     "terminal_rehash_weights": False,
 }
 for label, mapping, expected in (
-    ("task", task, task_expected),
+    ("task", contract_task, task_expected),
     ("scale", scale, scale_expected),
 ):
     for key, wanted in expected.items():
@@ -428,9 +433,28 @@ for label, mapping, expected in (
             raise SystemExit(f"{label} profile is missing {key}: {exc}")
         if actual != wanted:
             raise SystemExit(f"{label} profile drift at {key}: expected {wanted!r}, got {actual!r}")
+if is_gaussian_spatial:
+    gaussian_expected = {
+        "weights_only_warm_start.architecture_upgrade": "gaussian_spatial_v2_from_pooled_v1",
+        "model.action_dit_config.gaussian_conditioning_mode": "spatial_cross_attention",
+        "model.action_dit_config.gaussian_residual_floor": 0.1,
+        "model.action_dit_config.gaussian_attention_temperature": 0.1,
+    }
+    for key, wanted in gaussian_expected.items():
+        try:
+            actual = value_at(task, key)
+        except (KeyError, TypeError) as exc:
+            raise SystemExit(f"Gaussian spatial profile is missing {key}: {exc}")
+        if actual != wanted:
+            raise SystemExit(
+                f"Gaussian spatial profile drift at {key}: expected {wanted!r}, got {actual!r}"
+            )
+    expected_parent = "robofactory_placefood_pose_focus_r5_224_5e-6"
+else:
+    expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
 defaults = task.get("defaults", [])
-if "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4" not in defaults:
-    raise SystemExit("POSE_FOCUS task must inherit the audited VG1/HUB1/GAU1 profile")
+if expected_parent not in defaults:
+    raise SystemExit(f"POSE_FOCUS task must inherit the audited profile {expected_parent}")
 
 PY
 
