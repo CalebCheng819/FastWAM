@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persistent, fail-closed launcher for the POSE_FOCUS 3 Worker x 8 GPU treatment.
+# Persistent, fail-closed launcher for the POSE_FOCUS 1x8 or 3x8 GPU treatment.
 # The outer DLC command runs once per worker. It stages an audited source weight before
 # spawning the eight local Accelerate ranks, so every child reads node-local
 # storage and no rank can accidentally restore the old 32-GPU optimizer state.
@@ -170,7 +170,7 @@ VAE_PATH="${FASTWAM_LOCAL_VAE_PATH:-}"
 PYTHON_BIN="${FASTWAM_POSE_FOCUS_PYTHON:-}"
 DRY_RUN="${FASTWAM_POSE_FOCUS_DRY_RUN:-0}"
 TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focus_r5_224_5e-6}"
-SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
+EXPECTED_POD_COUNT="${FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT:-3}"
 case "${TASK_PROFILE}" in
   robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6|robofactory_placefood_gaussian_spatial_p4_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
@@ -190,15 +190,28 @@ fi
 export FASTWAM_B4_ATTEMPT_ID="${ATTEMPT_ID}"
 printf 'POSE_FOCUS runtime provenance binding: FASTWAM_B4_ATTEMPT_ID=%s\n' "${FASTWAM_B4_ATTEMPT_ID}"
 
-[[ "${NUM_MACHINES}" == "3" ]] || die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
+[[ "${EXPECTED_POD_COUNT}" == "1" || "${EXPECTED_POD_COUNT}" == "3" ]] || \
+  die "FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT must be 1 or 3"
+[[ "${NUM_MACHINES}" == "${EXPECTED_POD_COUNT}" ]] || \
+  die "WORLD_SIZE must match expected DLC worker count ${EXPECTED_POD_COUNT}, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
-is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,2], got ${MACHINE_RANK:-unset}"
-((10#${MACHINE_RANK} < 3)) || die "RANK must be in [0,2], got ${MACHINE_RANK}"
+is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer, got ${MACHINE_RANK:-unset}"
+((10#${MACHINE_RANK} < 10#${NUM_MACHINES})) || \
+  die "RANK must be below WORLD_SIZE=${NUM_MACHINES}, got ${MACHINE_RANK}"
 [[ -z "${LOCAL_RANK:-}" || "${LOCAL_RANK}" == "0" ]] || die "outer DLC command must run only once per node (LOCAL_RANK=0)"
 is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a non-loopback address shared by all workers"
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || die "MASTER_PORT must be in [1,65535]"
-[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 24 ]] || die "global world size must be exactly 24"
+GLOBAL_WORLD_SIZE=$((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE}))
+if [[ "${EXPECTED_POD_COUNT}" == "1" ]]; then
+  SCALE_PROFILE="robofactory_multi_robot_8gpu_pose_focus_accum3"
+  EXPECTED_GRADIENT_ACCUMULATION_STEPS=3
+else
+  SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
+  EXPECTED_GRADIENT_ACCUMULATION_STEPS=1
+fi
+[[ $((GLOBAL_WORLD_SIZE * EXPECTED_GRADIENT_ACCUMULATION_STEPS)) -eq 24 ]] || \
+  die "effective rank-accumulation product must be exactly 24"
 
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || die "FASTWAM_POSE_FOCUS_DRY_RUN must be 0 or 1"
 
@@ -213,7 +226,8 @@ fi
 [[ -f "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" ]] || die "missing ZeRO-2 Accelerate config"
 [[ -f "${REPO_ROOT}/src/fastwam/trainer.py" ]] || die "missing trainer source"
 [[ -f "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" ]] || die "missing formal POSE_FOCUS task profile"
-[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal POSE_FOCUS 24-GPU scale profile"
+[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || \
+  die "missing formal POSE_FOCUS scale profile ${SCALE_PROFILE}"
 if [[ "${TEST_MODE}" == "1" ]]; then
   [[ "${OUTPUT_DIR}" == /* ]] || die "test output must be an absolute path"
 else
@@ -344,13 +358,16 @@ fi
 
 "${PYTHON_BIN}" - \
   "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" \
-  "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" <<'PY' || die "formal POSE_FOCUS task/scale contract validation failed"
+  "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" \
+  "${EXPECTED_GRADIENT_ACCUMULATION_STEPS}" <<'PY' || die "formal POSE_FOCUS task/scale contract validation failed"
 import pathlib
 import sys
 
 import yaml
 
-task_path, scale_path = map(pathlib.Path, sys.argv[1:])
+task_path = pathlib.Path(sys.argv[1])
+scale_path = pathlib.Path(sys.argv[2])
+expected_gradient_accumulation_steps = int(sys.argv[3])
 task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
 scale = yaml.safe_load(scale_path.read_text(encoding="utf-8"))
 is_gaussian_spatial = task_path.stem == "robofactory_placefood_gaussian_spatial_p4_224_5e-6"
@@ -414,7 +431,7 @@ if task_path.stem == "robofactory_placefood_pose_phase_x0_r5_224_5e-6":
 else:
     task_expected["model.loss.pose_focus.lambda_clean_arm_x0"] = 0.0
 scale_expected = {
-    "gradient_accumulation_steps": 1,
+    "gradient_accumulation_steps": expected_gradient_accumulation_steps,
     "checkpoint_state_kind": "full",
     "save_training_state": True,
     "save_final_checkpoint": True,
@@ -501,9 +518,11 @@ if [[ "${TEST_MODE}" != "1" ]]; then
 fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
-workers=3
+workers=${NUM_MACHINES}
 gpus_per_worker=8
-global_world_size=24
+global_world_size=${GLOBAL_WORLD_SIZE}
+gradient_accumulation_steps=${EXPECTED_GRADIENT_ACCUMULATION_STEPS}
+effective_rank_accumulation_product=24
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
@@ -571,11 +590,11 @@ export FASTWAM_POSE_FOCUS_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
   --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml"
-  --num_machines 3
+  --num_machines "${NUM_MACHINES}"
   --machine_rank "${MACHINE_RANK}"
   --main_process_ip "${MASTER_HOST}"
   --main_process_port "${MASTER_TCP_PORT}"
-  --num_processes 24
+  --num_processes "${GLOBAL_WORLD_SIZE}"
   --deepspeed_multinode_launcher standard
   "${REPO_ROOT}/scripts/train.py"
   "task=${TASK_PROFILE}"
@@ -601,8 +620,8 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-# PAI's outer-worker topology describes three node coordinators, whereas
-# Accelerate is about to construct a fresh 24-process topology.  Keeping the
+# PAI's outer-worker topology describes node coordinators, whereas Accelerate
+# is about to construct a fresh GPU-process topology. Keeping the
 # injected rank variables would make child rank discovery ambiguous.  All
 # values needed by Accelerate are already frozen into COMMAND above.
 unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK

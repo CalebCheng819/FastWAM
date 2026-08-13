@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC CreateJob manifest for POSE_FOCUS 3x8."""
+"""Render, but never submit, a PAI DLC job for POSE_FOCUS 1x8 or 3x8."""
 
 from __future__ import annotations
 
@@ -74,6 +74,7 @@ def parse_args() -> argparse.Namespace:
         default=R5_SOURCE_WEIGHT,
     )
     parser.add_argument("--max-running-minutes", type=int, default=10080)
+    parser.add_argument("--pod-count", type=int, choices=(1, 3), default=3)
     parser.add_argument(
         "--allow-local-bundle-for-tests",
         action="store_true",
@@ -191,6 +192,7 @@ def main() -> int:
         "FASTWAM_POSE_FOCUS_SOURCE_BUNDLE": bundle_text,
         "FASTWAM_POSE_FOCUS_CODE_COMMIT": args.pose_focus_code_commit,
         "FASTWAM_POSE_FOCUS_TASK_PROFILE": args.task_profile,
+        "FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT": str(args.pod_count),
         "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT": args.source_weight,
         "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES": str(source_weight["bytes"]),
         "FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT": "/tmp/fastwam-pose_focus-source-checkouts",
@@ -253,7 +255,7 @@ def main() -> int:
         ],
         "Description": (
             "PlaceFood R5 action-only treatment: "
-            f"{args.task_profile}, 3 workers x 8 GPUs, 1000 steps"
+            f"{args.task_profile}, {args.pod_count} workers x 8 GPUs, 1000 steps"
         ),
         "DisplayName": args.run_id,
         "Envs": envs,
@@ -263,7 +265,7 @@ def main() -> int:
                 "ElasticSpotSpecs": [],
                 "Image": IMAGE,
                 "LocalMountSpecs": [],
-                "PodCount": 3,
+                "PodCount": args.pod_count,
                 "ResourceConfig": {
                     "CPU": "126",
                     "GPU": "8",
@@ -300,7 +302,9 @@ def main() -> int:
                     )
                 ),
                 "provenance": "stat-cmp-no-new-hash",
-                "topology": "3x8-world24",
+                "topology": (
+                    "1x8-world8-accum3" if args.pod_count == 1 else "3x8-world24-accum1"
+                ),
             },
         },
         "SuccessPolicy": "AllWorkers",
