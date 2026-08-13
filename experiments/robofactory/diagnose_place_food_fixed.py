@@ -933,7 +933,7 @@ def validate_formal_rollout_contract(
         raise ValueError(
             "Formal rollout requires explicit --control-adapter direct|official_topp"
         )
-    expected_horizons = {"direct": {1, 5}, "official_topp": {32}}
+    expected_horizons = {"direct": {1, 5}, "official_topp": {5, 32}}
     if not exec_horizon_explicit or exec_horizon not in expected_horizons[control_adapter]:
         raise ValueError(
             f"Formal {control_adapter} rollout requires explicit --exec-horizon "

@@ -18,6 +18,14 @@ from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = "fastwam-fixed-policy-closedloop-panel-v2"
 EXPECTED_RUNS = 8
+CONTROL_REQUIREMENTS = {
+    "direct": {"exec_horizon": {1, 5}, "query_budget": 300, "sim_budget": 300},
+    "official_topp": {
+        "exec_horizon": {5, 32},
+        "query_budget": 60,
+        "sim_budget": 30000,
+    },
+}
 
 
 def _utc_now() -> str:
@@ -105,29 +113,32 @@ def _panel_rows(panel: Mapping[str, Any]) -> list[dict[str, int]]:
     return rows
 
 
-def build_contract(args: argparse.Namespace) -> dict[str, Any]:
-    expected_controls = {
-        "direct": {"exec_horizon": {1, 5}, "query_budget": 300, "sim_budget": 300},
-        "official_topp": {
-            "exec_horizon": {32},
-            "query_budget": 60,
-            "sim_budget": 30000,
-        },
-    }
-    controls = expected_controls[args.control_adapter]
-    if int(args.exec_horizon) not in controls["exec_horizon"]:
+def _validate_control_contract(
+    adapter: str, exec_horizon: int, query_budget: int, sim_budget: int
+) -> None:
+    controls = CONTROL_REQUIREMENTS[adapter]
+    if exec_horizon not in controls["exec_horizon"]:
         raise ValueError(
-            f"{args.control_adapter} requires exec_horizon in "
-            f"{sorted(controls['exec_horizon'])}, got {args.exec_horizon}"
+            f"{adapter} requires exec_horizon in "
+            f"{sorted(controls['exec_horizon'])}, got {exec_horizon}"
         )
-    if (
-        int(args.max_policy_queries),
-        int(args.max_simulator_steps),
-    ) != (controls["query_budget"], controls["sim_budget"]):
+    if (query_budget, sim_budget) != (
+        controls["query_budget"],
+        controls["sim_budget"],
+    ):
         raise ValueError(
-            f"{args.control_adapter} requires query/simulator budgets "
+            f"{adapter} requires query/simulator budgets "
             f"{(controls['query_budget'], controls['sim_budget'])}"
         )
+
+
+def build_contract(args: argparse.Namespace) -> dict[str, Any]:
+    _validate_control_contract(
+        args.control_adapter,
+        int(args.exec_horizon),
+        int(args.max_policy_queries),
+        int(args.max_simulator_steps),
+    )
     source_root = _directory(args.source_root, label="source root")
     diagnostic = _regular_file(
         source_root / "experiments/robofactory/diagnose_place_food_fixed.py",

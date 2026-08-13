@@ -145,6 +145,17 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
 
         self.assertEqual(identity, "p2-step1000-direct-h1-env333183-policy10000")
 
+    def test_panel_official_topp_contract_accepts_h5_and_h32(self) -> None:
+        for exec_horizon in (5, 32):
+            with self.subTest(exec_horizon=exec_horizon):
+                panel_runner._validate_control_contract(
+                    "official_topp", exec_horizon, 60, 30000
+                )
+
+    def test_panel_official_topp_contract_rejects_h1(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"\[5, 32\]"):
+            panel_runner._validate_control_contract("official_topp", 1, 60, 30000)
+
     def test_python_path_contains_explicit_runtime_dependencies(self) -> None:
         contract = {
             "source_root": "/source",
@@ -306,24 +317,44 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
         self.assertEqual(actions[0]["panda-0"][-1], -1.0)
         self.assertTrue(record["agents"]["panda-0"]["fallback"])
 
-    def test_formal_official_topp_contract_is_explicit(self) -> None:
-        contract = diagnostic.validate_formal_rollout_contract(
-            max_steps=300,
-            max_policy_queries=60,
-            max_simulator_steps=30000,
-            initial_state="raw",
-            exec_horizon=32,
-            control_adapter="official_topp",
-            topp_step=0.05,
-            initial_state_explicit=True,
-            exec_horizon_explicit=True,
-            control_adapter_explicit=True,
-            max_policy_queries_explicit=True,
-            max_simulator_steps_explicit=True,
-        )
+    def test_formal_official_topp_contract_accepts_declared_horizons(self) -> None:
+        for exec_horizon in (5, 32):
+            with self.subTest(exec_horizon=exec_horizon):
+                contract = diagnostic.validate_formal_rollout_contract(
+                    max_steps=300,
+                    max_policy_queries=60,
+                    max_simulator_steps=30000,
+                    initial_state="raw",
+                    exec_horizon=exec_horizon,
+                    control_adapter="official_topp",
+                    topp_step=0.05,
+                    initial_state_explicit=True,
+                    exec_horizon_explicit=True,
+                    control_adapter_explicit=True,
+                    max_policy_queries_explicit=True,
+                    max_simulator_steps_explicit=True,
+                )
 
-        self.assertEqual(contract["control_adapter"], "official_topp")
-        self.assertEqual(contract["max_policy_queries"], 60)
+                self.assertEqual(contract["control_adapter"], "official_topp")
+                self.assertEqual(contract["exec_horizon"], exec_horizon)
+                self.assertEqual(contract["max_policy_queries"], 60)
+
+    def test_formal_official_topp_contract_rejects_unsupported_horizon(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"\[5, 32\]"):
+            diagnostic.validate_formal_rollout_contract(
+                max_steps=300,
+                max_policy_queries=60,
+                max_simulator_steps=30000,
+                initial_state="raw",
+                exec_horizon=1,
+                control_adapter="official_topp",
+                topp_step=0.05,
+                initial_state_explicit=True,
+                exec_horizon_explicit=True,
+                control_adapter_explicit=True,
+                max_policy_queries_explicit=True,
+                max_simulator_steps_explicit=True,
+            )
 
 
 if __name__ == "__main__":
