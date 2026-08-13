@@ -299,7 +299,36 @@ def test_b4_targets_use_t_plus_h_and_follow_native_agent_order(tmp_path):
         "event_delta_threshold": 0.05,
         "closed_command_threshold": -0.8,
         "stable_steps": 4,
+        "phase_agent_id": None,
     }
+
+    robot0_phase_dataset = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        window_stride=4,
+        val_set_proportion=0.0,
+        is_training_set=True,
+        randomize_agent_order=True,
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={task_name: instruction},
+        b4_phase_agent_id=0,
+    )
+    expected_robot0_phases = {
+        B4_TARGET_ACTION_PHASE_NAMES[int(phase_id)]
+        for phase_id in torch.unique(
+            derive_b4_target_action_proxies(commands_by_agent[0])["phase"][8:40]
+        ).tolist()
+    }
+    robot0_index = next(
+        index
+        for index, entry in enumerate(robot0_phase_dataset.entries)
+        if entry["start"] == 8
+    )
+    assert set(robot0_phase_dataset.get_b4_phase_labels(robot0_index)) == (
+        expected_robot0_phases
+    )
+    assert robot0_phase_dataset.b4_proxy_schema["phase_agent_id"] == 0
 
 
 def test_action_only_dataset_reads_only_observation_frame(tmp_path):

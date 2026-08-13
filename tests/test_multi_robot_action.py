@@ -432,6 +432,8 @@ def _enable_pose_focus_loss(model):
     model.pose_focus_first_steps = 2
     model.pose_focus_first_steps_weight = 2.0
     model.pose_focus_gripper_dim = 2
+    model.pose_focus_clean_arm_x0_loss_weight = 0.0
+    model.pose_focus_clean_arm_huber_beta = 0.1
     return model
 
 
@@ -626,6 +628,59 @@ def test_pose_focus_flow_requires_exactly_one_active_agent():
             action_is_pad=None,
             agent_ids=torch.tensor([[1, 1]]),
         )
+
+
+def test_pose_focus_clean_arm_x0_tracks_semantic_agent_and_padding():
+    model = _enable_pose_focus_loss(_bare_b4_loss_model(enabled=False))
+    model.pose_focus_clean_arm_x0_loss_weight = 1.0
+    action = torch.zeros(1, 2, 3, 3)
+    noisy = torch.zeros_like(action)
+    pred = torch.zeros_like(action)
+    pred[:, 1, 0, 0] = -2.0
+    inputs = {
+        "action": action,
+        "action_is_pad": torch.zeros(1, 2, 3, dtype=torch.bool),
+        "agent_ids": torch.tensor([[1, 0]]),
+    }
+    loss = model._pose_focus_clean_arm_x0_loss(
+        inputs=inputs,
+        noisy_action=noisy,
+        pred_action=pred,
+        timestep_action=torch.tensor([500.0]),
+    )
+    assert loss > 0.0
+    inputs["action_is_pad"][:, 1, 0] = True
+    padded_loss = model._pose_focus_clean_arm_x0_loss(
+        inputs=inputs,
+        noisy_action=noisy,
+        pred_action=pred,
+        timestep_action=torch.tensor([500.0]),
+    )
+    assert padded_loss == 0.0
+
+
+def test_pose_focus_objective_adds_weighted_clean_arm_x0():
+    model = _enable_pose_focus_loss(_bare_b4_loss_model(enabled=False))
+    model.pose_focus_clean_arm_x0_loss_weight = 3.0
+    action = torch.zeros(1, 2, 3, 3)
+    noisy = torch.zeros_like(action)
+    pred = torch.zeros_like(action)
+    pred[:, 0, 0, 0] = -2.0
+    inputs = {
+        "action": action,
+        "action_is_pad": torch.zeros(1, 2, 3, dtype=torch.bool),
+        "agent_ids": torch.tensor([[0, 1]]),
+    }
+    objective, metrics = model._multi_action_objective(
+        inputs=inputs,
+        noisy_action=noisy,
+        pred_action=pred,
+        target_action=pred.clone(),
+        timestep_action=torch.tensor([500.0]),
+    )
+    assert metrics["flow"] == 0.0
+    assert metrics["pose_clean_arm_x0"] > 0.0
+    assert torch.equal(objective, metrics["pose_clean_arm_x0"])
 
 
 @pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
@@ -834,6 +889,8 @@ def test_multi_robot_runtime_forwards_pose_focus_loss_contract(monkeypatch):
                 "first_steps": 5,
                 "first_steps_weight": 2.0,
                 "gripper_dim": 7,
+                "lambda_clean_arm_x0": 1.0,
+                "clean_arm_huber_beta": 0.2,
             }
         },
         device="cpu",
@@ -846,6 +903,8 @@ def test_multi_robot_runtime_forwards_pose_focus_loss_contract(monkeypatch):
     assert captured["pose_focus_first_steps"] == 5
     assert captured["pose_focus_first_steps_weight"] == 2.0
     assert captured["pose_focus_gripper_dim"] == 7
+    assert captured["pose_focus_clean_arm_x0_loss_weight"] == 1.0
+    assert captured["pose_focus_clean_arm_huber_beta"] == 0.2
 
 
 def test_geometry_action_preprocessing_is_permutation_equivariant():

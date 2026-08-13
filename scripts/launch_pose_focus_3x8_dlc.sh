@@ -167,8 +167,12 @@ MODEL_CACHE_ROOT="${DIFFSYNTH_MODEL_BASE_PATH:-}"
 VAE_PATH="${FASTWAM_LOCAL_VAE_PATH:-}"
 PYTHON_BIN="${FASTWAM_POSE_FOCUS_PYTHON:-}"
 DRY_RUN="${FASTWAM_POSE_FOCUS_DRY_RUN:-0}"
-TASK_PROFILE="robofactory_placefood_pose_focus_r5_224_5e-6"
+TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focus_r5_224_5e-6}"
 SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
+case "${TASK_PROFILE}" in
+  robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6) ;;
+  *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
+esac
 
 require_env RUN_ID
 require_env FASTWAM_POSE_FOCUS_ATTEMPT_ID
@@ -389,7 +393,17 @@ task_expected = {
     "model.loss.pose_focus.first_steps": 5,
     "model.loss.pose_focus.first_steps_weight": 2.0,
     "model.loss.pose_focus.gripper_dim": 7,
+    "model.loss.pose_focus.clean_arm_huber_beta": 0.1,
 }
+if task_path.stem == "robofactory_placefood_pose_phase_x0_r5_224_5e-6":
+    task_expected.update({
+        "phase_balanced_fraction": 0.5,
+        "data.train.b4_phase_agent_id": 0,
+        "data.val.b4_phase_agent_id": 0,
+        "model.loss.pose_focus.lambda_clean_arm_x0": 1.0,
+    })
+else:
+    task_expected["model.loss.pose_focus.lambda_clean_arm_x0"] = 0.0
 scale_expected = {
     "gradient_accumulation_steps": 1,
     "checkpoint_state_kind": "full",

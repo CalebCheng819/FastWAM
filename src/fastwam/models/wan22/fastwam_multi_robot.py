@@ -62,6 +62,8 @@ class FastWAMMultiRobot(FastWAM):
         pose_focus_first_steps: int = 0,
         pose_focus_first_steps_weight: float = 1.0,
         pose_focus_gripper_dim: int = -1,
+        pose_focus_clean_arm_x0_loss_weight: float = 0.0,
+        pose_focus_clean_arm_huber_beta: float = 0.1,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -184,6 +186,12 @@ class FastWAMMultiRobot(FastWAM):
         self.pose_focus_gripper_weight = float(pose_focus_gripper_weight)
         self.pose_focus_first_steps = int(pose_focus_first_steps)
         self.pose_focus_first_steps_weight = float(pose_focus_first_steps_weight)
+        self.pose_focus_clean_arm_x0_loss_weight = float(
+            pose_focus_clean_arm_x0_loss_weight
+        )
+        self.pose_focus_clean_arm_huber_beta = float(
+            pose_focus_clean_arm_huber_beta
+        )
         pose_focus_gripper_dim = int(pose_focus_gripper_dim)
         if pose_focus_gripper_dim < 0:
             pose_focus_gripper_dim += action_dim
@@ -193,6 +201,10 @@ class FastWAMMultiRobot(FastWAM):
             "pose_focus_other_arm_weight": self.pose_focus_other_arm_weight,
             "pose_focus_gripper_weight": self.pose_focus_gripper_weight,
             "pose_focus_first_steps_weight": self.pose_focus_first_steps_weight,
+            "pose_focus_clean_arm_x0_loss_weight": (
+                self.pose_focus_clean_arm_x0_loss_weight
+            ),
+            "pose_focus_clean_arm_huber_beta": self.pose_focus_clean_arm_huber_beta,
         }
         invalid_pose_focus = [
             name for name, value in pose_focus_finite.items() if not math.isfinite(value)
@@ -201,8 +213,22 @@ class FastWAMMultiRobot(FastWAM):
             raise ValueError(f"Pose-focus loss values must be finite: {invalid_pose_focus}")
         if self.pose_focus_active_agent_id < 0:
             raise ValueError("pose_focus_active_agent_id must be non-negative")
-        if any(value <= 0.0 for value in pose_focus_finite.values()):
+        positive_pose_focus = {
+            name: value
+            for name, value in pose_focus_finite.items()
+            if name != "pose_focus_clean_arm_x0_loss_weight"
+        }
+        if any(value <= 0.0 for value in positive_pose_focus.values()):
             raise ValueError("Pose-focus loss weights must be positive")
+        if self.pose_focus_clean_arm_x0_loss_weight < 0.0:
+            raise ValueError("pose_focus_clean_arm_x0_loss_weight must be non-negative")
+        if (
+            self.pose_focus_clean_arm_x0_loss_weight > 0.0
+            and not self.pose_focus_loss_enabled
+        ):
+            raise ValueError(
+                "pose_focus_clean_arm_x0_loss_weight requires pose_focus_loss_enabled=true"
+            )
         if self.pose_focus_first_steps < 0:
             raise ValueError("pose_focus_first_steps must be non-negative")
         if not 0 <= self.pose_focus_gripper_dim < action_dim:
@@ -262,6 +288,8 @@ class FastWAMMultiRobot(FastWAM):
         pose_focus_first_steps: int = 0,
         pose_focus_first_steps_weight: float = 1.0,
         pose_focus_gripper_dim: int = -1,
+        pose_focus_clean_arm_x0_loss_weight: float = 0.0,
+        pose_focus_clean_arm_huber_beta: float = 0.1,
     ) -> "FastWAMMultiRobot":
         if video_dit_config is None or "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config` with `text_dim` is required.")
@@ -343,6 +371,8 @@ class FastWAMMultiRobot(FastWAM):
             pose_focus_first_steps=pose_focus_first_steps,
             pose_focus_first_steps_weight=pose_focus_first_steps_weight,
             pose_focus_gripper_dim=pose_focus_gripper_dim,
+            pose_focus_clean_arm_x0_loss_weight=pose_focus_clean_arm_x0_loss_weight,
+            pose_focus_clean_arm_huber_beta=pose_focus_clean_arm_huber_beta,
         )
         model.model_paths = {
             "video_dit": components.dit_path,
@@ -1031,6 +1061,63 @@ class FastWAMMultiRobot(FastWAM):
             "closed_command_raw": closed_command_raw,
         }
 
+    def _pose_focus_clean_arm_x0_loss(
+        self,
+        *,
+        inputs: dict[str, Any],
+        noisy_action: torch.Tensor,
+        pred_action: torch.Tensor,
+        timestep_action: torch.Tensor,
+    ) -> torch.Tensor:
+        """Supervise the active robot arm in clean-action space."""
+
+        agent_ids = inputs.get("agent_ids")
+        if agent_ids is None or agent_ids.shape != pred_action.shape[:2]:
+            raise ValueError(
+                "Pose-focus clean-arm loss requires agent_ids matching the native agent axis"
+            )
+        active = agent_ids.to(device=pred_action.device).eq(
+            self.pose_focus_active_agent_id
+        )
+        if not bool(active.sum(dim=1).eq(1).all().item()):
+            raise ValueError(
+                "Every pose-focus sample must contain the active semantic agent exactly once"
+            )
+        x0_hat = self._reconstruct_b4_action_x0(
+            noisy_action=noisy_action,
+            pred_action_velocity=pred_action,
+            timestep_action=timestep_action,
+        )
+        x0_target = inputs["action"].float()
+        arm = torch.ones(
+            x0_hat.shape[-1], dtype=torch.bool, device=x0_hat.device
+        )
+        arm[self.pose_focus_gripper_dim] = False
+        element_loss = F.smooth_l1_loss(
+            x0_hat[..., arm],
+            x0_target[..., arm],
+            beta=self.pose_focus_clean_arm_huber_beta,
+            reduction="none",
+        ).mean(dim=-1)
+        token_weight = active[:, :, None].to(dtype=element_loss.dtype).expand_as(
+            element_loss
+        ).clone()
+        first_steps = min(self.pose_focus_first_steps, element_loss.shape[-1])
+        if first_steps:
+            token_weight[:, :, :first_steps] *= self.pose_focus_first_steps_weight
+        valid = torch.ones_like(element_loss, dtype=torch.bool)
+        if inputs.get("action_is_pad") is not None:
+            valid = ~inputs["action_is_pad"]
+        per_sample = self._masked_per_sample_mean(
+            element_loss,
+            valid,
+            token_weight=token_weight,
+        )
+        scheduler_weight = self.train_action_scheduler.training_weight(
+            timestep_action
+        ).to(device=per_sample.device, dtype=per_sample.dtype)
+        return (per_sample * scheduler_weight).mean()
+
     def _multi_action_objective(
         self,
         *,
@@ -1047,6 +1134,23 @@ class FastWAMMultiRobot(FastWAM):
             action_is_pad=inputs["action_is_pad"],
             agent_ids=inputs.get("agent_ids"),
         )
+        clean_arm_x0_weight = getattr(
+            self, "pose_focus_clean_arm_x0_loss_weight", 0.0
+        )
+        if clean_arm_x0_weight > 0.0:
+            clean_arm = self._pose_focus_clean_arm_x0_loss(
+                inputs=inputs,
+                noisy_action=noisy_action,
+                pred_action=pred_action,
+                timestep_action=timestep_action,
+            )
+            clean_arm_contribution = (
+                clean_arm_x0_weight * clean_arm
+            )
+            return flow_loss + clean_arm_contribution, {
+                "flow": flow_loss,
+                "pose_clean_arm_x0": clean_arm_contribution,
+            }
         if not getattr(self, "b4_aux_loss_enabled", False):
             return flow_loss, {}
         b4_losses = self._b4_auxiliary_action_losses(
@@ -1155,7 +1259,7 @@ class FastWAMMultiRobot(FastWAM):
             **attention_layout,
         )
         pred_action = self.action_expert.post_dit(action_tokens, action_pre)
-        loss_action, b4_metrics = self._multi_action_objective(
+        loss_action, action_metrics = self._multi_action_objective(
             inputs=inputs,
             noisy_action=noisy_action,
             pred_action=pred_action,
@@ -1166,19 +1270,21 @@ class FastWAMMultiRobot(FastWAM):
         metrics = {
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
         }
-        if b4_metrics:
-            metrics.update(
-                {
-                    "loss_action_flow": self.loss_lambda_action
-                    * float(b4_metrics["flow"].detach().item()),
-                    "loss_b4_arm_huber": self.loss_lambda_action
-                    * float(b4_metrics["arm_huber"].detach().item()),
-                    "loss_b4_gripper_event": self.loss_lambda_action
-                    * float(b4_metrics["gripper_event"].detach().item()),
-                    "loss_b4_contact_intent_proxy": self.loss_lambda_action
-                    * float(b4_metrics["contact_intent_proxy"].detach().item()),
-                }
-            )
+        metric_names = {
+            "flow": "loss_action_flow",
+            "pose_clean_arm_x0": "loss_pose_clean_arm_x0",
+            "arm_huber": "loss_b4_arm_huber",
+            "gripper_event": "loss_b4_gripper_event",
+            "contact_intent_proxy": "loss_b4_contact_intent_proxy",
+        }
+        metrics.update(
+            {
+                metric_names[name]: self.loss_lambda_action
+                * float(value.detach().item())
+                for name, value in action_metrics.items()
+                if name in metric_names
+            }
+        )
         return loss_total, metrics
 
     def _training_loss_joint(self, inputs: dict[str, Any]):
@@ -1258,7 +1364,7 @@ class FastWAMMultiRobot(FastWAM):
             loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
         )
         loss_video = (loss_video_per_sample * video_weight).mean()
-        loss_action, b4_metrics = self._multi_action_objective(
+        loss_action, action_metrics = self._multi_action_objective(
             inputs=inputs,
             noisy_action=noisy_action,
             pred_action=pred_action,
@@ -1270,19 +1376,21 @@ class FastWAMMultiRobot(FastWAM):
             "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
         }
-        if b4_metrics:
-            metrics.update(
-                {
-                    "loss_action_flow": self.loss_lambda_action
-                    * float(b4_metrics["flow"].detach().item()),
-                    "loss_b4_arm_huber": self.loss_lambda_action
-                    * float(b4_metrics["arm_huber"].detach().item()),
-                    "loss_b4_gripper_event": self.loss_lambda_action
-                    * float(b4_metrics["gripper_event"].detach().item()),
-                    "loss_b4_contact_intent_proxy": self.loss_lambda_action
-                    * float(b4_metrics["contact_intent_proxy"].detach().item()),
-                }
-            )
+        metric_names = {
+            "flow": "loss_action_flow",
+            "pose_clean_arm_x0": "loss_pose_clean_arm_x0",
+            "arm_huber": "loss_b4_arm_huber",
+            "gripper_event": "loss_b4_gripper_event",
+            "contact_intent_proxy": "loss_b4_contact_intent_proxy",
+        }
+        metrics.update(
+            {
+                metric_names[name]: self.loss_lambda_action
+                * float(value.detach().item())
+                for name, value in action_metrics.items()
+                if name in metric_names
+            }
+        )
         return loss_total, metrics
 
     def training_loss(self, sample, tiled: bool = False):

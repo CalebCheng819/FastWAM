@@ -278,6 +278,12 @@ def create_multi_robot_fastwam(
             pose_focus_loss.get("first_steps_weight", 1.0)
         ),
         pose_focus_gripper_dim=int(pose_focus_loss.get("gripper_dim", -1)),
+        pose_focus_clean_arm_x0_loss_weight=float(
+            pose_focus_loss.get("lambda_clean_arm_x0", 0.0)
+        ),
+        pose_focus_clean_arm_huber_beta=float(
+            pose_focus_loss.get("clean_arm_huber_beta", 0.1)
+        ),
     )
 
 

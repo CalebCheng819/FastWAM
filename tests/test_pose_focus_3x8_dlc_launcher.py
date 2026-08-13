@@ -15,6 +15,7 @@ LAUNCHER = REPO / "scripts" / "launch_pose_focus_3x8_dlc.sh"
 RENDERER = REPO / "scripts" / "render_pose_focus_3x8_dlc_job.py"
 STAT_CMP_HELPER = REPO / "scripts" / "b4_stat_cmp_cache.py"
 TASK_NAME = "robofactory_placefood_pose_focus_r5_224_5e-6.yaml"
+P2_TASK_NAME = "robofactory_placefood_pose_phase_x0_r5_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
 
 
@@ -33,6 +34,9 @@ class PoseFocusLauncherTests(unittest.TestCase):
         (repo / "configs" / "scale").mkdir(parents=True)
         (repo / "configs" / "task" / TASK_NAME).write_bytes(
             (REPO / "configs" / "task" / TASK_NAME).read_bytes()
+        )
+        (repo / "configs" / "task" / P2_TASK_NAME).write_bytes(
+            (REPO / "configs" / "task" / P2_TASK_NAME).read_bytes()
         )
         (repo / "configs" / "scale" / SCALE_NAME).write_bytes(
             (REPO / "configs" / "scale" / SCALE_NAME).read_bytes()
@@ -146,6 +150,25 @@ class PoseFocusLauncherTests(unittest.TestCase):
             )
             self.assertNotIn("/checkpoints/state/", output)
 
+    def test_dry_run_resolves_p2_phase_clean_x0_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_POSE_FOCUS_TASK_PROFILE"] = P2_TASK_NAME.removesuffix(".yaml")
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "task=robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+                result.stdout,
+            )
+
     def test_rejects_conflicting_runtime_attempt_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env = self.fixture(Path(directory))
@@ -197,6 +220,8 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 str(bundle),
                 "--pose-focus-code-commit",
                 commit,
+                "--task-profile",
+                P2_TASK_NAME.removesuffix(".yaml"),
                 "--allow-local-bundle-for-tests",
             ]
             result = subprocess.run(command, text=True, capture_output=True, check=False)
@@ -215,6 +240,14 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 f"/oss-chengjuntao/artifacts/{run_id}",
             )
             self.assertEqual(request["Envs"]["FASTWAM_POSE_FOCUS_CODE_COMMIT"], commit)
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_TASK_PROFILE"],
+                P2_TASK_NAME.removesuffix(".yaml"),
+            )
+            self.assertEqual(
+                request["Settings"]["Tags"]["objective"],
+                "robot0-phase-clean-x0",
+            )
             self.assertNotIn("FASTWAM_POSE_FOCUS_TEST_MODE", request["Envs"])
             self.assertEqual(
                 {(item["MountPath"], item["MountAccess"]) for item in request["DataSources"]},

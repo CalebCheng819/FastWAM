@@ -29,6 +29,10 @@ LEGACY_DEPENDENCY_MANIFEST_ID = "b740e7224ad38628c12347ff0d36cb85dea45095f335ec0
 LEGACY_DEPENDENCY_RUNTIME_LOCK_ID = "d495f1a1192ced91edd7df2794a94fe0ffb67526a279570d5cf3649d59c0d360"
 LEGACY_DEPENDENCY_CACHE_HELPER_ID = "89dc9d7302f2edc1320b5f08f0516d5d2e9c6a176705642cf2f57756a1ae22ae"
 LAUNCHER_PATH = "scripts/launch_pose_focus_3x8_dlc.sh"
+TASK_PROFILES = (
+    "robofactory_placefood_pose_focus_r5_224_5e-6",
+    "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-python", required=True)
     parser.add_argument("--pose-focus-source-bundle", type=pathlib.Path, required=True)
     parser.add_argument("--pose-focus-code-commit", required=True)
+    parser.add_argument("--task-profile", choices=TASK_PROFILES, default=TASK_PROFILES[0])
     parser.add_argument("--max-running-minutes", type=int, default=10080)
     parser.add_argument(
         "--allow-local-bundle-for-tests",
@@ -160,6 +165,7 @@ def main() -> int:
         "FASTWAM_OFFLINE_ENV_STALE_LOCK_SECONDS": "7200",
         "FASTWAM_POSE_FOCUS_SOURCE_BUNDLE": bundle_text,
         "FASTWAM_POSE_FOCUS_CODE_COMMIT": args.pose_focus_code_commit,
+        "FASTWAM_POSE_FOCUS_TASK_PROFILE": args.task_profile,
         "FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT": "/tmp/fastwam-pose_focus-source-checkouts",
         "FASTWAM_POSE_FOCUS_PROVENANCE_MODE": "stat_cmp",
         "FASTWAM_POSE_FOCUS_INPUT_CACHE_ROOT": "/tmp/fastwam-pose_focus-input-cache",
@@ -218,7 +224,10 @@ def main() -> int:
                 "MountPath": "/oss-chengjuntao",
             },
         ],
-        "Description": "PlaceFood R5 pose-focused action-only continuation: 3 workers x 8 GPUs, 1000 steps",
+        "Description": (
+            "PlaceFood R5 action-only continuation: "
+            f"{args.task_profile}, 3 workers x 8 GPUs, 1000 steps"
+        ),
         "DisplayName": args.run_id,
         "Envs": envs,
         "JobMaxRunningTimeMinutes": args.max_running_minutes,
@@ -254,7 +263,11 @@ def main() -> int:
                 "initialization": "R5-action-step1000-weights-only",
                 "optimizer": "fresh",
                 "task": "PlaceFood-rf",
-                "objective": "active-agent-continuous-pose",
+                "objective": (
+                    "robot0-phase-clean-x0"
+                    if args.task_profile == TASK_PROFILES[1]
+                    else "active-agent-continuous-pose"
+                ),
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "3x8-world24",
             },

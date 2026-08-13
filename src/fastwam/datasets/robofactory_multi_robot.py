@@ -243,6 +243,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         b4_proxy_event_delta_threshold: float = 0.05,
         b4_proxy_closed_command_threshold: float = -0.8,
         b4_proxy_stable_steps: int = 4,
+        b4_phase_agent_id: Optional[int] = None,
     ):
         self.root_dir = Path(root_dir).expanduser().resolve()
         if not self.root_dir.exists():
@@ -319,6 +320,11 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             b4_proxy_closed_command_threshold
         )
         self.b4_proxy_stable_steps = int(b4_proxy_stable_steps)
+        self.b4_phase_agent_id = (
+            None if b4_phase_agent_id is None else int(b4_phase_agent_id)
+        )
+        if self.b4_phase_agent_id is not None and self.b4_phase_agent_id < 0:
+            raise ValueError("b4_phase_agent_id must be non-negative when configured")
         # Validate the public proxy parameters once, before opening source data.
         derive_b4_target_action_proxies(
             torch.zeros(1, 1),
@@ -530,8 +536,25 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                         raw_gripper_commands.append(
                             np.asarray(action_dataset[:, self.action_dim - 1], dtype=np.float32)
                         )
+                    phase_gripper_commands = np.stack(raw_gripper_commands, axis=0)
+                    if self.b4_phase_agent_id is not None:
+                        phase_agent_indices = [
+                            index
+                            for index, agent_name in enumerate(agent_names)
+                            if _agent_sort_key(agent_name) == self.b4_phase_agent_id
+                        ]
+                        if len(phase_agent_indices) != 1:
+                            raise ValueError(
+                                "b4_phase_agent_id must identify exactly one semantic agent: "
+                                f"id={self.b4_phase_agent_id} agents={agent_names} in "
+                                f"{h5_path}:{trajectory_name}"
+                            )
+                        phase_index = phase_agent_indices[0]
+                        phase_gripper_commands = phase_gripper_commands[
+                            phase_index : phase_index + 1
+                        ]
                     trajectory_proxy = derive_b4_target_action_proxies(
-                        np.stack(raw_gripper_commands, axis=0),
+                        phase_gripper_commands,
                         event_delta_threshold=self.b4_proxy_event_delta_threshold,
                         closed_command_threshold=self.b4_proxy_closed_command_threshold,
                         stable_steps=self.b4_proxy_stable_steps,
@@ -809,6 +832,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             "event_delta_threshold": self.b4_proxy_event_delta_threshold,
             "closed_command_threshold": self.b4_proxy_closed_command_threshold,
             "stable_steps": self.b4_proxy_stable_steps,
+            "phase_agent_id": self.b4_phase_agent_id,
         }
 
     @staticmethod

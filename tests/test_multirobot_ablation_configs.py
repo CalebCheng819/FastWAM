@@ -446,6 +446,24 @@ def test_b4_24gpu_profile_is_action_only_weight_warm_start(monkeypatch):
         assert "max_agents" not in cfg["data"][split]
 
 
+def test_pose_phase_x0_profile_samples_robot0_phase_and_adds_clean_loss(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT", TEST_POSE_FOCUS_BASE_CHECKPOINT
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+        "+scale=robofactory_multi_robot_24gpu_pose_focus",
+    )
+    assert cfg["phase_balanced_fraction"] == 0.5
+    assert cfg["data"]["train"]["b4_phase_agent_id"] == 0
+    assert cfg["data"]["val"]["b4_phase_agent_id"] == 0
+    assert cfg["model"]["loss"]["pose_focus"]["lambda_clean_arm_x0"] == 1.0
+    assert cfg["model"]["loss"]["pose_focus"]["clean_arm_huber_beta"] == 0.1
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+
+
 def test_pose_focus_24gpu_profile_targets_placefood_robot0_pose(monkeypatch):
     monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
     for name in (
@@ -483,6 +501,8 @@ def test_pose_focus_24gpu_profile_targets_placefood_robot0_pose(monkeypatch):
         "first_steps": 5,
         "first_steps_weight": 2.0,
         "gripper_dim": 7,
+        "lambda_clean_arm_x0": 0.0,
+        "clean_arm_huber_beta": 0.1,
     }
     assert "b4" not in cfg["model"]["loss"]
     assert cfg["learning_rate"] == 5.0e-6
