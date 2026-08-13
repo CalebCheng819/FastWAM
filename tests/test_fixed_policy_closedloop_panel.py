@@ -127,6 +127,14 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
         self.assertIn("--formal-contract", command)
         self.assertEqual(command.count("metadata_no_hash"), 1)
 
+    def test_run_id_tracks_exec_horizon(self) -> None:
+        identity = panel_runner.run_id(
+            {"candidate": "p2-step1000", "exec_horizon": 1},
+            {"environment_seed": 333183, "policy_seed": 10000},
+        )
+
+        self.assertEqual(identity, "p2-step1000-h1-env333183-policy10000")
+
     def test_python_path_contains_explicit_runtime_dependencies(self) -> None:
         contract = {
             "source_root": "/source",
@@ -183,6 +191,7 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
                 "checkpoint": {"path": checkpoint},
                 "action_architecture": architecture,
                 "model_project_root": model_project,
+                "exec_horizon": 5,
             }
 
             self.assertTrue(
@@ -194,6 +203,17 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
             )
             manifest["argv"].extend(["--oracle-intervention", "none"])
             (output / "run_manifest.json").write_text(json.dumps(manifest))
+            self.assertFalse(
+                panel_runner._completed_output(
+                    output,
+                    {"environment_seed": 1, "policy_seed": 2},
+                    contract,
+                )
+            )
+
+            manifest["argv"] = manifest["argv"][:-2]
+            (output / "run_manifest.json").write_text(json.dumps(manifest))
+            contract["exec_horizon"] = 1
             self.assertFalse(
                 panel_runner._completed_output(
                     output,

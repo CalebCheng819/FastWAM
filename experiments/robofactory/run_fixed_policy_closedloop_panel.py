@@ -166,7 +166,7 @@ def build_contract(args: argparse.Namespace) -> dict[str, Any]:
         ),
         "task": "PlaceFood-rf",
         "initial_state": "raw",
-        "exec_horizon": 5,
+        "exec_horizon": int(args.exec_horizon),
         "max_steps": 300,
         "action_horizon": 32,
         "num_inference_steps": 20,
@@ -195,7 +195,8 @@ def ensure_frozen_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 def run_id(contract: Mapping[str, Any], seed: Mapping[str, int]) -> str:
     return (
-        f"{contract['candidate']}-h5-env{seed['environment_seed']}-"
+        f"{contract['candidate']}-h{contract['exec_horizon']}-"
+        f"env{seed['environment_seed']}-"
         f"policy{seed['policy_seed']}"
     )
 
@@ -302,7 +303,10 @@ def _completed_output(
         and rollout.get("status") == "completed"
         and manifest.get("status") == "terminal"
         and manifest.get("rollout_cell")
-        == {"initial_state": "raw", "exec_horizon": 5}
+        == {
+            "initial_state": "raw",
+            "exec_horizon": int(contract["exec_horizon"]),
+        }
         and manifest.get("training_code_commit")
         == contract["training_code_commit"]
         and manifest.get("evaluation_code_commit")
@@ -515,6 +519,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--nvidia-driver-lib-dir", type=Path, required=True)
     parser.add_argument("--nvidia-vulkan-icd", type=Path, required=True)
     parser.add_argument("--nvidia-egl-vendor-json", type=Path, required=True)
+    parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=5)
     parser.add_argument("--gpus", type=int, nargs="+", default=[0, 1, 2, 3])
     return parser
 
