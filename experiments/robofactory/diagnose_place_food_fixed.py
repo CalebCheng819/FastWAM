@@ -944,14 +944,18 @@ def validate_formal_rollout_contract(
             "Formal rollout requires explicit --max-policy-queries and "
             "--max-simulator-steps"
         )
-    expected_budgets = {
-        "direct": (300, 300),
-        "official_topp": (60, 30000),
+    expected_query_budgets = {
+        "direct": {1: 300, 5: 300},
+        "official_topp": {5: 384, 32: 60},
     }
-    if (max_policy_queries, max_simulator_steps) != expected_budgets[control_adapter]:
+    expected_budgets = (
+        expected_query_budgets[control_adapter][exec_horizon],
+        300 if control_adapter == "direct" else 30000,
+    )
+    if (max_policy_queries, max_simulator_steps) != expected_budgets:
         raise ValueError(
             f"Formal {control_adapter} rollout requires query/simulator budgets "
-            f"{expected_budgets[control_adapter]}, got "
+            f"{expected_budgets}, got "
             f"{(max_policy_queries, max_simulator_steps)}"
         )
     if control_adapter == "official_topp" and not math.isclose(topp_step, 0.05):
@@ -959,6 +963,7 @@ def validate_formal_rollout_contract(
     return {
         "legacy_max_steps": max_steps,
         "max_policy_queries": max_policy_queries,
+        "target_action_budget": max_policy_queries * exec_horizon,
         "max_simulator_steps": max_simulator_steps,
         "initial_state": initial_state,
         "exec_horizon": exec_horizon,

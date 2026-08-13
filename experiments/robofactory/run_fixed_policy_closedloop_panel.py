@@ -16,13 +16,15 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-SCHEMA_VERSION = "fastwam-fixed-policy-closedloop-panel-v2"
+SCHEMA_VERSION = "fastwam-fixed-policy-closedloop-panel-v3"
 EXPECTED_RUNS = 8
 CONTROL_REQUIREMENTS = {
-    "direct": {"exec_horizon": {1, 5}, "query_budget": 300, "sim_budget": 300},
+    "direct": {
+        "query_budget_by_horizon": {1: 300, 5: 300},
+        "sim_budget": 300,
+    },
     "official_topp": {
-        "exec_horizon": {5, 32},
-        "query_budget": 60,
+        "query_budget_by_horizon": {5: 384, 32: 60},
         "sim_budget": 30000,
     },
 }
@@ -115,25 +117,27 @@ def _panel_rows(panel: Mapping[str, Any]) -> list[dict[str, int]]:
 
 def _validate_control_contract(
     adapter: str, exec_horizon: int, query_budget: int, sim_budget: int
-) -> None:
+) -> int:
     controls = CONTROL_REQUIREMENTS[adapter]
-    if exec_horizon not in controls["exec_horizon"]:
+    expected_queries = controls["query_budget_by_horizon"].get(exec_horizon)
+    if expected_queries is None:
         raise ValueError(
             f"{adapter} requires exec_horizon in "
-            f"{sorted(controls['exec_horizon'])}, got {exec_horizon}"
+            f"{sorted(controls['query_budget_by_horizon'])}, got {exec_horizon}"
         )
     if (query_budget, sim_budget) != (
-        controls["query_budget"],
+        expected_queries,
         controls["sim_budget"],
     ):
         raise ValueError(
             f"{adapter} requires query/simulator budgets "
-            f"{(controls['query_budget'], controls['sim_budget'])}"
+            f"{(expected_queries, controls['sim_budget'])} at horizon {exec_horizon}"
         )
+    return query_budget * exec_horizon
 
 
 def build_contract(args: argparse.Namespace) -> dict[str, Any]:
-    _validate_control_contract(
+    target_action_budget = _validate_control_contract(
         args.control_adapter,
         int(args.exec_horizon),
         int(args.max_policy_queries),
@@ -203,6 +207,7 @@ def build_contract(args: argparse.Namespace) -> dict[str, Any]:
         "control_adapter": args.control_adapter,
         "topp_step": float(args.topp_step),
         "max_policy_queries": int(args.max_policy_queries),
+        "target_action_budget": target_action_budget,
         "max_simulator_steps": int(args.max_simulator_steps),
         "max_steps": 300,
         "action_horizon": 32,
