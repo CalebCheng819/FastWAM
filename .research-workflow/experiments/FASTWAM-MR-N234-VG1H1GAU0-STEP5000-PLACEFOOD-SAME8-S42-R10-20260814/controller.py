@@ -416,6 +416,7 @@ def worker_dependency_env(shim_dir: Path) -> dict[str, str]:
         "VK_DRIVER_FILES": str(NVIDIA_GRAPHICS_ROOT / "nvidia_icd.json"),
         "SAPIEN_VULKAN_LIBRARY_PATH": str(shim_dir / "libvulkan.so.1"),
         "FASTWAM_VULKAN_LOADER": str(VULKAN_LOADER),
+        "FASTWAM_GL_SHIM_ROOT": str(shim_dir),
         "__GLX_VENDOR_LIBRARY_NAME": "nvidia",
         "__EGL_VENDOR_LIBRARY_FILENAMES": str(NVIDIA_GRAPHICS_ROOT / "10_nvidia.json"),
         "LD_LIBRARY_PATH": os.pathsep.join(library_paths),
@@ -431,6 +432,17 @@ import ctypes
 import os
 from pathlib import Path
 
+source = Path(os.environ["FASTWAM_DEP_SOURCE_ROOT"])
+robofactory = Path(os.environ["FASTWAM_DEP_ROBOFACTORY_ROOT"])
+shim_root = Path(os.environ["FASTWAM_GL_SHIM_ROOT"]).resolve(strict=True)
+initial_loader_root = Path(os.environ["LD_LIBRARY_PATH"].split(os.pathsep)[0]).resolve(strict=True)
+if initial_loader_root != shim_root:
+    raise SystemExit(f"initial loader namespace mismatch: {initial_loader_root} != {shim_root}")
+expected_vulkan = Path(os.environ["FASTWAM_VULKAN_LOADER"]).resolve(strict=True)
+actual_vulkan = (shim_root / "libvulkan.so.1").resolve(strict=True)
+if actual_vulkan != expected_vulkan:
+    raise SystemExit(f"Vulkan loader shim mismatch: {actual_vulkan} != {expected_vulkan}")
+
 import boto3
 import git
 import torch
@@ -440,15 +452,8 @@ import accelerate
 import deepspeed
 from eval_robofactory_multi_robot import _preflight_environment_imports
 
-source = Path(os.environ["FASTWAM_DEP_SOURCE_ROOT"])
-robofactory = Path(os.environ["FASTWAM_DEP_ROBOFACTORY_ROOT"])
 environment_modules = _preflight_environment_imports(robofactory)
 
-shim_root = Path(os.environ["LD_LIBRARY_PATH"].split(os.pathsep)[0]).resolve(strict=True)
-expected_vulkan = Path(os.environ["FASTWAM_VULKAN_LOADER"]).resolve(strict=True)
-actual_vulkan = (shim_root / "libvulkan.so.1").resolve(strict=True)
-if actual_vulkan != expected_vulkan:
-    raise SystemExit(f"Vulkan loader shim mismatch: {actual_vulkan} != {expected_vulkan}")
 vulkan = ctypes.CDLL(str(shim_root / "libvulkan.so.1"), mode=ctypes.RTLD_GLOBAL)
 enumerate_version = vulkan.vkEnumerateInstanceVersion
 enumerate_version.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
