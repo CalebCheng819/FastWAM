@@ -19,6 +19,7 @@ def _tiny_action_expert(
     enable_gaussian=False,
     gaussian_conditioning_mode="pooled_residual",
     gaussian_residual_floor=0.0,
+    gaussian_relation_num_heads=8,
 ):
     return MultiAgentActionDiT(
         action_dim=3,
@@ -35,6 +36,7 @@ def _tiny_action_expert(
         gaussian_stem_dim=8,
         gaussian_conditioning_mode=gaussian_conditioning_mode,
         gaussian_residual_floor=gaussian_residual_floor,
+        gaussian_relation_num_heads=gaussian_relation_num_heads,
         hidden_dim=32,
         ffn_dim=64,
         text_dim=16,
@@ -313,6 +315,84 @@ def test_spatial_gaussian_conditioning_is_agent_permutation_equivariant():
     shared_action = shared["tokens"][:, : 4 * horizon].reshape(1, 4, horizon, -1)
     permuted_action = permuted["tokens"][:, : 4 * horizon].reshape(1, 4, horizon, -1)
     assert torch.allclose(shared_action, permuted_action[:, inverse])
+
+
+def test_task_conditioned_relation_attention_is_p6_equivalent_at_zero_gate():
+    torch.manual_seed(43)
+    spatial = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    relation = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="task_conditioned_relation_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    relation.load_state_dict(spatial.state_dict(), strict=False)
+    data = _inputs(2)
+
+    spatial_tokens = spatial.pre_dit(
+        data["action"], data["timestep"], data["context"], data["context_mask"],
+        agent_states=data["state"], agent_geometry=data["geometry"],
+        agent_ids=data["ids"], agent_gaussian=data["gaussian"],
+    )["tokens"]
+    relation_tokens = relation.pre_dit(
+        data["action"], data["timestep"], data["context"], data["context_mask"],
+        agent_states=data["state"], agent_geometry=data["geometry"],
+        agent_ids=data["ids"], agent_gaussian=data["gaussian"],
+    )["tokens"]
+
+    assert relation.gaussian_relation_gate is not None
+    assert torch.equal(
+        relation.gaussian_relation_gate,
+        torch.zeros_like(relation.gaussian_relation_gate),
+    )
+    assert torch.allclose(spatial_tokens, relation_tokens)
+
+
+def test_task_conditioned_relation_attention_uses_task_context_after_gate_opens():
+    torch.manual_seed(47)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="task_conditioned_relation_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    assert model.gaussian_relation_gate is not None
+    model.gaussian_relation_gate.data.fill_(1.0)
+    data = _inputs(2)
+
+    first = model.pre_dit(
+        data["action"], data["timestep"], data["context"], data["context_mask"],
+        agent_states=data["state"], agent_geometry=data["geometry"],
+        agent_ids=data["ids"], agent_gaussian=data["gaussian"],
+    )["tokens"]
+    second = model.pre_dit(
+        data["action"], data["timestep"], data["context"] + 0.5,
+        data["context_mask"], agent_states=data["state"],
+        agent_geometry=data["geometry"], agent_ids=data["ids"],
+        agent_gaussian=data["gaussian"],
+    )["tokens"]
+    assert not torch.allclose(first, second)
+
+
+def test_task_conditioned_relation_attention_receives_gradients():
+    torch.manual_seed(53)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="task_conditioned_relation_attention",
+        gaussian_residual_floor=0.1,
+    ).train()
+    data = _inputs(2)
+    tokens = model.pre_dit(
+        data["action"], data["timestep"], data["context"], data["context_mask"],
+        agent_states=data["state"], agent_geometry=data["geometry"],
+        agent_ids=data["ids"], agent_gaussian=data["gaussian"],
+    )["tokens"]
+    tokens.square().mean().backward()
+    assert model.gaussian_relation_gate is not None
+    assert model.gaussian_relation_gate.grad is not None
+    assert torch.isfinite(model.gaussian_relation_gate.grad).all()
 
 
 def test_gaussian_enabled_requires_exact_shape_and_disabled_ignores_field():
@@ -1284,6 +1364,7 @@ def _tiny_mot_pair(
     enable_gaussian=False,
     gaussian_conditioning_mode="pooled_residual",
     gaussian_residual_floor=0.0,
+    gaussian_relation_num_heads=8,
 ):
     return MoT(
         mixtures={
@@ -1294,6 +1375,7 @@ def _tiny_mot_pair(
                 enable_gaussian=enable_gaussian,
                 gaussian_conditioning_mode=gaussian_conditioning_mode,
                 gaussian_residual_floor=gaussian_residual_floor,
+                gaussian_relation_num_heads=gaussian_relation_num_heads,
             ),
         },
         mot_checkpoint_mixed_attn=False,
@@ -1564,6 +1646,7 @@ def _bare_checkpoint_model(
     enable_gaussian=False,
     gaussian_conditioning_mode="pooled_residual",
     gaussian_residual_floor=0.0,
+    gaussian_relation_num_heads=8,
     training_mode="action_only_cache",
     trainable_scope="action",
 ):
@@ -1573,6 +1656,7 @@ def _bare_checkpoint_model(
         enable_gaussian=enable_gaussian,
         gaussian_conditioning_mode=gaussian_conditioning_mode,
         gaussian_residual_floor=gaussian_residual_floor,
+        gaussian_relation_num_heads=gaussian_relation_num_heads,
     )
     model.action_expert = model.mot.mixtures["action"]
     model.video_expert = model.mot.mixtures["video"]
@@ -1597,6 +1681,15 @@ def _bare_checkpoint_model(
             model.action_expert.gaussian_adapter.requires_grad_(True)
         if model.action_expert.gaussian_gate is not None:
             model.action_expert.gaussian_gate.requires_grad_(True)
+        for module in (
+            model.action_expert.gaussian_relation_attention,
+            model.action_expert.gaussian_query_norm,
+            model.action_expert.gaussian_key_norm,
+        ):
+            if module is not None:
+                module.requires_grad_(True)
+        if model.action_expert.gaussian_relation_gate is not None:
+            model.action_expert.gaussian_relation_gate.requires_grad_(True)
         model.action_expert.head.requires_grad_(True)
         model.action_expert.hub_seed.requires_grad_(
             model.action_expert.hub_enabled
@@ -1610,11 +1703,13 @@ def _bare_gaussian_checkpoint_model(
     *,
     gaussian_conditioning_mode="pooled_residual",
     gaussian_residual_floor=0.0,
+    gaussian_relation_num_heads=8,
 ):
     return _bare_checkpoint_model(
         enable_gaussian=True,
         gaussian_conditioning_mode=gaussian_conditioning_mode,
         gaussian_residual_floor=gaussian_residual_floor,
+        gaussian_relation_num_heads=gaussian_relation_num_heads,
     )
 
 
@@ -2119,6 +2214,52 @@ def test_gaussian_spatial_v2_loads_exact_pooled_v1_tensors(tmp_path):
     target_state = target.mot.state_dict()
     for key, source_value in source.mot.state_dict().items():
         assert torch.equal(target_state[key], source_value)
+
+
+def test_gaussian_relation_v3_loads_all_spatial_v2_tensors(tmp_path):
+    torch.manual_seed(743)
+    source = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+    checkpoint = tmp_path / "spatial-v2.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="task_conditioned_relation_attention",
+        gaussian_residual_floor=0.1,
+    )
+    target._checkpoint_provenance_mode = "stat_cmp"
+
+    target._load_checkpoint_with_role(
+        checkpoint,
+        load_role="base_dependency",
+        active_paths=set(),
+        validate_trainable_scope=False,
+        architecture_upgrade="gaussian_relation_v3_from_spatial_v2",
+    )
+
+    target_state = target.mot.state_dict()
+    for key, source_value in source.mot.state_dict().items():
+        assert torch.equal(target_state[key], source_value)
+    assert torch.equal(
+        target.action_expert.gaussian_relation_gate,
+        torch.zeros_like(target.action_expert.gaussian_relation_gate),
+    )
+
+
+def test_gaussian_relation_v3_hub_io_scope_includes_new_relation_parameters():
+    model = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="task_conditioned_relation_attention",
+    )
+    model.configure_trainable_parameters("hub_io")
+    trainable_names = {
+        name for name, parameter in model.mot.named_parameters() if parameter.requires_grad
+    }
+
+    assert any("gaussian_relation_attention" in name for name in trainable_names)
+    assert any(name.endswith("gaussian_relation_gate") for name in trainable_names)
+    assert any("gaussian_query_norm" in name for name in trainable_names)
+    assert any("gaussian_key_norm" in name for name in trainable_names)
 
 
 def test_gaussian_spatial_v2_rejects_pooled_v1_without_explicit_upgrade():

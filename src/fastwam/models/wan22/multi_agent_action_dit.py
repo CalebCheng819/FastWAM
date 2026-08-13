@@ -197,6 +197,10 @@ class MultiAgentActionDiT(ActionDiT):
         "agent_geometry_encoder.",
         "gaussian_adapter.",
         "gaussian_gate",
+        "gaussian_relation_attention.",
+        "gaussian_relation_gate",
+        "gaussian_query_norm.",
+        "gaussian_key_norm.",
         "hub_seed",
     )
 
@@ -219,6 +223,7 @@ class MultiAgentActionDiT(ActionDiT):
         gaussian_conditioning_mode: str = "pooled_residual",
         gaussian_residual_floor: float = 0.0,
         gaussian_attention_temperature: float = 0.1,
+        gaussian_relation_num_heads: int = 8,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -267,13 +272,16 @@ class MultiAgentActionDiT(ActionDiT):
         self.gaussian_conditioning_mode = str(gaussian_conditioning_mode).strip().lower()
         self.gaussian_residual_floor = float(gaussian_residual_floor)
         self.gaussian_attention_temperature = float(gaussian_attention_temperature)
+        self.gaussian_relation_num_heads = int(gaussian_relation_num_heads)
         if self.gaussian_conditioning_mode not in {
             "pooled_residual",
             "spatial_cross_attention",
+            "task_conditioned_relation_attention",
         }:
             raise ValueError(
-                "`gaussian_conditioning_mode` must be pooled_residual or "
-                f"spatial_cross_attention, got {self.gaussian_conditioning_mode!r}"
+                "`gaussian_conditioning_mode` must be pooled_residual, "
+                "spatial_cross_attention, or task_conditioned_relation_attention; "
+                f"got {self.gaussian_conditioning_mode!r}"
             )
         if self.gaussian_residual_floor < 0:
             raise ValueError(
@@ -294,12 +302,29 @@ class MultiAgentActionDiT(ActionDiT):
                 "gaussian_residual_floor=0"
             )
         if (
-            self.gaussian_conditioning_mode == "spatial_cross_attention"
+            self.gaussian_conditioning_mode in {
+                "spatial_cross_attention",
+                "task_conditioned_relation_attention",
+            }
             and self.hidden_dim % 4
         ):
             raise ValueError(
                 "spatial_cross_attention requires hidden_dim divisible by 4, "
                 f"got {self.hidden_dim}"
+            )
+        if self.gaussian_relation_num_heads <= 0:
+            raise ValueError(
+                "`gaussian_relation_num_heads` must be positive, got "
+                f"{self.gaussian_relation_num_heads}"
+            )
+        if (
+            self.gaussian_conditioning_mode == "task_conditioned_relation_attention"
+            and self.hidden_dim % self.gaussian_relation_num_heads
+        ):
+            raise ValueError(
+                "task_conditioned_relation_attention requires hidden_dim divisible by "
+                f"gaussian_relation_num_heads, got {self.hidden_dim} and "
+                f"{self.gaussian_relation_num_heads}"
             )
 
         self.agent_state_encoder = nn.Sequential(
@@ -336,6 +361,29 @@ class MultiAgentActionDiT(ActionDiT):
         # equivalent to the pre-Gaussian baseline before its first update.
         self.gaussian_gate = (
             nn.Parameter(torch.zeros(1)) if self.enable_gaussian else None
+        )
+        relation_attention_enabled = (
+            self.enable_gaussian
+            and self.gaussian_conditioning_mode
+            == "task_conditioned_relation_attention"
+        )
+        self.gaussian_relation_attention = (
+            nn.MultiheadAttention(
+                self.hidden_dim,
+                self.gaussian_relation_num_heads,
+                batch_first=True,
+            )
+            if relation_attention_enabled
+            else None
+        )
+        self.gaussian_relation_gate = (
+            nn.Parameter(torch.zeros(1)) if relation_attention_enabled else None
+        )
+        self.gaussian_query_norm = (
+            nn.LayerNorm(self.hidden_dim) if relation_attention_enabled else None
+        )
+        self.gaussian_key_norm = (
+            nn.LayerNorm(self.hidden_dim) if relation_attention_enabled else None
         )
 
     def _validate_agent_inputs(
@@ -566,6 +614,7 @@ class MultiAgentActionDiT(ActionDiT):
             agent_states.to(device=action_emb.device, dtype=action_emb.dtype)
         )
         action_emb = action_emb + state_emb.unsqueeze(2)
+        context_emb = self.text_embedding(context)
         if self.agent_encoding_mode == "geometry":
             if self.agent_geometry_encoder is None or agent_geometry is None:
                 raise RuntimeError("Geometry mode was initialized without geometry inputs")
@@ -590,7 +639,7 @@ class MultiAgentActionDiT(ActionDiT):
                     dtype=action_emb.dtype,
                 )
                 action_emb = action_emb + gaussian_gate * gaussian_emb.unsqueeze(2)
-            else:
+            elif self.gaussian_conditioning_mode == "spatial_cross_attention":
                 spatial_tokens = self.gaussian_adapter.forward_spatial(agent_gaussian).to(
                     device=action_emb.device,
                     dtype=action_emb.dtype,
@@ -616,6 +665,74 @@ class MultiAgentActionDiT(ActionDiT):
                 ).to(dtype=action_emb.dtype)
                 effective_gate = gaussian_gate + self.gaussian_residual_floor
                 action_emb = action_emb + effective_gate * gaussian_emb
+            else:
+                if (
+                    self.gaussian_relation_attention is None
+                    or self.gaussian_relation_gate is None
+                    or self.gaussian_query_norm is None
+                    or self.gaussian_key_norm is None
+                ):
+                    raise RuntimeError(
+                        "Task-conditioned Gaussian relation attention was not initialized"
+                    )
+                spatial_tokens = self.gaussian_adapter.forward_spatial(agent_gaussian).to(
+                    device=action_emb.device,
+                    dtype=action_emb.dtype,
+                )
+                temporal_position = sinusoidal_embedding_1d(
+                    self.hidden_dim,
+                    torch.arange(horizon, device=action_emb.device, dtype=action_emb.dtype),
+                )
+                base_query = action_emb + temporal_position.view(
+                    1, 1, horizon, self.hidden_dim
+                )
+                base_scores = torch.einsum(
+                    "bnth,bnph->bntp",
+                    F.normalize(base_query.float(), dim=-1),
+                    F.normalize(spatial_tokens.float(), dim=-1),
+                )
+                base_attention = torch.softmax(
+                    base_scores / self.gaussian_attention_temperature,
+                    dim=-1,
+                )
+                base_gaussian_emb = torch.einsum(
+                    "bntp,bnph->bnth",
+                    base_attention,
+                    spatial_tokens.float(),
+                ).to(dtype=action_emb.dtype)
+                context_valid = context_mask.to(
+                    device=context_emb.device,
+                    dtype=context_emb.dtype,
+                ).unsqueeze(-1)
+                task_token = (context_emb * context_valid).sum(dim=1) / context_valid.sum(
+                    dim=1
+                ).clamp(min=1.0)
+                query = action_emb + temporal_position.view(
+                    1, 1, horizon, self.hidden_dim
+                ) + task_token[:, None, None, :]
+                relation_query = self.gaussian_query_norm(query).reshape(
+                    batch_size * num_agents,
+                    horizon,
+                    self.hidden_dim,
+                )
+                relation_key = self.gaussian_key_norm(spatial_tokens).reshape(
+                    batch_size * num_agents,
+                    spatial_tokens.shape[2],
+                    self.hidden_dim,
+                )
+                gaussian_emb, _ = self.gaussian_relation_attention(
+                    relation_query,
+                    relation_key,
+                    relation_key,
+                    need_weights=False,
+                )
+                gaussian_emb = gaussian_emb.reshape_as(action_emb)
+                gaussian_emb = base_gaussian_emb + self.gaussian_relation_gate.to(
+                    device=action_emb.device,
+                    dtype=action_emb.dtype,
+                ) * gaussian_emb
+                effective_gate = gaussian_gate + self.gaussian_residual_floor
+                action_emb = action_emb + effective_gate * gaussian_emb
         action_emb = action_emb.reshape(batch_size, num_agents * horizon, self.hidden_dim)
         num_hub_tokens = self.num_hub_tokens_for(num_agents)
         if num_hub_tokens:
@@ -629,7 +746,6 @@ class MultiAgentActionDiT(ActionDiT):
         else:
             tokens = action_emb
 
-        context_emb = self.text_embedding(context)
         context_attn_mask = context_mask.to(dtype=torch.bool).unsqueeze(1).expand(
             -1, tokens.shape[1], -1
         )

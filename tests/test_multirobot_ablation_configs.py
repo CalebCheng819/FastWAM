@@ -608,6 +608,35 @@ def test_spatial_semantic_p6_combines_p5_sampling_with_spatial_gaussian(
     assert cfg["max_steps"] == 1000
 
 
+def test_task_gaussian_relation_p7_keeps_p6_treatment_and_adds_semantic_relation(
+    monkeypatch,
+):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT",
+        TEST_POSE_FOCUS_BASE_CHECKPOINT,
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
+        "+scale=robofactory_multi_robot_24gpu_pose_focus",
+    )
+
+    assert cfg["phase_balanced_fraction"] == 0.5
+    assert cfg["weights_only_warm_start"]["architecture_upgrade"] == (
+        "gaussian_relation_v3_from_spatial_v2"
+    )
+    action_cfg = cfg["model"]["action_dit_config"]
+    assert action_cfg["gaussian_conditioning_mode"] == (
+        "task_conditioned_relation_attention"
+    )
+    assert action_cfg["gaussian_residual_floor"] == 0.1
+    assert action_cfg["gaussian_relation_num_heads"] == 8
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["max_steps"] == 1000
+
+
 def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):
     _set_gaussian_env(monkeypatch)
     cfg = _compose_arm("robofactory_multi_robot_vg1_hub1_gau1_224_1e-4")

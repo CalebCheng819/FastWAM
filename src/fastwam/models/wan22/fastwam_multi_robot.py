@@ -415,6 +415,14 @@ class FastWAMMultiRobot(FastWAM):
                 self.action_expert.gaussian_adapter.requires_grad_(True)
             if self.action_expert.gaussian_gate is not None:
                 self.action_expert.gaussian_gate.requires_grad_(True)
+            if self.action_expert.gaussian_relation_attention is not None:
+                self.action_expert.gaussian_relation_attention.requires_grad_(True)
+            if self.action_expert.gaussian_relation_gate is not None:
+                self.action_expert.gaussian_relation_gate.requires_grad_(True)
+            if self.action_expert.gaussian_query_norm is not None:
+                self.action_expert.gaussian_query_norm.requires_grad_(True)
+            if self.action_expert.gaussian_key_norm is not None:
+                self.action_expert.gaussian_key_norm.requires_grad_(True)
             self.action_expert.head.requires_grad_(True)
             self.action_expert.hub_seed.requires_grad_(self.action_expert.hub_enabled)
             self.action_expert.train()
@@ -2021,7 +2029,7 @@ class FastWAMMultiRobot(FastWAM):
                         "gaussian_adapter_version": "conv_gn_silu_pool_v1",
                     }
                 )
-            else:
+            elif self.action_expert.gaussian_conditioning_mode == "spatial_cross_attention":
                 gaussian_metadata.update(
                     {
                         "gaussian_conditioning": "agent_local_spatial_cross_attention_v2",
@@ -2031,6 +2039,23 @@ class FastWAMMultiRobot(FastWAM):
                         "gaussian_attention_temperature": (
                             self.action_expert.gaussian_attention_temperature
                         ),
+                    }
+                )
+            else:
+                gaussian_metadata.update(
+                    {
+                        "gaussian_conditioning": "task_conditioned_relation_attention_v3",
+                        "gaussian_adapter_version": "conv_gn_silu_spatial_reuse_v2",
+                        "gaussian_spatial_position_encoding": "sincos_2d_v1",
+                        "gaussian_residual_floor": self.action_expert.gaussian_residual_floor,
+                        "gaussian_attention_temperature": (
+                            self.action_expert.gaussian_attention_temperature
+                        ),
+                        "gaussian_relation_num_heads": (
+                            self.action_expert.gaussian_relation_num_heads
+                        ),
+                        "gaussian_relation_task_pooling": "masked_mean_v1",
+                        "gaussian_relation_gate_init": 0.0,
                     }
                 )
             metadata.update(gaussian_metadata)
@@ -2044,10 +2069,43 @@ class FastWAMMultiRobot(FastWAM):
         upgrade: str,
         path,
     ) -> None:
-        if upgrade != "gaussian_spatial_v2_from_pooled_v1":
+        if upgrade not in {
+            "gaussian_spatial_v2_from_pooled_v1",
+            "gaussian_relation_v3_from_spatial_v2",
+        }:
             raise ValueError(
                 f"Unsupported checkpoint architecture upgrade {upgrade!r}: {path}"
             )
+        if upgrade == "gaussian_relation_v3_from_spatial_v2":
+            if expected.get("gaussian_conditioning") != "task_conditioned_relation_attention_v3":
+                raise ValueError(
+                    "gaussian_relation_v3_from_spatial_v2 requires a relation-v3 target: "
+                    f"{path}"
+                )
+            allowed_source = dict(expected)
+            for key in (
+                "gaussian_relation_num_heads",
+                "gaussian_relation_task_pooling",
+                "gaussian_relation_gate_init",
+            ):
+                allowed_source.pop(key, None)
+            allowed_source["gaussian_conditioning"] = (
+                "agent_local_spatial_cross_attention_v2"
+            )
+            if received != allowed_source:
+                mismatches = {
+                    key: {
+                        "expected_source": allowed_source.get(key),
+                        "observed": received.get(key),
+                    }
+                    for key in sorted(set(received) | set(allowed_source))
+                    if received.get(key) != allowed_source.get(key)
+                }
+                raise ValueError(
+                    "Checkpoint does not match the exact spatial-v2 source contract for "
+                    f"gaussian_relation_v3_from_spatial_v2: {mismatches} in {path}"
+                )
+            return
         if expected.get("gaussian_conditioning") != "agent_local_spatial_cross_attention_v2":
             raise ValueError(
                 "gaussian_spatial_v2_from_pooled_v1 requires a spatial-v2 target: "
@@ -2329,14 +2387,46 @@ class FastWAMMultiRobot(FastWAM):
             if state_kind == "full":
                 mot_state = payload["mot"]
                 expected_state = self.mot.state_dict()
-                self._validate_exact_tensor_state(
-                    expected_state,
-                    mot_state,
-                    expected_keys=sorted(expected_state),
-                    path=checkpoint_path,
-                    label="mot",
-                )
-                self.mot.load_state_dict(mot_state, strict=True)
+                if architecture_upgrade == "gaussian_relation_v3_from_spatial_v2":
+                    relation_markers = (
+                        ".gaussian_relation_attention.",
+                        ".gaussian_relation_gate",
+                        ".gaussian_query_norm.",
+                        ".gaussian_key_norm.",
+                    )
+                    source_keys = [
+                        key
+                        for key in expected_state
+                        if not any(marker in key for marker in relation_markers)
+                    ]
+                    self._validate_exact_tensor_state(
+                        expected_state,
+                        mot_state,
+                        expected_keys=source_keys,
+                        path=checkpoint_path,
+                        label="mot spatial-v2 source",
+                    )
+                    result = self.mot.load_state_dict(mot_state, strict=False)
+                    unexpected = sorted(result.unexpected_keys)
+                    invalid_missing = sorted(
+                        key
+                        for key in result.missing_keys
+                        if not any(marker in key for marker in relation_markers)
+                    )
+                    if unexpected or invalid_missing:
+                        raise ValueError(
+                            "Relation-v3 warm start produced invalid state gaps: "
+                            f"missing={invalid_missing}, unexpected={unexpected}"
+                        )
+                else:
+                    self._validate_exact_tensor_state(
+                        expected_state,
+                        mot_state,
+                        expected_keys=sorted(expected_state),
+                        path=checkpoint_path,
+                        label="mot",
+                    )
+                    self.mot.load_state_dict(mot_state, strict=True)
                 if load_role == "top_level" or provenance_mode == "stat_cmp":
                     descriptor = self._checkpoint_receipt(
                         checkpoint_path,

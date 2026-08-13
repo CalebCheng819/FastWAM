@@ -1,0 +1,20 @@
+# @package _global_
+
+# P7 keeps P6 data/losses and replaces fixed cosine spatial matching with one
+# task-conditioned learned relation-attention layer. VideoGen remains frozen.
+defaults:
+  - robofactory_placefood_spatial_semantic_p6_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: gaussian_relation_v3_from_spatial_v2
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: task_conditioned_relation_attention
+    gaussian_residual_floor: 0.1
+    gaussian_relation_num_heads: 8
+
+wandb:
+  group: robofactory-placefood-task-gaussian-relation-p7
+  name: fastwam-placefood-task-gaussian-relation-p7-s42-24g-r1
