@@ -184,6 +184,8 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertIn("--formal-contract", result.stdout)
         self.assertIn("--training-code-commit", result.stdout)
         self.assertIn("--evaluation-code-commit", result.stdout)
+        self.assertIn("--model-project-root", result.stdout)
+        self.assertIn("--action-architecture", result.stdout)
         self.assertIn("expert-replay", result.stdout)
 
     def test_expert_replay_cli_does_not_require_model_arguments(self) -> None:
@@ -208,6 +210,20 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertIsNone(parsed.checkpoint)
         self.assertIsNone(parsed.gaussian_cache)
         self.assertIsNone(parsed.noposplat_checkpoint)
+
+    def test_gaussian_spatial_config_preserves_action_only_contract(self) -> None:
+        config = policy.compose_gaussian_spatial_action_model_config()
+
+        self.assertEqual(config.training_mode, "action_only_cache")
+        self.assertEqual(config.checkpoint_integrity_mode, "metadata_no_hash")
+        self.assertTrue(config.action_dit_config.enable_gaussian)
+        self.assertEqual(
+            config.action_dit_config.gaussian_conditioning_mode,
+            "spatial_cross_attention",
+        )
+        self.assertEqual(config.action_dit_config.gaussian_residual_floor, 0.1)
+        self.assertEqual(config.action_dit_config.gaussian_attention_temperature, 0.1)
+        self.assertEqual(config.loss.lambda_video, 0.0)
 
     def test_expert_replay_launcher_omits_policy_inputs(self) -> None:
         root = Path(__file__).resolve().parents[1]

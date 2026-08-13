@@ -40,7 +40,7 @@ import torch
 import torchvision.transforms.functional as transforms_F
 from omegaconf import OmegaConf
 
-from fastwam.nohash_artifacts import (
+from artifact_metadata_nohash import (
     read_json,
     read_regular_bytes,
     regular_file_metadata,
@@ -645,6 +645,18 @@ def compose_b4_action_model_config(project_root: str | Path = PROJECT_ROOT):
     return OmegaConf.create(resolved)
 
 
+def compose_gaussian_spatial_action_model_config(
+    project_root: str | Path = PROJECT_ROOT,
+):
+    """Resolve the P4 spatial-Gaussian action-only architecture."""
+
+    config = compose_b4_action_model_config(project_root)
+    config.action_dit_config.gaussian_conditioning_mode = "spatial_cross_attention"
+    config.action_dit_config.gaussian_residual_floor = 0.1
+    config.action_dit_config.gaussian_attention_temperature = 0.1
+    return config
+
+
 @contextmanager
 def _model_asset_environment(model_cache_root: str | Path):
     root = Path(model_cache_root).expanduser().resolve(strict=True)
@@ -698,6 +710,7 @@ class FastWAMMultiRobotPolicy:
         policy_lightning_config_path: str | Path = "config/encoder/noposplat.yaml",
         allowed_agent_counts: Sequence[int] = (2, 3, 4),
         project_root: str | Path = PROJECT_ROOT,
+        action_architecture: str = "pooled_v1",
     ) -> None:
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve(strict=True)
         if not self.checkpoint_path.is_file():
@@ -764,17 +777,34 @@ class FastWAMMultiRobotPolicy:
         self._query_index = 0
         self.rand_device = str(rand_device)
         self.tiled = bool(tiled)
+        self.project_root = Path(project_root).expanduser().resolve(strict=True)
+        self.action_architecture = str(action_architecture).strip().lower()
+        if self.action_architecture not in {"pooled_v1", "gaussian_spatial_v2"}:
+            raise ValueError(
+                "action_architecture must be pooled_v1 or gaussian_spatial_v2, "
+                f"got {self.action_architecture!r}"
+            )
+        if (
+            self.integrity_mode != "metadata_no_hash"
+            and self.action_architecture != "pooled_v1"
+        ):
+            raise ValueError(
+                "gaussian_spatial_v2 is only supported in metadata_no_hash mode"
+            )
 
         from hydra.utils import instantiate
         from fastwam.datasets.gaussian_cache.teacher import (
             ExternalPolicyLightningTeacher,
         )
 
-        model_config = (
-            compose_b4_action_model_config(project_root)
-            if self.integrity_mode == "metadata_no_hash"
-            else compose_step5000_model_config(project_root)
-        )
+        if self.integrity_mode != "metadata_no_hash":
+            model_config = compose_step5000_model_config(self.project_root)
+        elif self.action_architecture == "gaussian_spatial_v2":
+            model_config = compose_gaussian_spatial_action_model_config(
+                self.project_root
+            )
+        else:
+            model_config = compose_b4_action_model_config(self.project_root)
         with _model_asset_environment(model_cache_root):
             self.model = instantiate(
                 model_config,
@@ -947,6 +977,8 @@ class FastWAMMultiRobotPolicy:
                 else TRAINING_CODE_COMMIT
             ),
             "integrity_mode": self.integrity_mode,
+            "action_architecture": self.action_architecture,
+            "model_project_root": str(self.project_root),
             "checkpoint_path": str(self.checkpoint_path),
             "normalization_path": str(self.stats.path),
             "context_path": str(self.text_context.path),
@@ -996,6 +1028,7 @@ __all__ = [
     "compose_step5000_model_config",
     "compose_r5_action_model_config",
     "compose_b4_action_model_config",
+    "compose_gaussian_spatial_action_model_config",
     "denormalize_and_flatten_actions",
     "encode_compact_agent_gaussian",
     "extract_agent_state_and_geometry",

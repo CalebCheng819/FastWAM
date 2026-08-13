@@ -2096,6 +2096,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--context-cache-dir", type=Path)
     parser.add_argument("--context-file", type=Path)
     parser.add_argument("--model-cache-root", type=Path)
+    parser.add_argument(
+        "--model-project-root",
+        type=Path,
+        help="FastWAM source/config checkout used to instantiate the checkpoint architecture",
+    )
+    parser.add_argument(
+        "--action-architecture",
+        choices=("pooled_v1", "gaussian_spatial_v2"),
+        default="pooled_v1",
+    )
     parser.add_argument("--policy-lightning-repo", type=Path)
     parser.add_argument("--policy-lightning-commit", default=POLICY_LIGHTNING_COMMIT)
     parser.add_argument("--noposplat-checkpoint", type=Path)
@@ -2136,6 +2146,13 @@ def main() -> None:
             raise ValueError(
                 "Policy mode requires arguments: "
                 + ", ".join(missing_policy_arguments)
+            )
+        if (
+            args.action_architecture == "gaussian_spatial_v2"
+            and args.model_project_root is None
+        ):
+            raise ValueError(
+                "gaussian_spatial_v2 requires an explicit --model-project-root"
             )
     if policy_needed and args.integrity_mode == "metadata_no_hash":
         if args.context_file is None:
@@ -2306,6 +2323,12 @@ def main() -> None:
                 num_inference_steps=args.num_inference_steps,
                 sigma_shift=args.sigma_shift,
                 seed=args.policy_seed,
+                project_root=(
+                    args.model_project_root
+                    if args.model_project_root is not None
+                    else Path(__file__).resolve().parents[2]
+                ),
+                action_architecture=args.action_architecture,
             )
             manifest["policy_init_seconds"] = time.monotonic() - init_started
         else:
