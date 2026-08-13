@@ -49,6 +49,17 @@ def _regular_file(path: Path, *, label: str) -> Path:
     return resolved
 
 
+def _python_executable(path: Path) -> Path:
+    lexical = path.expanduser()
+    if not lexical.is_absolute():
+        lexical = Path.cwd() / lexical
+    resolved = lexical.resolve(strict=True)
+    if not resolved.is_file() or not os.access(lexical, os.X_OK):
+        raise ValueError(f"Python executable is not executable: {lexical}")
+    # Invoking the venv symlink is what selects its pyvenv.cfg and site-packages.
+    return lexical
+
+
 def _directory(path: Path, *, label: str) -> Path:
     resolved = path.expanduser().resolve(strict=True)
     if not resolved.is_dir():
@@ -100,7 +111,7 @@ def build_contract(args: argparse.Namespace) -> dict[str, Any]:
         source_root / "experiments/robofactory/diagnose_place_food_fixed.py",
         label="diagnostic",
     )
-    python = _regular_file(args.python, label="Python executable")
+    python = _python_executable(args.python)
     checkpoint = _regular_file(args.checkpoint, label="checkpoint")
     checkpoint_stat = checkpoint.stat()
     panel_path = _regular_file(args.panel, label="panel")
@@ -253,6 +264,19 @@ def _run_command(
     ]
 
 
+def _python_path(contract: Mapping[str, Any], inherited: str | None = None) -> str:
+    paths = [
+        str(Path(contract["source_root"]) / "src"),
+        str(Path(contract["source_root"]) / "experiments/robofactory"),
+        str(Path(contract["source_root"])),
+        str(contract["policy_lightning_repo"]),
+        str(contract["robofactory_root"]),
+    ]
+    if inherited:
+        paths.append(inherited)
+    return os.pathsep.join(paths)
+
+
 def _argv_value(argv: Sequence[str], flag: str) -> str | None:
     try:
         index = argv.index(flag)
@@ -319,13 +343,7 @@ def _one_run(
     command = _run_command(contract, seed, output)
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-    python_paths = [
-        str(Path(contract["source_root"]) / "src"),
-        str(Path(contract["source_root"])),
-    ]
-    if env.get("PYTHONPATH"):
-        python_paths.append(env["PYTHONPATH"])
-    env["PYTHONPATH"] = os.pathsep.join(python_paths)
+    env["PYTHONPATH"] = _python_path(contract, env.get("PYTHONPATH"))
     driver_paths = [str(contract["nvidia_driver_lib_dir"])]
     if env.get("LD_LIBRARY_PATH"):
         driver_paths.append(env["LD_LIBRARY_PATH"])

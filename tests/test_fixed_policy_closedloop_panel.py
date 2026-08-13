@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,20 @@ from experiments.robofactory import run_fixed_policy_closedloop_panel as panel_r
 
 
 class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
+    def test_python_executable_preserves_virtualenv_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime-python"
+            runtime.write_text("#!/bin/sh\n", encoding="utf-8")
+            runtime.chmod(0o755)
+            venv_python = root / "venv-python"
+            venv_python.symlink_to(runtime)
+
+            selected = panel_runner._python_executable(venv_python)
+
+            self.assertEqual(selected, venv_python)
+            self.assertNotEqual(selected, Path(os.path.realpath(venv_python)))
+
     def test_panel_rows_preserve_paired_policy_seeds(self) -> None:
         panel = {
             "paired_policy_seeds": [20000 + index for index in range(8)],
@@ -75,6 +90,28 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
             "/model-project",
         )
         self.assertIn("--formal-contract", command)
+        self.assertEqual(command.count("metadata_no_hash"), 1)
+
+    def test_python_path_contains_explicit_runtime_dependencies(self) -> None:
+        contract = {
+            "source_root": "/source",
+            "policy_lightning_repo": "/policy-lightning",
+            "robofactory_root": "/robofactory",
+        }
+
+        paths = panel_runner._python_path(contract, "/inherited").split(os.pathsep)
+
+        self.assertEqual(
+            paths,
+            [
+                "/source/src",
+                "/source/experiments/robofactory",
+                "/source",
+                "/policy-lightning",
+                "/robofactory",
+                "/inherited",
+            ],
+        )
 
     def test_completed_output_checks_frozen_checkpoint_and_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
