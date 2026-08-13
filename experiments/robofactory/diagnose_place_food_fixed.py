@@ -152,6 +152,115 @@ def _flat_action_to_dict(
     }
 
 
+def _current_arm_qpos(
+    observation: Mapping[str, Any], agent_name: str
+) -> np.ndarray:
+    qpos = np.asarray(
+        torch.as_tensor(observation["agent"][agent_name]["qpos"])
+        .detach()
+        .cpu()
+        .reshape(-1),
+        dtype=np.float64,
+    )
+    if qpos.shape != (9,):
+        raise ValueError(f"Expected 9 qpos values for {agent_name}, got {qpos.shape}")
+    if not np.isfinite(qpos).all():
+        raise FloatingPointError(f"Current qpos is non-finite for {agent_name}")
+    return np.ascontiguousarray(qpos[:7])
+
+
+def official_topp_actions(
+    *,
+    planners: Sequence[Any],
+    current_qpos: Mapping[str, np.ndarray],
+    target_action: Mapping[str, np.ndarray],
+    agent_names: Sequence[str],
+    step: float,
+) -> tuple[list[dict[str, np.ndarray]], dict[str, Any]]:
+    """Reproduce RoboFactory's synchronized per-arm TOPP target adapter."""
+
+    if step <= 0:
+        raise ValueError(f"TOPP step must be positive, got {step}")
+    if len(planners) != len(agent_names):
+        raise ValueError(
+            f"Planner/agent count mismatch: {len(planners)} != {len(agent_names)}"
+        )
+    per_agent: dict[str, list[np.ndarray]] = {}
+    planner_records: dict[str, dict[str, Any]] = {}
+    for index, name in enumerate(agent_names):
+        current = np.asarray(current_qpos[name], dtype=np.float64).reshape(-1)
+        target = np.asarray(target_action[name], dtype=np.float64).reshape(-1)
+        if current.shape != (7,) or target.shape != (ACTION_DIM,):
+            raise ValueError(
+                f"Invalid TOPP input for {name}: current={current.shape}, "
+                f"target={target.shape}"
+            )
+        if not np.isfinite(current).all() or not np.isfinite(target).all():
+            raise FloatingPointError(f"TOPP input contains non-finite values for {name}")
+        path = np.vstack((current, target[:7]))
+        fallback = False
+        error_message = None
+        duration = None
+        try:
+            _, position, _, _, duration = planners[index].TOPP(
+                path, step, verbose=True
+            )
+            position = np.asarray(position, dtype=np.float64)
+            if position.ndim != 2 or position.shape[1:] != (7,):
+                raise ValueError(
+                    f"TOPP returned invalid positions for {name}: {position.shape}"
+                )
+            if position.shape[0] == 0:
+                position = target[None, :7]
+        except Exception as error:  # noqa: BLE001 - match official current-qpos fallback
+            fallback = True
+            error_message = f"{type(error).__name__}: {error}"
+            position = current[None, :]
+        gripper = np.full((position.shape[0], 1), target[7], dtype=np.float64)
+        controls = np.concatenate((position, gripper), axis=1).astype(
+            np.float32, copy=False
+        )
+        per_agent[name] = [np.ascontiguousarray(row) for row in controls]
+        planner_records[name] = {
+            "path_steps": len(per_agent[name]),
+            "duration": None if duration is None else float(duration),
+            "fallback": fallback,
+            "error": error_message,
+        }
+    synchronized_steps = max(len(per_agent[name]) for name in agent_names)
+    synchronized = []
+    for step_index in range(synchronized_steps):
+        synchronized.append(
+            {
+                name: per_agent[name][min(step_index, len(per_agent[name]) - 1)]
+                for name in agent_names
+            }
+        )
+    return synchronized, {
+        "adapter": "official_topp",
+        "topp_step": float(step),
+        "synchronized_steps": synchronized_steps,
+        "agents": planner_records,
+    }
+
+
+def _build_official_topp_planner(env: Any, robofactory_root: Path) -> Any:
+    if str(robofactory_root) not in sys.path:
+        sys.path.insert(0, str(robofactory_root))
+    from planner.motionplanner import PandaArmMotionPlanningSolver
+
+    base_env = env.unwrapped
+    return PandaArmMotionPlanningSolver(
+        env,
+        debug=False,
+        vis=False,
+        base_pose=[agent.robot.pose for agent in base_env.agent.agents],
+        visualize_target_grasp_pose=False,
+        print_env_info=False,
+        is_multi_agent=True,
+    )
+
+
 def _expert_action_at(
     actions: Mapping[str, np.ndarray],
     agent_names: Sequence[str],
@@ -215,7 +324,7 @@ def _reset_environment(env: Any, episode: Mapping[str, Any]) -> None:
     env.reset(seed=reset_seed, **reset_kwargs)
 
 
-SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v3"
+SCHEMA_VERSION = "fastwam-placefood-fixed-diagnostic-v4"
 ACTION_DIM = 8
 ARM_DIMS = tuple(range(7))
 GRIPPER_DIM = 7
@@ -799,10 +908,17 @@ def rollout_conditions(
 def validate_formal_rollout_contract(
     *,
     max_steps: int,
+    max_policy_queries: int,
+    max_simulator_steps: int,
     initial_state: str,
     exec_horizon: int,
+    control_adapter: str,
+    topp_step: float,
     initial_state_explicit: bool,
     exec_horizon_explicit: bool,
+    control_adapter_explicit: bool,
+    max_policy_queries_explicit: bool,
+    max_simulator_steps_explicit: bool,
 ) -> dict[str, Any]:
     """Fail closed unless one formal rollout cell is fully specified."""
 
@@ -810,12 +926,44 @@ def validate_formal_rollout_contract(
         raise ValueError(f"Formal rollout requires max_steps=300, got {max_steps}")
     if not initial_state_explicit or initial_state not in {"raw", "clean"}:
         raise ValueError("Formal rollout requires explicit --initial-state raw|clean")
-    if not exec_horizon_explicit or exec_horizon not in {1, 5}:
-        raise ValueError("Formal rollout requires explicit --exec-horizon 1|5")
+    if not control_adapter_explicit or control_adapter not in {
+        "direct",
+        "official_topp",
+    }:
+        raise ValueError(
+            "Formal rollout requires explicit --control-adapter direct|official_topp"
+        )
+    expected_horizons = {"direct": {1, 5}, "official_topp": {32}}
+    if not exec_horizon_explicit or exec_horizon not in expected_horizons[control_adapter]:
+        raise ValueError(
+            f"Formal {control_adapter} rollout requires explicit --exec-horizon "
+            f"in {sorted(expected_horizons[control_adapter])}"
+        )
+    if not max_policy_queries_explicit or not max_simulator_steps_explicit:
+        raise ValueError(
+            "Formal rollout requires explicit --max-policy-queries and "
+            "--max-simulator-steps"
+        )
+    expected_budgets = {
+        "direct": (300, 300),
+        "official_topp": (60, 30000),
+    }
+    if (max_policy_queries, max_simulator_steps) != expected_budgets[control_adapter]:
+        raise ValueError(
+            f"Formal {control_adapter} rollout requires query/simulator budgets "
+            f"{expected_budgets[control_adapter]}, got "
+            f"{(max_policy_queries, max_simulator_steps)}"
+        )
+    if control_adapter == "official_topp" and not math.isclose(topp_step, 0.05):
+        raise ValueError(f"Formal official_topp requires --topp-step 0.05, got {topp_step}")
     return {
-        "max_steps": max_steps,
+        "legacy_max_steps": max_steps,
+        "max_policy_queries": max_policy_queries,
+        "max_simulator_steps": max_simulator_steps,
         "initial_state": initial_state,
         "exec_horizon": exec_horizon,
+        "control_adapter": control_adapter,
+        "topp_step": topp_step,
         "explicit_cell": True,
     }
 
@@ -1424,6 +1572,7 @@ def run_rollout(
     global_stage_path = video_stage_dir / "rollout_global.mp4"
     violations: list[dict[str, Any]] = []
     snapshots: list[dict[str, Any]] = []
+    planner = None
     try:
         _reset_environment(env, episode)
         env.unwrapped.set_state_dict(states[0])
@@ -1480,12 +1629,29 @@ def run_rollout(
         first = physical_snapshot(env, simulator_step=0)
         snapshots.append(first)
         _append_jsonl(output_dir / "physical_trace.jsonl", first)
+        if args.control_adapter == "official_topp":
+            planner = _build_official_topp_planner(env, args.robofactory_root)
+            if int(planner.agent_num) != len(agent_names):
+                raise ValueError(
+                    f"Planner agent count mismatch: {planner.agent_num} != "
+                    f"{len(agent_names)}"
+                )
         steps = 0
         queries = 0
+        predicted_target_actions = 0
+        planner_fallbacks = 0
         success = bool(first["task_success_from_geometry"])
-        termination_reason = "initial_success" if success else "max_steps"
-        max_steps = min(int(args.max_steps), int(episode["max_episode_steps"]))
-        while steps < max_steps and not success:
+        success_ever = success
+        termination_reason = (
+            "initial_success" if success else "max_policy_queries"
+        )
+        max_policy_queries = int(args.max_policy_queries)
+        max_simulator_steps = int(args.max_simulator_steps)
+        while (
+            queries < max_policy_queries
+            and steps < max_simulator_steps
+            and not success
+        ):
             trace = policy.get_action_trace()
             query_record = {
                 "query_index": trace["query_index"],
@@ -1496,53 +1662,124 @@ def run_rollout(
                 "denormalized_action": trace["denormalized_action"],
                 "flat_action": trace["flat_action"],
                 "planned_exec_horizon": int(args.exec_horizon),
+                "control_adapter": args.control_adapter,
                 "observation_source": "live_rerender_only",
+                "planner_targets": [],
             }
             queries += 1
             action_chunk = np.asarray(trace["flat_action"], dtype=np.float32)
-            execute = min(args.exec_horizon, len(action_chunk), max_steps - steps)
-            executed = 0
+            execute = min(args.exec_horizon, len(action_chunk))
+            executed_targets = 0
+            simulator_steps_before_query = steps
             stop = False
             for chunk_offset in range(execute):
-                action = _flat_action_to_dict(action_chunk[chunk_offset], agent_names)
-                current = action_bound_records(
-                    action,
-                    env.action_space,
-                    simulator_step=steps,
-                    query_index=int(trace["query_index"]),
-                    chunk_offset=chunk_offset,
+                if steps >= max_simulator_steps:
+                    termination_reason = "max_simulator_steps"
+                    stop = True
+                    break
+                target = _flat_action_to_dict(
+                    action_chunk[chunk_offset], agent_names
                 )
-                violations.extend(current)
-                for record in current:
-                    _append_jsonl(output_dir / "action_bound_violations.jsonl", record)
-                _, _, terminated, truncated, info = env.step(action)
+                if args.control_adapter == "official_topp":
+                    assert planner is not None
+                    raw_obs = env.unwrapped.get_obs()
+                    current_qpos = {
+                        name: _current_arm_qpos(raw_obs, name)
+                        for name in agent_names
+                    }
+                    actions_to_execute, planner_record = official_topp_actions(
+                        planners=planner.planner,
+                        current_qpos=current_qpos,
+                        target_action=target,
+                        agent_names=agent_names,
+                        step=float(args.topp_step),
+                    )
+                    planner_record["chunk_offset"] = chunk_offset
+                    query_record["planner_targets"].append(planner_record)
+                    planner_fallbacks += sum(
+                        bool(record["fallback"])
+                        for record in planner_record["agents"].values()
+                    )
+                else:
+                    actions_to_execute = [target]
+                terminated_at_target = False
+                truncated_at_target = False
+                for path_step, action in enumerate(actions_to_execute):
+                    if steps >= max_simulator_steps:
+                        termination_reason = "max_simulator_steps"
+                        stop = True
+                        break
+                    current = action_bound_records(
+                        action,
+                        env.action_space,
+                        simulator_step=steps,
+                        query_index=int(trace["query_index"]),
+                        chunk_offset=chunk_offset,
+                    )
+                    for record in current:
+                        record["adapter_path_step"] = path_step
+                    violations.extend(current)
+                    for record in current:
+                        _append_jsonl(
+                            output_dir / "action_bound_violations.jsonl", record
+                        )
+                    _, _, terminated, truncated, info = env.step(action)
+                    steps += 1
+                    record_frame()
+                    snapshot = physical_snapshot(
+                        env, simulator_step=steps, last_action=action
+                    )
+                    snapshot["info_success"] = _as_bool(
+                        info["success"], label="info.success"
+                    )
+                    snapshots.append(snapshot)
+                    _append_jsonl(output_dir / "physical_trace.jsonl", snapshot)
+                    success_ever = success_ever or bool(snapshot["info_success"])
+                    terminated_at_target = _as_bool(
+                        terminated, label="terminated"
+                    )
+                    truncated_at_target = _as_bool(truncated, label="truncated")
+                    if args.control_adapter == "direct" and (
+                        snapshot["info_success"]
+                        or terminated_at_target
+                        or truncated_at_target
+                    ):
+                        success = bool(snapshot["info_success"])
+                        termination_reason = (
+                            "success"
+                            if success
+                            else "terminated"
+                            if terminated_at_target
+                            else "truncated"
+                        )
+                        stop = True
+                        break
                 policy.record_action(action_chunk[chunk_offset])
-                steps += 1
-                executed += 1
-                record_frame()
-                snapshot = physical_snapshot(env, simulator_step=steps, last_action=action)
-                snapshot["info_success"] = _as_bool(info["success"], label="info.success")
-                snapshots.append(snapshot)
-                _append_jsonl(output_dir / "physical_trace.jsonl", snapshot)
-                success = bool(snapshot["info_success"])
+                predicted_target_actions += 1
+                executed_targets += 1
                 online_obs = env.unwrapped.get_obs()
                 policy.update_obs(online_obs, env.unwrapped.get_state_dict())
+                if stop:
+                    break
+            if args.control_adapter == "official_topp" and not stop:
+                success = bool(snapshots[-1]["info_success"])
                 if success:
                     termination_reason = "success"
                     stop = True
-                    break
-                if _as_bool(terminated, label="terminated"):
-                    termination_reason = "terminated"
-                    stop = True
-                    break
-                if _as_bool(truncated, label="truncated"):
-                    termination_reason = "truncated"
-                    stop = True
-                    break
-            query_record["actual_executed_actions"] = executed
+            query_record["actual_executed_actions"] = executed_targets
+            query_record["actual_executed_target_actions"] = executed_targets
+            query_record["actual_simulator_steps"] = (
+                steps - simulator_steps_before_query
+            )
             _append_jsonl(output_dir / "policy_queries.jsonl", query_record)
             if stop:
                 break
+        if (
+            not success
+            and termination_reason == "max_policy_queries"
+            and steps >= max_simulator_steps
+        ):
+            termination_reason = "max_simulator_steps"
         multiview_writer.close()
         multiview_writer = None
         global_writer.close()
@@ -1566,11 +1803,19 @@ def run_rollout(
             "status": "completed",
             "success": success,
             "steps": steps,
+            "simulator_steps": steps,
             "recorded_video_frames": len(snapshots),
             "policy_queries": queries,
+            "predicted_target_actions": predicted_target_actions,
+            "planner_fallbacks": planner_fallbacks,
             "termination_reason": termination_reason,
             "initial_state": args.initial_state,
             "exec_horizon": int(args.exec_horizon),
+            "control_adapter": args.control_adapter,
+            "topp_step": float(args.topp_step),
+            "max_policy_queries": max_policy_queries,
+            "max_simulator_steps": max_simulator_steps,
+            "success_ever_at_any_simulator_step": success_ever,
             "observation_source": "live_rerender_only",
             "persisted_expert_rgb_used_for_policy": False,
             **grasp_metrics,
@@ -2144,7 +2389,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-teacher-states", type=int, default=263)
     parser.add_argument("--teacher-start-timestep", type=int, default=5)
     parser.add_argument("--initial-state", choices=("raw", "clean"), default=None)
-    parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=None)
+    parser.add_argument("--exec-horizon", type=int, choices=(1, 5, 32), default=None)
+    parser.add_argument(
+        "--control-adapter", choices=("direct", "official_topp"), default=None
+    )
+    parser.add_argument("--topp-step", type=float, default=0.05)
+    parser.add_argument("--max-policy-queries", type=int, default=None)
+    parser.add_argument("--max-simulator-steps", type=int, default=None)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument(
         "--training-code-commit",
@@ -2195,10 +2446,19 @@ def main() -> None:
     policy_needed = args.mode != "expert-replay"
     args.initial_state_explicit = args.initial_state is not None
     args.exec_horizon_explicit = args.exec_horizon is not None
+    args.control_adapter_explicit = args.control_adapter is not None
+    args.max_policy_queries_explicit = args.max_policy_queries is not None
+    args.max_simulator_steps_explicit = args.max_simulator_steps is not None
     if args.initial_state is None:
         args.initial_state = "clean"
     if args.exec_horizon is None:
         args.exec_horizon = 5
+    if args.control_adapter is None:
+        args.control_adapter = "direct"
+    if args.max_policy_queries is None:
+        args.max_policy_queries = args.max_steps
+    if args.max_simulator_steps is None:
+        args.max_simulator_steps = args.max_steps
     if args.task != "PlaceFood-rf":
         raise ValueError("This diagnostic intentionally supports PlaceFood-rf only")
     if policy_needed:
@@ -2261,6 +2521,8 @@ def main() -> None:
         "max_teacher_states",
         "exec_horizon",
         "action_horizon",
+        "max_policy_queries",
+        "max_simulator_steps",
     ):
         if int(getattr(args, name)) < 1:
             raise ValueError(f"{name} must be positive")
@@ -2272,10 +2534,21 @@ def main() -> None:
         if args.mode in ("rollout", "all"):
             formal_rollout_contract = validate_formal_rollout_contract(
                 max_steps=int(args.max_steps),
+                max_policy_queries=int(args.max_policy_queries),
+                max_simulator_steps=int(args.max_simulator_steps),
                 initial_state=str(args.initial_state),
                 exec_horizon=int(args.exec_horizon),
+                control_adapter=str(args.control_adapter),
+                topp_step=float(args.topp_step),
                 initial_state_explicit=bool(args.initial_state_explicit),
                 exec_horizon_explicit=bool(args.exec_horizon_explicit),
+                control_adapter_explicit=bool(args.control_adapter_explicit),
+                max_policy_queries_explicit=bool(
+                    args.max_policy_queries_explicit
+                ),
+                max_simulator_steps_explicit=bool(
+                    args.max_simulator_steps_explicit
+                ),
             )
         if args.mode in ("teacher-forcing", "all"):
             if int(args.teacher_start_timestep) != 5:
@@ -2410,6 +2683,10 @@ def main() -> None:
         manifest["rollout_cell"] = {
             "initial_state": args.initial_state,
             "exec_horizon": int(args.exec_horizon),
+            "control_adapter": args.control_adapter,
+            "topp_step": float(args.topp_step),
+            "max_policy_queries": int(args.max_policy_queries),
+            "max_simulator_steps": int(args.max_simulator_steps),
         }
         manifest["teacher_forcing"] = {
             "sources": ["stored", "live"],

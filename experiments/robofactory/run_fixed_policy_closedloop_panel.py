@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-SCHEMA_VERSION = "fastwam-fixed-policy-closedloop-panel-v1"
+SCHEMA_VERSION = "fastwam-fixed-policy-closedloop-panel-v2"
 EXPECTED_RUNS = 8
 
 
@@ -106,6 +106,28 @@ def _panel_rows(panel: Mapping[str, Any]) -> list[dict[str, int]]:
 
 
 def build_contract(args: argparse.Namespace) -> dict[str, Any]:
+    expected_controls = {
+        "direct": {"exec_horizon": {1, 5}, "query_budget": 300, "sim_budget": 300},
+        "official_topp": {
+            "exec_horizon": {32},
+            "query_budget": 60,
+            "sim_budget": 30000,
+        },
+    }
+    controls = expected_controls[args.control_adapter]
+    if int(args.exec_horizon) not in controls["exec_horizon"]:
+        raise ValueError(
+            f"{args.control_adapter} requires exec_horizon in "
+            f"{sorted(controls['exec_horizon'])}, got {args.exec_horizon}"
+        )
+    if (
+        int(args.max_policy_queries),
+        int(args.max_simulator_steps),
+    ) != (controls["query_budget"], controls["sim_budget"]):
+        raise ValueError(
+            f"{args.control_adapter} requires query/simulator budgets "
+            f"{(controls['query_budget'], controls['sim_budget'])}"
+        )
     source_root = _directory(args.source_root, label="source root")
     diagnostic = _regular_file(
         source_root / "experiments/robofactory/diagnose_place_food_fixed.py",
@@ -167,6 +189,10 @@ def build_contract(args: argparse.Namespace) -> dict[str, Any]:
         "task": "PlaceFood-rf",
         "initial_state": "raw",
         "exec_horizon": int(args.exec_horizon),
+        "control_adapter": args.control_adapter,
+        "topp_step": float(args.topp_step),
+        "max_policy_queries": int(args.max_policy_queries),
+        "max_simulator_steps": int(args.max_simulator_steps),
         "max_steps": 300,
         "action_horizon": 32,
         "num_inference_steps": 20,
@@ -194,8 +220,9 @@ def ensure_frozen_plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_id(contract: Mapping[str, Any], seed: Mapping[str, int]) -> str:
+    adapter = str(contract["control_adapter"]).replace("_", "")
     return (
-        f"{contract['candidate']}-h{contract['exec_horizon']}-"
+        f"{contract['candidate']}-{adapter}-h{contract['exec_horizon']}-"
         f"env{seed['environment_seed']}-"
         f"policy{seed['policy_seed']}"
     )
@@ -232,6 +259,14 @@ def _run_command(
         str(contract["initial_state"]),
         "--exec-horizon",
         str(contract["exec_horizon"]),
+        "--control-adapter",
+        str(contract["control_adapter"]),
+        "--topp-step",
+        str(contract["topp_step"]),
+        "--max-policy-queries",
+        str(contract["max_policy_queries"]),
+        "--max-simulator-steps",
+        str(contract["max_simulator_steps"]),
         "--checkpoint",
         str(contract["checkpoint"]["path"]),
         "--training-code-commit",
@@ -306,6 +341,10 @@ def _completed_output(
         == {
             "initial_state": "raw",
             "exec_horizon": int(contract["exec_horizon"]),
+            "control_adapter": contract["control_adapter"],
+            "topp_step": float(contract["topp_step"]),
+            "max_policy_queries": int(contract["max_policy_queries"]),
+            "max_simulator_steps": int(contract["max_simulator_steps"]),
         }
         and manifest.get("training_code_commit")
         == contract["training_code_commit"]
@@ -454,6 +493,10 @@ def aggregate(
                 "robot0_grasp_steps": int(rollout["robot0_grasp_steps"]),
                 "meat_max_lift_m": float(rollout["meat_max_lift_m"]),
                 "steps": int(rollout["steps"]),
+                "predicted_target_actions": int(
+                    rollout["predicted_target_actions"]
+                ),
+                "planner_fallbacks": int(rollout["planner_fallbacks"]),
                 "policy_queries": int(rollout["policy_queries"]),
                 "bound_violations": int(
                     rollout["bound_violations"]["total_scalar_violations"]
@@ -468,6 +511,7 @@ def aggregate(
         "schema_version": SCHEMA_VERSION,
         "experiment_id": contract["experiment_id"],
         "candidate": contract["candidate"],
+        "control_adapter": contract["control_adapter"],
         "generated_at": _utc_now(),
         "status": "COMPLETE" if all_complete else "INCOMPLETE",
         "expected_runs": EXPECTED_RUNS,
@@ -519,7 +563,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--nvidia-driver-lib-dir", type=Path, required=True)
     parser.add_argument("--nvidia-vulkan-icd", type=Path, required=True)
     parser.add_argument("--nvidia-egl-vendor-json", type=Path, required=True)
-    parser.add_argument("--exec-horizon", type=int, choices=(1, 5), default=5)
+    parser.add_argument("--exec-horizon", type=int, choices=(1, 5, 32), default=5)
+    parser.add_argument(
+        "--control-adapter",
+        choices=("direct", "official_topp"),
+        default="direct",
+    )
+    parser.add_argument("--topp-step", type=float, default=0.05)
+    parser.add_argument("--max-policy-queries", type=int, default=300)
+    parser.add_argument("--max-simulator-steps", type=int, default=300)
     parser.add_argument("--gpus", type=int, nargs="+", default=[0, 1, 2, 3])
     return parser
 
