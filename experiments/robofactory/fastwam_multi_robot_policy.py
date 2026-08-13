@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import json
 import os
 import re
@@ -657,6 +658,39 @@ def compose_gaussian_spatial_action_model_config(
     return config
 
 
+def _adapt_metadata_no_hash_config_for_runtime(model_config, factory):
+    """Bridge the pre-integrity-mode runtime without changing model semantics."""
+
+    parameters = inspect.signature(factory).parameters.values()
+    supports_integrity_mode = any(
+        parameter.name == "checkpoint_integrity_mode"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+    if supports_integrity_mode:
+        return model_config, False
+    if "checkpoint_integrity_mode" not in model_config:
+        raise RuntimeError(
+            "metadata_no_hash evaluation requires an explicit integrity mode"
+        )
+    adapted = OmegaConf.create(
+        OmegaConf.to_container(model_config, resolve=True)
+    )
+    del adapted.checkpoint_integrity_mode
+    return adapted, True
+
+
+def _activate_legacy_metadata_no_hash_mode(model) -> None:
+    validator = getattr(model, "_checkpoint_provenance_mode_value", None)
+    if not callable(validator):
+        raise RuntimeError(
+            "Legacy runtime cannot enforce metadata_no_hash checkpoint loading"
+        )
+    model._checkpoint_provenance_mode = "stat_cmp"
+    if validator() != "stat_cmp":
+        raise RuntimeError("Legacy runtime rejected stat_cmp checkpoint loading")
+
+
 @contextmanager
 def _model_asset_environment(model_cache_root: str | Path):
     root = Path(model_cache_root).expanduser().resolve(strict=True)
@@ -796,6 +830,7 @@ class FastWAMMultiRobotPolicy:
         from fastwam.datasets.gaussian_cache.teacher import (
             ExternalPolicyLightningTeacher,
         )
+        from fastwam.runtime import create_multi_robot_fastwam
 
         if self.integrity_mode != "metadata_no_hash":
             model_config = compose_step5000_model_config(self.project_root)
@@ -805,6 +840,14 @@ class FastWAMMultiRobotPolicy:
             )
         else:
             model_config = compose_b4_action_model_config(self.project_root)
+        legacy_metadata_no_hash = False
+        if self.integrity_mode == "metadata_no_hash":
+            model_config, legacy_metadata_no_hash = (
+                _adapt_metadata_no_hash_config_for_runtime(
+                    model_config,
+                    create_multi_robot_fastwam,
+                )
+            )
         with _model_asset_environment(model_cache_root):
             self.model = instantiate(
                 model_config,
@@ -812,6 +855,8 @@ class FastWAMMultiRobotPolicy:
                 device=str(self.device),
             )
         if self.integrity_mode == "metadata_no_hash":
+            if legacy_metadata_no_hash:
+                _activate_legacy_metadata_no_hash_mode(self.model)
             self.model.configure_trainable_parameters("action")
         self.model.load_checkpoint(self.checkpoint_path)
         if self.integrity_mode == "sha256":

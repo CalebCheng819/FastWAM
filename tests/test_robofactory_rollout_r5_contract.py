@@ -371,6 +371,48 @@ class B4RolloutContractTests(unittest.TestCase):
             "6ad834248f0fbc1d070c9be97627364174af143c",
         )
 
+    def test_metadata_no_hash_adapts_legacy_runtime_without_silent_fallback(self) -> None:
+        def legacy_factory(model_id):
+            return model_id
+
+        config = policy.compose_gaussian_spatial_action_model_config()
+        adapted, legacy_mode = policy._adapt_metadata_no_hash_config_for_runtime(
+            config,
+            legacy_factory,
+        )
+
+        self.assertTrue(legacy_mode)
+        self.assertNotIn("checkpoint_integrity_mode", adapted)
+        self.assertEqual(config.checkpoint_integrity_mode, "metadata_no_hash")
+        self.assertEqual(
+            adapted.action_dit_config.gaussian_conditioning_mode,
+            "spatial_cross_attention",
+        )
+
+        class LegacyModel:
+            _checkpoint_provenance_mode = "sha256"
+
+            def _checkpoint_provenance_mode_value(self):
+                return self._checkpoint_provenance_mode
+
+        model = LegacyModel()
+        policy._activate_legacy_metadata_no_hash_mode(model)
+        self.assertEqual(model._checkpoint_provenance_mode, "stat_cmp")
+
+    def test_metadata_no_hash_keeps_modern_runtime_config(self) -> None:
+        def modern_factory(model_id, checkpoint_integrity_mode="sha256"):
+            return model_id, checkpoint_integrity_mode
+
+        config = policy.compose_gaussian_spatial_action_model_config()
+        adapted, legacy_mode = policy._adapt_metadata_no_hash_config_for_runtime(
+            config,
+            modern_factory,
+        )
+
+        self.assertFalse(legacy_mode)
+        self.assertIs(adapted, config)
+        self.assertEqual(adapted.checkpoint_integrity_mode, "metadata_no_hash")
+
     def test_r5_config_alias_matches_b4_contract(self) -> None:
         self.assertEqual(
             policy.compose_r5_action_model_config(),
