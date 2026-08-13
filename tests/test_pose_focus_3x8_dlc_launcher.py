@@ -17,7 +17,17 @@ STAT_CMP_HELPER = REPO / "scripts" / "b4_stat_cmp_cache.py"
 TASK_NAME = "robofactory_placefood_pose_focus_r5_224_5e-6.yaml"
 P2_TASK_NAME = "robofactory_placefood_pose_phase_x0_r5_224_5e-6.yaml"
 P5_TASK_NAME = "robofactory_placefood_semantic_phase_p5_224_5e-6.yaml"
+P4_TASK_NAME = "robofactory_placefood_gaussian_spatial_p4_224_5e-6.yaml"
+P6_TASK_NAME = "robofactory_placefood_spatial_semantic_p6_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
+P1_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/"
+    "checkpoints/weights/step_001000.pt"
+)
+P5_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-semantic-phase-p5-s42-24g-r1-20260814/"
+    "checkpoints/weights/step_001000.pt"
+)
 
 
 class PoseFocusLauncherTests(unittest.TestCase):
@@ -41,6 +51,12 @@ class PoseFocusLauncherTests(unittest.TestCase):
         )
         (repo / "configs" / "task" / P5_TASK_NAME).write_bytes(
             (REPO / "configs" / "task" / P5_TASK_NAME).read_bytes()
+        )
+        (repo / "configs" / "task" / P4_TASK_NAME).write_bytes(
+            (REPO / "configs" / "task" / P4_TASK_NAME).read_bytes()
+        )
+        (repo / "configs" / "task" / P6_TASK_NAME).write_bytes(
+            (REPO / "configs" / "task" / P6_TASK_NAME).read_bytes()
         )
         (repo / "configs" / "scale" / SCALE_NAME).write_bytes(
             (REPO / "configs" / "scale" / SCALE_NAME).read_bytes()
@@ -173,6 +189,25 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 result.stdout,
             )
 
+    def test_dry_run_resolves_p4_gaussian_spatial_upgrade_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_POSE_FOCUS_TASK_PROFILE"] = P4_TASK_NAME.removesuffix(".yaml")
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "task=robofactory_placefood_gaussian_spatial_p4_224_5e-6",
+                result.stdout,
+            )
+
     def test_rejects_conflicting_runtime_attempt_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env = self.fixture(Path(directory))
@@ -209,6 +244,25 @@ class PoseFocusLauncherTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(
                 "task=robofactory_placefood_semantic_phase_p5_224_5e-6",
+                result.stdout,
+            )
+
+    def test_dry_run_resolves_p6_spatial_semantic_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_POSE_FOCUS_TASK_PROFILE"] = P6_TASK_NAME.removesuffix(".yaml")
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "task=robofactory_placefood_spatial_semantic_p6_224_5e-6",
                 result.stdout,
             )
 
@@ -277,6 +331,158 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 {("/cpfs/user/chengjuntao", "RO"), ("/oss-chengjuntao", "RW")},
             )
             self.assertEqual(base64.b64decode(manifest["launcher_payload_base64"]), launcher_bytes)
+
+    def test_renderer_selects_audited_p1_weight_for_p4(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-p1-continuation-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--task-profile",
+                P4_TASK_NAME.removesuffix(".yaml"),
+                "--source-weight",
+                P1_SOURCE_WEIGHT,
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            request = manifest["request"]
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT"],
+                P1_SOURCE_WEIGHT,
+            )
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "P1-pose-focus-step1000-weights-only",
+            )
+            self.assertEqual(manifest["source_weight"]["path"], P1_SOURCE_WEIGHT)
+            self.assertEqual(manifest["source_weight"]["bytes"], 12047407619)
+
+    def test_renderer_selects_p4_gaussian_spatial_objective(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-gaussian-spatial-p4-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--task-profile",
+                P4_TASK_NAME.removesuffix(".yaml"),
+                "--source-weight",
+                P1_SOURCE_WEIGHT,
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(output.read_text(encoding="utf-8"))["request"]
+            self.assertEqual(
+                request["Settings"]["Tags"]["objective"],
+                "robot0-gaussian-spatial-cross-attention",
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT"],
+                P1_SOURCE_WEIGHT,
+            )
+
+    def test_renderer_selects_p6_source_and_objective(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-spatial-semantic-p6-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--task-profile",
+                P6_TASK_NAME.removesuffix(".yaml"),
+                "--source-weight",
+                P5_SOURCE_WEIGHT,
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            request = manifest["request"]
+            self.assertEqual(
+                request["Settings"]["Tags"]["objective"],
+                "placefood-spatial-gaussian-semantic-phase",
+            )
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "P5-action-step1000-weights-only",
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT"],
+                P5_SOURCE_WEIGHT,
+            )
 
 
 if __name__ == "__main__":

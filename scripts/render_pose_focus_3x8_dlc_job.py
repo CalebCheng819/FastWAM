@@ -32,8 +32,40 @@ LAUNCHER_PATH = "scripts/launch_pose_focus_3x8_dlc.sh"
 TASK_PROFILES = (
     "robofactory_placefood_pose_focus_r5_224_5e-6",
     "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
+    "robofactory_placefood_gaussian_spatial_p4_224_5e-6",
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
+    "robofactory_placefood_spatial_semantic_p6_224_5e-6",
 )
+R5_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
+    "fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
+)
+P1_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/"
+    "checkpoints/weights/step_001000.pt"
+)
+P2_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-phase-x0-r5-s42-24g-r1-20260813/"
+    "checkpoints/weights/step_001000.pt"
+)
+P5_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-semantic-phase-p5-s42-24g-r1-20260814/"
+    "checkpoints/weights/step_001000.pt"
+)
+SOURCE_WEIGHTS = {
+    TASK_PROFILES[0]: (R5_SOURCE_WEIGHT, "R5-action-step1000-weights-only"),
+    TASK_PROFILES[1]: (R5_SOURCE_WEIGHT, "R5-action-step1000-weights-only"),
+    TASK_PROFILES[2]: (P1_SOURCE_WEIGHT, "P1-pose-focus-step1000-weights-only"),
+    TASK_PROFILES[3]: (P2_SOURCE_WEIGHT, "P2-action-step1000-weights-only"),
+    TASK_PROFILES[4]: (P5_SOURCE_WEIGHT, "P5-action-step1000-weights-only"),
+}
+OBJECTIVES = {
+    TASK_PROFILES[0]: "active-agent-continuous-pose",
+    TASK_PROFILES[1]: "robot0-phase-clean-x0",
+    TASK_PROFILES[2]: "robot0-gaussian-spatial-cross-attention",
+    TASK_PROFILES[3]: "placefood-task-semantic-phase-sampling",
+    TASK_PROFILES[4]: "placefood-spatial-gaussian-semantic-phase",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +82,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-focus-source-bundle", type=pathlib.Path, required=True)
     parser.add_argument("--pose-focus-code-commit", required=True)
     parser.add_argument("--task-profile", choices=TASK_PROFILES, default=TASK_PROFILES[0])
+    parser.add_argument(
+        "--source-weight",
+        choices=tuple(sorted({item[0] for item in SOURCE_WEIGHTS.values()})),
+        help="Optional explicit source; it must match the audited task-profile source.",
+    )
     parser.add_argument("--max-running-minutes", type=int, default=10080)
     parser.add_argument(
         "--allow-local-bundle-for-tests",
@@ -134,6 +171,10 @@ def main() -> int:
     if not HEX40.fullmatch(args.pose_focus_code_commit):
         raise SystemExit("pose_focus-code-commit must be an exact lowercase Git revision")
 
+    source_path, initialization = SOURCE_WEIGHTS[args.task_profile]
+    if args.source_weight is not None and args.source_weight != source_path:
+        raise SystemExit("source-weight does not match the audited task-profile source")
+
     launcher_bytes = launcher_from_bundle(args.pose_focus_source_bundle, args.pose_focus_code_commit)
     payload = base64.b64encode(launcher_bytes).decode("ascii")
     outer_shell = (
@@ -167,6 +208,8 @@ def main() -> int:
         "FASTWAM_POSE_FOCUS_SOURCE_BUNDLE": bundle_text,
         "FASTWAM_POSE_FOCUS_CODE_COMMIT": args.pose_focus_code_commit,
         "FASTWAM_POSE_FOCUS_TASK_PROFILE": args.task_profile,
+        "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT": source_path,
+        "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES": "12047407619",
         "FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT": "/tmp/fastwam-pose_focus-source-checkouts",
         "FASTWAM_POSE_FOCUS_PROVENANCE_MODE": "stat_cmp",
         "FASTWAM_POSE_FOCUS_INPUT_CACHE_ROOT": "/tmp/fastwam-pose_focus-input-cache",
@@ -261,22 +304,10 @@ def main() -> int:
             "EnableSanityCheck": False,
             "Tags": {
                 "experiment": "POSE_FOCUS",
-                "initialization": (
-                    "P2-action-step1000-weights-only"
-                    if args.task_profile == TASK_PROFILES[2]
-                    else "R5-action-step1000-weights-only"
-                ),
+                "initialization": initialization,
                 "optimizer": "fresh",
                 "task": "PlaceFood-rf",
-                "objective": (
-                    "placefood-task-semantic-phase-sampling"
-                    if args.task_profile == TASK_PROFILES[2]
-                    else (
-                        "robot0-phase-clean-x0"
-                        if args.task_profile == TASK_PROFILES[1]
-                        else "active-agent-continuous-pose"
-                    )
-                ),
+                "objective": OBJECTIVES[args.task_profile],
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "3x8-world24",
             },
@@ -301,6 +332,11 @@ def main() -> int:
             "path": LAUNCHER_PATH,
         },
         "launcher_payload_base64": payload,
+        "source_weight": {
+            "path": source_path,
+            "bytes": 12047407619,
+            "initialization": initialization,
+        },
         "pose_focus_provenance_contract": {
             "mode": "stat_cmp",
             "new_hashes": False,

@@ -146,6 +146,21 @@ def test_explicit_cross_treatment_warm_start_uses_strict_native_loader(
     assert len(trainer.model.loads) == 1
 
 
+def test_explicit_architecture_upgrade_is_forwarded_only_when_declared(tmp_path):
+    checkpoint = tmp_path / "joint-full.pt"
+    _write_native_v2_source_checkpoint(checkpoint)
+    trainer = _explicit_warm_start_trainer(checkpoint)
+    trainer.weights_only_warm_start_architecture_upgrade = (
+        "gaussian_spatial_v2_from_pooled_v1"
+    )
+
+    trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads[0][1]["architecture_upgrade"] == (
+        "gaussian_spatial_v2_from_pooled_v1"
+    )
+
+
 def test_explicit_warm_start_rejects_wrong_source_treatment_before_load(tmp_path):
     checkpoint = tmp_path / "action-full.pt"
     _write_native_v2_source_checkpoint(

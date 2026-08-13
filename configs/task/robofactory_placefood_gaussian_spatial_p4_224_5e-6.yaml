@@ -1,0 +1,20 @@
+# @package _global_
+
+# P4 retains the P1 pose-focused objective while replacing pooled Gaussian
+# conditioning with action-time-to-spatial-token attention. VideoGen is frozen.
+defaults:
+  - robofactory_placefood_pose_focus_r5_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: gaussian_spatial_v2_from_pooled_v1
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: spatial_cross_attention
+    gaussian_residual_floor: 0.1
+    gaussian_attention_temperature: 0.1
+
+wandb:
+  group: robofactory-placefood-gaussian-spatial
+  name: fastwam-placefood-gaussian-spatial-p4-s42-24g-r1

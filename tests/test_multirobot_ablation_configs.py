@@ -536,12 +536,76 @@ def test_pose_focus_24gpu_profile_targets_placefood_robot0_pose(monkeypatch):
     assert cfg["seal_training_run"] is False
     assert cfg["terminal_rehash_weights"] is False
 
+
+def test_gaussian_spatial_p4_profile_is_a_p1_matched_architecture_upgrade(
+    monkeypatch,
+):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT",
+        TEST_POSE_FOCUS_BASE_CHECKPOINT,
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_gaussian_spatial_p4_224_5e-6",
+        "+scale=robofactory_multi_robot_24gpu_pose_focus",
+    )
+
+    assert cfg["resume"] == TEST_POSE_FOCUS_BASE_CHECKPOINT
+    assert cfg["weights_only_warm_start"]["architecture_upgrade"] == (
+        "gaussian_spatial_v2_from_pooled_v1"
+    )
+    assert cfg["model"]["action_dit_config"]["gaussian_conditioning_mode"] == (
+        "spatial_cross_attention"
+    )
+    assert cfg["model"]["action_dit_config"]["gaussian_residual_floor"] == 0.1
+    assert cfg["model"]["action_dit_config"]["gaussian_attention_temperature"] == 0.1
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["pose_focus"]["active_agent_id"] == 0
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["max_steps"] == 1000
+
     for split in ("train", "val"):
         assert cfg["data"][split]["required_agent_counts"] == [2]
         assert cfg["data"][split]["required_task_names"] == ["PlaceFood-rf"]
         assert cfg["data"][split]["load_future_video"] is False
         assert cfg["data"][split]["gaussian_cache_verify"] == "stat_cmp"
         assert "max_agents" not in cfg["data"][split]
+
+
+def test_spatial_semantic_p6_combines_p5_sampling_with_spatial_gaussian(
+    monkeypatch,
+):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT",
+        TEST_POSE_FOCUS_BASE_CHECKPOINT,
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_spatial_semantic_p6_224_5e-6",
+        "+scale=robofactory_multi_robot_24gpu_pose_focus",
+    )
+
+    assert cfg["phase_balanced_fraction"] == 0.5
+    for split in ("train", "val"):
+        data_cfg = cfg["data"][split]
+        assert data_cfg["phase_label_source"] == "placefood_task_state"
+        assert data_cfg["required_agent_counts"] == [2]
+        assert data_cfg["required_task_names"] == ["PlaceFood-rf"]
+        assert data_cfg["load_future_video"] is False
+
+    assert cfg["weights_only_warm_start"]["architecture_upgrade"] == (
+        "gaussian_spatial_v2_from_pooled_v1"
+    )
+    action_cfg = cfg["model"]["action_dit_config"]
+    assert action_cfg["gaussian_conditioning_mode"] == "spatial_cross_attention"
+    assert action_cfg["gaussian_residual_floor"] == 0.1
+    assert action_cfg["gaussian_attention_temperature"] == 0.1
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["pose_focus"]["lambda_clean_arm_x0"] == 1.0
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["max_steps"] == 1000
 
 
 def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):

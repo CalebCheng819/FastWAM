@@ -1,0 +1,20 @@
+# @package _global_
+
+# P6 combines P5 semantic phase sampling with spatial Gaussian conditioning.
+# VideoGen remains frozen and the action expert is warm-started from P5 step 1000.
+defaults:
+  - robofactory_placefood_semantic_phase_p5_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: gaussian_spatial_v2_from_pooled_v1
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: spatial_cross_attention
+    gaussian_residual_floor: 0.1
+    gaussian_attention_temperature: 0.1
+
+wandb:
+  group: robofactory-placefood-spatial-semantic-p6
+  name: fastwam-placefood-spatial-semantic-p6-s42-24g-r1

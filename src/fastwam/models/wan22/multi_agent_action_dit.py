@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .action_dit import ActionDiT
 from .wan_video_dit import sinusoidal_embedding_1d
@@ -76,7 +77,7 @@ class GaussianAgentAdapter(nn.Module):
             nn.LayerNorm(self.hidden_dim),
         )
 
-    def forward(self, agent_gaussian: torch.Tensor) -> torch.Tensor:
+    def _canonical_input(self, agent_gaussian: torch.Tensor) -> tuple[torch.Tensor, int, int]:
         if agent_gaussian.ndim != 5:
             raise ValueError(
                 "`agent_gaussian` must be [B,N,C,H,W], "
@@ -109,8 +110,40 @@ class GaussianAgentAdapter(nn.Module):
             height,
             width,
         ).to(device=reference.device, dtype=reference.dtype)
+        return gaussian, batch_size, num_agents
+
+    def forward(self, agent_gaussian: torch.Tensor) -> torch.Tensor:
+        gaussian, batch_size, num_agents = self._canonical_input(agent_gaussian)
         embedding = self.projection(self.stem(gaussian))
         return embedding.reshape(batch_size, num_agents, self.hidden_dim)
+
+    def forward_spatial(self, agent_gaussian: torch.Tensor) -> torch.Tensor:
+        """Return the stride-8 Gaussian grid as coordinate-aware spatial tokens."""
+
+        if self.hidden_dim % 4:
+            raise ValueError(
+                "Spatial Gaussian conditioning requires hidden_dim divisible by 4, "
+                f"got {self.hidden_dim}"
+            )
+        gaussian, batch_size, num_agents = self._canonical_input(agent_gaussian)
+        feature_map = self.stem[:-1](gaussian)
+        _, _, height, width = feature_map.shape
+        tokens = feature_map.flatten(2).transpose(1, 2)
+        tokens = self.projection[2](self.projection[1](tokens))
+
+        rows = torch.arange(height, device=tokens.device, dtype=tokens.dtype)
+        rows = rows.repeat_interleave(width)
+        columns = torch.arange(width, device=tokens.device, dtype=tokens.dtype)
+        columns = columns.repeat(height)
+        position = torch.cat(
+            [
+                sinusoidal_embedding_1d(self.hidden_dim // 2, rows),
+                sinusoidal_embedding_1d(self.hidden_dim // 2, columns),
+            ],
+            dim=-1,
+        )
+        tokens = tokens + position.unsqueeze(0)
+        return tokens.reshape(batch_size, num_agents, height * width, self.hidden_dim)
 
 
 def regular_simplex_vertices(
@@ -183,6 +216,9 @@ class MultiAgentActionDiT(ActionDiT):
         gaussian_height: int = 28,
         gaussian_width: int = 40,
         gaussian_stem_dim: int = 64,
+        gaussian_conditioning_mode: str = "pooled_residual",
+        gaussian_residual_floor: float = 0.0,
+        gaussian_attention_temperature: float = 0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -228,6 +264,43 @@ class MultiAgentActionDiT(ActionDiT):
         self.gaussian_height = int(gaussian_height)
         self.gaussian_width = int(gaussian_width)
         self.gaussian_stem_dim = int(gaussian_stem_dim)
+        self.gaussian_conditioning_mode = str(gaussian_conditioning_mode).strip().lower()
+        self.gaussian_residual_floor = float(gaussian_residual_floor)
+        self.gaussian_attention_temperature = float(gaussian_attention_temperature)
+        if self.gaussian_conditioning_mode not in {
+            "pooled_residual",
+            "spatial_cross_attention",
+        }:
+            raise ValueError(
+                "`gaussian_conditioning_mode` must be pooled_residual or "
+                f"spatial_cross_attention, got {self.gaussian_conditioning_mode!r}"
+            )
+        if self.gaussian_residual_floor < 0:
+            raise ValueError(
+                "`gaussian_residual_floor` must be non-negative, got "
+                f"{self.gaussian_residual_floor}"
+            )
+        if self.gaussian_attention_temperature <= 0:
+            raise ValueError(
+                "`gaussian_attention_temperature` must be positive, got "
+                f"{self.gaussian_attention_temperature}"
+            )
+        if (
+            self.gaussian_conditioning_mode == "pooled_residual"
+            and self.gaussian_residual_floor != 0.0
+        ):
+            raise ValueError(
+                "pooled_residual preserves the GAU1 baseline contract and requires "
+                "gaussian_residual_floor=0"
+            )
+        if (
+            self.gaussian_conditioning_mode == "spatial_cross_attention"
+            and self.hidden_dim % 4
+        ):
+            raise ValueError(
+                "spatial_cross_attention requires hidden_dim divisible by 4, "
+                f"got {self.hidden_dim}"
+            )
 
         self.agent_state_encoder = nn.Sequential(
             nn.Linear(self.state_dim, self.hidden_dim),
@@ -507,15 +580,42 @@ class MultiAgentActionDiT(ActionDiT):
                 or agent_gaussian is None
             ):
                 raise RuntimeError("Gaussian conditioning was enabled without initialized inputs/modules")
-            gaussian_emb = self.gaussian_adapter(agent_gaussian).to(
-                device=action_emb.device,
-                dtype=action_emb.dtype,
-            )
             gaussian_gate = self.gaussian_gate.to(
                 device=action_emb.device,
                 dtype=action_emb.dtype,
             )
-            action_emb = action_emb + gaussian_gate * gaussian_emb.unsqueeze(2)
+            if self.gaussian_conditioning_mode == "pooled_residual":
+                gaussian_emb = self.gaussian_adapter(agent_gaussian).to(
+                    device=action_emb.device,
+                    dtype=action_emb.dtype,
+                )
+                action_emb = action_emb + gaussian_gate * gaussian_emb.unsqueeze(2)
+            else:
+                spatial_tokens = self.gaussian_adapter.forward_spatial(agent_gaussian).to(
+                    device=action_emb.device,
+                    dtype=action_emb.dtype,
+                )
+                temporal_position = sinusoidal_embedding_1d(
+                    self.hidden_dim,
+                    torch.arange(horizon, device=action_emb.device, dtype=action_emb.dtype),
+                )
+                query = action_emb + temporal_position.view(1, 1, horizon, self.hidden_dim)
+                scores = torch.einsum(
+                    "bnth,bnph->bntp",
+                    F.normalize(query.float(), dim=-1),
+                    F.normalize(spatial_tokens.float(), dim=-1),
+                )
+                attention = torch.softmax(
+                    scores / self.gaussian_attention_temperature,
+                    dim=-1,
+                )
+                gaussian_emb = torch.einsum(
+                    "bntp,bnph->bnth",
+                    attention,
+                    spatial_tokens.float(),
+                ).to(dtype=action_emb.dtype)
+                effective_gate = gaussian_gate + self.gaussian_residual_floor
+                action_emb = action_emb + effective_gate * gaussian_emb
         action_emb = action_emb.reshape(batch_size, num_agents * horizon, self.hidden_dim)
         num_hub_tokens = self.num_hub_tokens_for(num_agents)
         if num_hub_tokens:
