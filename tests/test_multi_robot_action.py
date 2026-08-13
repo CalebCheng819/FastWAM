@@ -18,6 +18,8 @@ def _tiny_action_expert(
     hub_enabled=True,
     agent_encoding_mode="geometry",
     enable_gaussian=False,
+    gaussian_conditioning_mode="pooled_residual",
+    gaussian_residual_floor=0.0,
 ):
     return MultiAgentActionDiT(
         action_dim=3,
@@ -32,6 +34,8 @@ def _tiny_action_expert(
         gaussian_height=28,
         gaussian_width=40,
         gaussian_stem_dim=8,
+        gaussian_conditioning_mode=gaussian_conditioning_mode,
+        gaussian_residual_floor=gaussian_residual_floor,
         hidden_dim=32,
         ffn_dim=64,
         text_dim=16,
@@ -106,6 +110,23 @@ def test_gaussian_agent_adapter_accepts_fp16_native_cardinalities(num_agents):
     assert embedding.shape == (2, num_agents, 32)
     assert embedding.dtype == adapter.stem[0].weight.dtype
     assert torch.isfinite(embedding).all()
+
+
+@pytest.mark.parametrize("num_agents", [1, 2, 4])
+def test_gaussian_agent_adapter_retains_coordinate_aware_spatial_tokens(num_agents):
+    torch.manual_seed(31 + num_agents)
+    adapter = GaussianAgentAdapter(
+        hidden_dim=32,
+        in_channels=13,
+        input_height=28,
+        input_width=40,
+        stem_dim=8,
+    ).eval()
+    gaussian = torch.zeros(2, num_agents, 13, 28, 40).half()
+    spatial = adapter.forward_spatial(gaussian)
+    assert spatial.shape == (2, num_agents, 20, 32)
+    assert torch.isfinite(spatial).all()
+    assert not torch.equal(spatial[..., 0, :], spatial[..., -1, :])
 
 
 @pytest.mark.parametrize("num_agents", [1, 2, 3, 4])
@@ -227,6 +248,72 @@ def test_gaussian_gate_and_adapter_gradients_are_finite():
     assert adapter_gradients
     assert all(gradient is not None for gradient in adapter_gradients)
     assert all(torch.isfinite(gradient).all() for gradient in adapter_gradients)
+
+
+def test_spatial_gaussian_has_adapter_gradients_at_zero_learned_gate():
+    torch.manual_seed(37)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).train()
+    assert model.gaussian_gate is not None
+    assert torch.equal(model.gaussian_gate, torch.zeros_like(model.gaussian_gate))
+    data = _inputs(3)
+    pre = model.pre_dit(
+        data["action"],
+        data["timestep"],
+        data["context"],
+        data["context_mask"],
+        agent_states=data["state"],
+        agent_geometry=data["geometry"],
+        agent_ids=data["ids"],
+        agent_gaussian=data["gaussian"],
+    )
+    pre["tokens"].square().mean().backward()
+    assert model.gaussian_gate.grad is not None
+    assert torch.isfinite(model.gaussian_gate.grad).all()
+    gradients = [parameter.grad for parameter in model.gaussian_adapter.parameters()]
+    assert gradients
+    assert all(gradient is not None for gradient in gradients)
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
+    assert any(torch.count_nonzero(gradient).item() for gradient in gradients)
+
+
+def test_spatial_gaussian_conditioning_is_agent_permutation_equivariant():
+    torch.manual_seed(41)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    data = _inputs(4)
+    shared = model.pre_dit(
+        data["action"],
+        data["timestep"],
+        data["context"],
+        data["context_mask"],
+        agent_states=data["state"],
+        agent_geometry=data["geometry"],
+        agent_ids=data["ids"],
+        agent_gaussian=data["gaussian"],
+    )
+    permutation = torch.tensor([3, 0, 2, 1])
+    permuted = model.pre_dit(
+        data["action"][:, permutation],
+        data["timestep"],
+        data["context"],
+        data["context_mask"],
+        agent_states=data["state"][:, permutation],
+        agent_geometry=data["geometry"][:, permutation],
+        agent_ids=data["ids"][:, permutation],
+        agent_gaussian=data["gaussian"][:, permutation],
+    )
+    horizon = data["action"].shape[2]
+    inverse = torch.argsort(permutation)
+    shared_action = shared["tokens"][:, : 4 * horizon].reshape(1, 4, horizon, -1)
+    permuted_action = permuted["tokens"][:, : 4 * horizon].reshape(1, 4, horizon, -1)
+    assert torch.allclose(shared_action, permuted_action[:, inverse])
 
 
 def test_gaussian_enabled_requires_exact_shape_and_disabled_ignores_field():

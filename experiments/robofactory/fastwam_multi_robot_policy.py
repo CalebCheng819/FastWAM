@@ -944,6 +944,27 @@ class FastWAMMultiRobotPolicy:
                 _activate_legacy_metadata_no_hash_mode(self.model)
             self.model.configure_trainable_parameters("action")
         self.model.load_checkpoint(self.checkpoint_path)
+        if self.action_architecture == "gaussian_spatial_v2":
+            action_expert = getattr(self.model, "action_expert", None)
+            observed_contract = {
+                "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
+                "residual_floor": getattr(action_expert, "gaussian_residual_floor", None),
+                "attention_temperature": getattr(
+                    action_expert,
+                    "gaussian_attention_temperature",
+                    None,
+                ),
+            }
+            expected_contract = {
+                "mode": "spatial_cross_attention",
+                "residual_floor": 0.1,
+                "attention_temperature": 0.1,
+            }
+            if observed_contract != expected_contract:
+                raise RuntimeError(
+                    "P4 evaluation instantiated the wrong Gaussian action architecture: "
+                    f"expected={expected_contract}, observed={observed_contract}"
+                )
         if self.integrity_mode == "sha256":
             actual_checkpoint_sha256 = getattr(
                 self.model,

@@ -1549,20 +1549,36 @@ class FastWAMMultiRobot(FastWAM):
             "enable_gaussian": self.action_expert.enable_gaussian,
         }
         if self.action_expert.enable_gaussian:
-            metadata.update(
-                {
-                    "gaussian_conditioning": "agent_local_residual_v1",
-                    "gaussian_shape": [
-                        self.action_expert.gaussian_channels,
-                        self.action_expert.gaussian_height,
-                        self.action_expert.gaussian_width,
-                    ],
-                    "gaussian_hidden_dim": self.action_expert.hidden_dim,
-                    "gaussian_stem_dim": self.action_expert.gaussian_stem_dim,
-                    "gaussian_adapter_version": "conv_gn_silu_pool_v1",
-                    "gaussian_gate_init": 0.0,
-                }
-            )
+            gaussian_metadata = {
+                "gaussian_shape": [
+                    self.action_expert.gaussian_channels,
+                    self.action_expert.gaussian_height,
+                    self.action_expert.gaussian_width,
+                ],
+                "gaussian_hidden_dim": self.action_expert.hidden_dim,
+                "gaussian_stem_dim": self.action_expert.gaussian_stem_dim,
+                "gaussian_gate_init": 0.0,
+            }
+            if self.action_expert.gaussian_conditioning_mode == "pooled_residual":
+                gaussian_metadata.update(
+                    {
+                        "gaussian_conditioning": "agent_local_residual_v1",
+                        "gaussian_adapter_version": "conv_gn_silu_pool_v1",
+                    }
+                )
+            else:
+                gaussian_metadata.update(
+                    {
+                        "gaussian_conditioning": "agent_local_spatial_cross_attention_v2",
+                        "gaussian_adapter_version": "conv_gn_silu_spatial_reuse_v2",
+                        "gaussian_spatial_position_encoding": "sincos_2d_v1",
+                        "gaussian_residual_floor": self.action_expert.gaussian_residual_floor,
+                        "gaussian_attention_temperature": (
+                            self.action_expert.gaussian_attention_temperature
+                        ),
+                    }
+                )
+            metadata.update(gaussian_metadata)
         return metadata
 
     def _validate_gaussian_v2_state(
