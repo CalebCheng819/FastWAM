@@ -2,14 +2,14 @@
 set -Eeuo pipefail
 umask 077
 
-EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R10-20260814'
+EXPERIMENT_REL="${FASTWAM_EXPERIMENT_REL_OVERRIDE:-.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R10-20260814}"
 CONTROL_PYTHON='/mnt/workspace/tools/pai-control-py312/20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python'
 CONTROL_PYTHON_LINK_TARGET='python3'
 CONTROL_PYTHON_RESOLVED_TARGET='/usr/local/bin/python3.12'
 LOCK_ANCHOR='/run'
 LOCK_PARENT='fastwam-dlc-submit-state'
 LOCK_WORKSPACE='workspace-270969'
-LOCK_NAME='gau0-placefood-same8-r10-controller.lock'
+LOCK_NAME="${FASTWAM_LOCK_NAME_OVERRIDE:-gau0-placefood-same8-r10-controller.lock}"
 
 die() {
   printf 'GAU0_WRAPPER_FATAL: %s\n' "$*" >&2
@@ -31,7 +31,9 @@ read -r -a ssh_fields <<<"${SSH_CONNECTION}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source_root="$(cd -- "${script_dir}/../../.." && pwd -P)"
-[[ "${source_root}/${EXPERIMENT_REL}/submit_from_ssh970.sh" == "$(readlink -f -- "${BASH_SOURCE[0]}")" ]] \
+wrapper_entrypoint="${FASTWAM_WRAPPER_ENTRYPOINT:-${BASH_SOURCE[0]}}"
+[[ -f "${wrapper_entrypoint}" && ! -L "${wrapper_entrypoint}" ]] || die 'wrapper entrypoint must be an ordinary file'
+[[ "${source_root}/${EXPERIMENT_REL}/submit_from_ssh970.sh" == "$(readlink -f -- "${wrapper_entrypoint}")" ]] \
   || die 'wrapper/source-root relation changed'
 controller="${source_root}/${EXPERIMENT_REL}/controller.py"
 [[ -f "${controller}" && ! -L "${controller}" ]] || die 'controller must be an ordinary file'

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R10-20260814'
+EXPERIMENT_REL="${FASTWAM_EXPERIMENT_REL_OVERRIDE:-.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R10-20260814}"
 
 die() {
   printf 'GAU0_EVAL_FATAL: %s\n' "$*" >&2
@@ -24,6 +24,7 @@ required_env=(
   FASTWAM_OPENGL_FRONTEND FASTWAM_OPENGL_FRONTEND_SIZE_BYTES
   FASTWAM_GLX_FRONTEND FASTWAM_GLX_FRONTEND_SIZE_BYTES FASTWAM_EGL_DISPATCH
   FASTWAM_EGL_DISPATCH_SIZE_BYTES FASTWAM_EGL_VENDOR FASTWAM_EGL_VENDOR_SIZE_BYTES
+  FASTWAM_VULKAN_LOADER FASTWAM_VULKAN_LOADER_SIZE_BYTES
   FASTWAM_PYTHON_TARGET FASTWAM_PYTHON_VERSION FASTWAM_PYTHON_CACHE_TAG FASTWAM_PYTHON_SOABI
   FASTWAM_BASELINE_ROOT FASTWAM_TRAINING_SOURCE_COMMIT
   FASTWAM_TRAINING_JOB_ID FASTWAM_RESERVATION_PATH
@@ -36,7 +37,7 @@ controller="${FASTWAM_SOURCE_ROOT}/${EXPERIMENT_REL}/controller.py"
 evaluator="${FASTWAM_SOURCE_ROOT}/experiments/robofactory/eval_robofactory_multi_robot.py"
 aggregator="${FASTWAM_SOURCE_ROOT}/${EXPERIMENT_REL}/aggregate_results.py"
 
-scratch_root="$(mktemp -d /tmp/fastwam-gau0-placefood-r10.XXXXXXXX)"
+scratch_root="$(mktemp -d "${FASTWAM_SCRATCH_TEMPLATE_OVERRIDE:-/tmp/fastwam-gau0-placefood-r10.XXXXXXXX}")"
 cleanup() {
   rm -rf -- "${scratch_root}"
 }
@@ -48,6 +49,7 @@ mkdir -m 0700 -- "${scratch_root}/xdg-cache" "${scratch_root}/xdg-runtime" \
 
 export PYTHONPATH="${FASTWAM_ROBOFACTORY_ROOT}:${FASTWAM_SOURCE_ROOT}/src:${FASTWAM_PYTHON_EXTRA_ROOT}:${FASTWAM_SOURCE_ROOT}/experiments/robofactory${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONDONTWRITEBYTECODE=1
+export PYTHONFAULTHANDLER=1
 export PYTHONPYCACHEPREFIX="${scratch_root}/pycache"
 export WANDB_MODE=offline
 export MUJOCO_GL=egl
@@ -80,6 +82,7 @@ require_runtime_file "${FASTWAM_OPENGL_FRONTEND}" "${FASTWAM_OPENGL_FRONTEND_SIZ
 require_runtime_file "${FASTWAM_GLX_FRONTEND}" "${FASTWAM_GLX_FRONTEND_SIZE_BYTES}"
 require_runtime_file "${FASTWAM_EGL_DISPATCH}" "${FASTWAM_EGL_DISPATCH_SIZE_BYTES}"
 require_runtime_file "${FASTWAM_EGL_VENDOR}" "${FASTWAM_EGL_VENDOR_SIZE_BYTES}"
+require_runtime_file "${FASTWAM_VULKAN_LOADER}" "${FASTWAM_VULKAN_LOADER_SIZE_BYTES}"
 ln -s -- "${FASTWAM_EGL_FRONTEND}" "${scratch_root}/glvnd-runtime/libEGL.so.1"
 ln -s -- "${FASTWAM_GL_FRONTEND}" "${scratch_root}/glvnd-runtime/libGL.so.1"
 ln -s -- "${FASTWAM_GLES1_FRONTEND}" "${scratch_root}/glvnd-runtime/libGLESv1_CM.so.1"
@@ -90,7 +93,10 @@ ln -s -- 'libEGL.so.1' "${scratch_root}/glvnd-runtime/libEGL.so"
 ln -s -- 'libGL.so.1' "${scratch_root}/glvnd-runtime/libGL.so"
 ln -s -- 'libGLESv1_CM.so.1' "${scratch_root}/glvnd-runtime/libGLESv1_CM.so"
 ln -s -- 'libGLESv2.so.2' "${scratch_root}/glvnd-runtime/libGLESv2.so"
+ln -s -- "${FASTWAM_VULKAN_LOADER}" "${scratch_root}/glvnd-runtime/libvulkan.so.1"
+ln -s -- 'libvulkan.so.1' "${scratch_root}/glvnd-runtime/libvulkan.so"
 export LD_LIBRARY_PATH="${scratch_root}/glvnd-runtime:${FASTWAM_NVIDIA_GRAPHICS_ROOT}/lib:${FASTWAM_NVIDIA_GRAPHICS_ROOT}/driver-lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export SAPIEN_VULKAN_LIBRARY_PATH="${scratch_root}/glvnd-runtime/libvulkan.so.1"
 
 "${FASTWAM_PYTHON}" -B -c '
 import ctypes
@@ -106,6 +112,7 @@ expected = {
     "libGLESv2.so.2": Path(os.environ["FASTWAM_GLES2_FRONTEND"]).resolve(strict=True),
     "libOpenGL.so.0": Path(os.environ["FASTWAM_OPENGL_FRONTEND"]).resolve(strict=True),
     "libGLX.so.0": Path(os.environ["FASTWAM_GLX_FRONTEND"]).resolve(strict=True),
+    "libvulkan.so.1": Path(os.environ["FASTWAM_VULKAN_LOADER"]).resolve(strict=True),
 }
 vendor = Path(os.environ["FASTWAM_EGL_VENDOR"]).resolve(strict=True)
 shim_root = Path(os.environ["LD_LIBRARY_PATH"].split(os.pathsep)[0]).resolve(strict=True)
@@ -117,6 +124,14 @@ frontend_handle = ctypes.CDLL(str(shim_root / "libEGL.so.1"), mode=ctypes.RTLD_G
 if not callable(getattr(frontend_handle, "eglQueryString", None)):
     raise SystemExit("controlled EGL frontend lacks eglQueryString")
 ctypes.CDLL(str(vendor), mode=ctypes.RTLD_GLOBAL)
+vulkan = ctypes.CDLL(str(shim_root / "libvulkan.so.1"), mode=ctypes.RTLD_GLOBAL)
+enumerate_version = vulkan.vkEnumerateInstanceVersion
+enumerate_version.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+enumerate_version.restype = ctypes.c_int32
+version = ctypes.c_uint32()
+result = enumerate_version(ctypes.byref(version))
+if result != 0:
+    raise SystemExit(f"vkEnumerateInstanceVersion failed: {result}")
 modules = _preflight_environment_imports(Path(os.environ["FASTWAM_ROBOFACTORY_ROOT"]))
 print(f"GAU0_GLVND_RUNTIME_PREFLIGHT_PASS shim={shim_root} vendor={vendor} modules={modules}")
 '

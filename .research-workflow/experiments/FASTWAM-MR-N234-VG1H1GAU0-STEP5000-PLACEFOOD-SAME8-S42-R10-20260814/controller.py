@@ -64,6 +64,8 @@ EGL_DISPATCH = NVIDIA_GRAPHICS_ROOT / "lib" / "libGLdispatch.so.0"
 EGL_DISPATCH_BYTES = 952576
 EGL_VENDOR = NVIDIA_GRAPHICS_ROOT / "driver-lib" / "libEGL_nvidia.so.570.153.02"
 EGL_VENDOR_BYTES = 1358016
+VULKAN_LOADER = Path("/cpfs/user/chengjuntao/fastwam-deploy/vulkan-loader-1.3.204/libvulkan.so.1.3.204")
+VULKAN_LOADER_BYTES = 445104
 GLVND_SHIM_TARGETS = {
     "libEGL.so.1": EGL_FRONTEND,
     "libGL.so.1": GL_FRONTEND,
@@ -71,12 +73,14 @@ GLVND_SHIM_TARGETS = {
     "libGLESv2.so.2": GLES2_FRONTEND,
     "libOpenGL.so.0": OPENGL_FRONTEND,
     "libGLX.so.0": GLX_FRONTEND,
+    "libvulkan.so.1": VULKAN_LOADER,
 }
 GLVND_SHIM_ALIASES = {
     "libEGL.so": "libEGL.so.1",
     "libGL.so": "libGL.so.1",
     "libGLESv1_CM.so": "libGLESv1_CM.so.1",
     "libGLESv2.so": "libGLESv2.so.2",
+    "libvulkan.so": "libvulkan.so.1",
 }
 PYTHON = Path("/cpfs/user/chengjuntao/venvs/fastwam-gaudp-py310-20260802/bin/python")
 PYTHON_TARGET = Path("/cpfs/user/chengjuntao/runtimes/uv-python/cpython-3.10-linux-x86_64-gnu/bin/python3.10")
@@ -403,12 +407,15 @@ def worker_dependency_env(shim_dir: Path) -> dict[str, str]:
     env.update({
         "PYTHONPATH": worker_pythonpath(),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONFAULTHANDLER": "1",
         "MUJOCO_GL": "egl",
         "EGL_PLATFORM": "surfaceless",
         "PYOPENGL_PLATFORM": "egl",
         "NVIDIA_DRIVER_CAPABILITIES": "all",
         "VK_ICD_FILENAMES": str(NVIDIA_GRAPHICS_ROOT / "nvidia_icd.json"),
         "VK_DRIVER_FILES": str(NVIDIA_GRAPHICS_ROOT / "nvidia_icd.json"),
+        "SAPIEN_VULKAN_LIBRARY_PATH": str(shim_dir / "libvulkan.so.1"),
+        "FASTWAM_VULKAN_LOADER": str(VULKAN_LOADER),
         "__GLX_VENDOR_LIBRARY_NAME": "nvidia",
         "__EGL_VENDOR_LIBRARY_FILENAMES": str(NVIDIA_GRAPHICS_ROOT / "10_nvidia.json"),
         "LD_LIBRARY_PATH": os.pathsep.join(library_paths),
@@ -420,6 +427,7 @@ def validate_worker_dependencies() -> None:
     validate_python()
     require_dir(PYTHON_EXTRA_ROOT)
     program = r'''
+import ctypes
 import os
 from pathlib import Path
 
@@ -435,6 +443,20 @@ from eval_robofactory_multi_robot import _preflight_environment_imports
 source = Path(os.environ["FASTWAM_DEP_SOURCE_ROOT"])
 robofactory = Path(os.environ["FASTWAM_DEP_ROBOFACTORY_ROOT"])
 environment_modules = _preflight_environment_imports(robofactory)
+
+shim_root = Path(os.environ["LD_LIBRARY_PATH"].split(os.pathsep)[0]).resolve(strict=True)
+expected_vulkan = Path(os.environ["FASTWAM_VULKAN_LOADER"]).resolve(strict=True)
+actual_vulkan = (shim_root / "libvulkan.so.1").resolve(strict=True)
+if actual_vulkan != expected_vulkan:
+    raise SystemExit(f"Vulkan loader shim mismatch: {actual_vulkan} != {expected_vulkan}")
+vulkan = ctypes.CDLL(str(shim_root / "libvulkan.so.1"), mode=ctypes.RTLD_GLOBAL)
+enumerate_version = vulkan.vkEnumerateInstanceVersion
+enumerate_version.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+enumerate_version.restype = ctypes.c_int32
+version = ctypes.c_uint32()
+result = enumerate_version(ctypes.byref(version))
+if result != 0:
+    raise SystemExit(f"vkEnumerateInstanceVersion failed: {result}")
 
 import mani_skill
 import sapien
@@ -483,7 +505,7 @@ print(f"GAU0_WORKER_DEPENDENCY_PREFLIGHT_PASS environment_modules={environment_m
 
 def input_bindings() -> dict[str, Any]:
     validate_python()
-    for directory in (DATASET_ROOT, ROBOFACTORY_ROOT, CONTEXT_CACHE_DIR, MODEL_CACHE_ROOT, NVIDIA_GRAPHICS_ROOT, PYTHON_EXTRA_ROOT, BASELINE_ROOT):
+    for directory in (DATASET_ROOT, ROBOFACTORY_ROOT, CONTEXT_CACHE_DIR, MODEL_CACHE_ROOT, NVIDIA_GRAPHICS_ROOT, VULKAN_LOADER.parent, PYTHON_EXTRA_ROOT, BASELINE_ROOT):
         require_dir(directory)
     bindings = {
         "checkpoint": file_binding(CHECKPOINT, CHECKPOINT_BYTES, False),
@@ -499,6 +521,7 @@ def input_bindings() -> dict[str, Any]:
         "glx_frontend": file_binding(GLX_FRONTEND, GLX_FRONTEND_BYTES, False),
         "egl_dispatch": file_binding(EGL_DISPATCH, EGL_DISPATCH_BYTES, False),
         "egl_vendor": file_binding(EGL_VENDOR, EGL_VENDOR_BYTES, False),
+        "vulkan_loader": file_binding(VULKAN_LOADER, VULKAN_LOADER_BYTES, False),
         "baseline": capture_tree(BASELINE_ROOT, include_contents=True),
     }
     load_aggregator(SOURCE_ROOT).validate_baseline(BASELINE_ROOT)
@@ -507,7 +530,7 @@ def input_bindings() -> dict[str, Any]:
 
 def validate_inputs(bindings: dict[str, Any]) -> None:
     validate_python()
-    for directory in (DATASET_ROOT, ROBOFACTORY_ROOT, CONTEXT_CACHE_DIR, MODEL_CACHE_ROOT, NVIDIA_GRAPHICS_ROOT, PYTHON_EXTRA_ROOT, BASELINE_ROOT):
+    for directory in (DATASET_ROOT, ROBOFACTORY_ROOT, CONTEXT_CACHE_DIR, MODEL_CACHE_ROOT, NVIDIA_GRAPHICS_ROOT, VULKAN_LOADER.parent, PYTHON_EXTRA_ROOT, BASELINE_ROOT):
         require_dir(directory)
     for key in (
         "checkpoint",
@@ -523,6 +546,7 @@ def validate_inputs(bindings: dict[str, Any]) -> None:
         "glx_frontend",
         "egl_dispatch",
         "egl_vendor",
+        "vulkan_loader",
     ):
         validate_file_binding(bindings[key])
     validate_tree(bindings["baseline"])
@@ -566,6 +590,10 @@ def runtime_env(source_commit: str) -> dict[str, str]:
         "FASTWAM_EGL_DISPATCH_SIZE_BYTES": str(EGL_DISPATCH_BYTES),
         "FASTWAM_EGL_VENDOR": str(EGL_VENDOR),
         "FASTWAM_EGL_VENDOR_SIZE_BYTES": str(EGL_VENDOR_BYTES),
+        "FASTWAM_VULKAN_LOADER": str(VULKAN_LOADER),
+        "FASTWAM_VULKAN_LOADER_SIZE_BYTES": str(VULKAN_LOADER_BYTES),
+        "SAPIEN_VULKAN_LIBRARY_PATH": str(VULKAN_LOADER),
+        "PYTHONFAULTHANDLER": "1",
         "FASTWAM_PYTHON": str(PYTHON),
         "FASTWAM_PYTHON_TARGET": str(PYTHON_TARGET),
         "FASTWAM_PYTHON_VERSION": ".".join(str(item) for item in PYTHON_VERSION),
