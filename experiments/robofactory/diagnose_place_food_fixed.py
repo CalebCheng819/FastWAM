@@ -933,7 +933,10 @@ def validate_formal_rollout_contract(
         raise ValueError(
             "Formal rollout requires explicit --control-adapter direct|official_topp"
         )
-    expected_horizons = {"direct": {1, 5}, "official_topp": {5, 32}}
+    expected_horizons = {
+        "direct": {1, 5},
+        "official_topp": {5, 16, 20, 24, 32},
+    }
     if not exec_horizon_explicit or exec_horizon not in expected_horizons[control_adapter]:
         raise ValueError(
             f"Formal {control_adapter} rollout requires explicit --exec-horizon "
@@ -946,7 +949,7 @@ def validate_formal_rollout_contract(
         )
     expected_query_budgets = {
         "direct": {1: 300, 5: 300},
-        "official_topp": {5: 384, 32: 60},
+        "official_topp": {5: 384, 16: 120, 20: 96, 24: 80, 32: 60},
     }
     expected_budgets = (
         expected_query_budgets[control_adapter][exec_horizon],
@@ -2394,7 +2397,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-teacher-states", type=int, default=263)
     parser.add_argument("--teacher-start-timestep", type=int, default=5)
     parser.add_argument("--initial-state", choices=("raw", "clean"), default=None)
-    parser.add_argument("--exec-horizon", type=int, choices=(1, 5, 32), default=None)
+    parser.add_argument(
+        "--exec-horizon", type=int, choices=(1, 5, 16, 20, 24, 32), default=None
+    )
     parser.add_argument(
         "--control-adapter", choices=("direct", "official_topp"), default=None
     )

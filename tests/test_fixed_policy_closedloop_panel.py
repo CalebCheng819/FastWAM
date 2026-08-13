@@ -145,8 +145,14 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
 
         self.assertEqual(identity, "p2-step1000-direct-h1-env333183-policy10000")
 
-    def test_panel_official_topp_contract_accepts_h5_and_h32(self) -> None:
-        for exec_horizon, query_budget in ((5, 384), (32, 60)):
+    def test_panel_official_topp_contract_accepts_equal_budget_horizons(self) -> None:
+        for exec_horizon, query_budget in (
+            (5, 384),
+            (16, 120),
+            (20, 96),
+            (24, 80),
+            (32, 60),
+        ):
             with self.subTest(exec_horizon=exec_horizon):
                 target_action_budget = panel_runner._validate_control_contract(
                     "official_topp", exec_horizon, query_budget, 30000
@@ -159,7 +165,7 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
             panel_runner._validate_control_contract("official_topp", 5, 60, 30000)
 
     def test_panel_official_topp_contract_rejects_h1(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"\[5, 32\]"):
+        with self.assertRaisesRegex(ValueError, r"\[5, 16, 20, 24, 32\]"):
             panel_runner._validate_control_contract("official_topp", 1, 60, 30000)
 
     def test_python_path_contains_explicit_runtime_dependencies(self) -> None:
@@ -324,7 +330,13 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
         self.assertTrue(record["agents"]["panda-0"]["fallback"])
 
     def test_formal_official_topp_contract_accepts_declared_horizons(self) -> None:
-        for exec_horizon, query_budget in ((5, 384), (32, 60)):
+        for exec_horizon, query_budget in (
+            (5, 384),
+            (16, 120),
+            (20, 96),
+            (24, 80),
+            (32, 60),
+        ):
             with self.subTest(exec_horizon=exec_horizon):
                 contract = diagnostic.validate_formal_rollout_contract(
                     max_steps=300,
@@ -364,7 +376,7 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
             )
 
     def test_formal_official_topp_contract_rejects_unsupported_horizon(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"\[5, 32\]"):
+        with self.assertRaisesRegex(ValueError, r"\[5, 16, 20, 24, 32\]"):
             diagnostic.validate_formal_rollout_contract(
                 max_steps=300,
                 max_policy_queries=60,

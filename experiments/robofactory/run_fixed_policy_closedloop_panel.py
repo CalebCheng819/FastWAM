@@ -24,7 +24,7 @@ CONTROL_REQUIREMENTS = {
         "sim_budget": 300,
     },
     "official_topp": {
-        "query_budget_by_horizon": {5: 384, 32: 60},
+        "query_budget_by_horizon": {5: 384, 16: 120, 20: 96, 24: 80, 32: 60},
         "sim_budget": 30000,
     },
 }
