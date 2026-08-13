@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Persistent, fail-closed launcher for the POSE_FOCUS 3 Worker x 8 GPU treatment.
-# The outer DLC command runs once per worker. It stages the R5 weight before
+# The outer DLC command runs once per worker. It stages an audited source weight before
 # spawning the eight local Accelerate ranks, so every child reads node-local
 # storage and no rank can accidentally restore the old 32-GPU optimizer state.
 
@@ -156,7 +156,9 @@ RUN_ID="${RUN_ID:-}"
 ATTEMPT_ID="${FASTWAM_POSE_FOCUS_ATTEMPT_ID:-}"
 REPO_ROOT="${FASTWAM_POSE_FOCUS_REPO_ROOT:-}"
 OUTPUT_DIR="${FASTWAM_POSE_FOCUS_OUTPUT_DIR:-}"
-SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt}"
+R5_SOURCE_WEIGHT="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
+P1_SOURCE_WEIGHT="/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/checkpoints/weights/step_001000.pt"
+SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-${R5_SOURCE_WEIGHT}}"
 EXPECTED_WEIGHT_BYTES="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES:-12047407619}"
 DATASET_ROOT="${FASTWAM_POSE_FOCUS_DATASET_ROOT:-/cpfs/user/chengjuntao/datasets/robofactory_multi_robot}"
 STATS_SOURCE_ROOT="${DATASET_ROOT}"
@@ -222,9 +224,11 @@ else
     die "active POSE_FOCUS source checkout is dirty"
 fi
 
-CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
 if [[ "${TEST_MODE}" != "1" ]]; then
-  [[ "${SOURCE_WEIGHT}" == "${CANONICAL_SOURCE}" ]] || die "production source must be the audited R5 step_001000 weight file"
+  case "${SOURCE_WEIGHT}" in
+    "${R5_SOURCE_WEIGHT}"|"${P1_SOURCE_WEIGHT}") ;;
+    *) die "production source must be an audited R5 or P1 step_001000 weight file" ;;
+  esac
   [[ "${EXPECTED_WEIGHT_BYTES}" == "12047407619" ]] || die "production source byte count must remain 12047407619"
 fi
 [[ "${SOURCE_WEIGHT}" == *.pt ]] || die "source must be a weight .pt file, not a training-state directory"
@@ -513,17 +517,17 @@ if [[ "${DRY_RUN}" == "0" ]]; then
   PARTIAL_WEIGHT="${PARTIAL_ATTEMPT}/step_001000.pt"
   SOURCE_STAT_BEFORE="$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")"
   SOURCE_MTIME="$(stat -Lc '%Y' -- "${SOURCE_WEIGHT}")"
-  cp -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || die "failed to copy R5 weight to node-local storage"
+  cp -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || die "failed to copy source weight to node-local storage"
   [[ -f "${PARTIAL_WEIGHT}" && ! -L "${PARTIAL_WEIGHT}" ]] || \
     die "node-local checkpoint copy is not a regular non-symlink file"
   [[ "$(stat -c '%s' -- "${PARTIAL_WEIGHT}")" == "${EXPECTED_WEIGHT_BYTES}" ]] || \
     die "node-local checkpoint copy has the wrong byte count"
   [[ "$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")" == "${SOURCE_STAT_BEFORE}" ]] || \
-    die "R5 source weight changed while staging"
+    die "source weight changed while staging"
   cmp -s -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || \
-    die "node-local checkpoint bytes differ from the R5 source"
+    die "node-local checkpoint bytes differ from the source"
   [[ "$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")" == "${SOURCE_STAT_BEFORE}" ]] || \
-    die "R5 source weight changed during byte comparison"
+    die "source weight changed during byte comparison"
   printf 'provenance_mode=stat_cmp\nrun_id=%s\nattempt_id=%s\nsource_path=%s\ndestination_path=%s\nbytes=%s\nsource_mtime_epoch=%s\nfile_count=1\n' \
     "${RUN_ID}" "${ATTEMPT_ID}" "${SOURCE_WEIGHT}" "${LOCAL_WEIGHT}" \
     "${EXPECTED_WEIGHT_BYTES}" "${SOURCE_MTIME}" >"${PARTIAL_ATTEMPT}/.ready"

@@ -17,6 +17,14 @@ STAT_CMP_HELPER = REPO / "scripts" / "b4_stat_cmp_cache.py"
 TASK_NAME = "robofactory_placefood_pose_focus_r5_224_5e-6.yaml"
 P2_TASK_NAME = "robofactory_placefood_pose_phase_x0_r5_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
+R5_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
+    "fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
+)
+P1_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/"
+    "checkpoints/weights/step_001000.pt"
+)
 
 
 class PoseFocusLauncherTests(unittest.TestCase):
@@ -248,12 +256,73 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 request["Settings"]["Tags"]["objective"],
                 "robot0-phase-clean-x0",
             )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT"],
+                R5_SOURCE_WEIGHT,
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES"],
+                "12047407619",
+            )
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "R5-action-step1000-weights-only",
+            )
             self.assertNotIn("FASTWAM_POSE_FOCUS_TEST_MODE", request["Envs"])
             self.assertEqual(
                 {(item["MountPath"], item["MountAccess"]) for item in request["DataSources"]},
                 {("/cpfs/user/chengjuntao", "RO"), ("/oss-chengjuntao", "RW")},
             )
             self.assertEqual(base64.b64decode(manifest["launcher_payload_base64"]), launcher_bytes)
+
+    def test_renderer_selects_audited_p1_continuation_weight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-p1-continuation-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--source-weight",
+                P1_SOURCE_WEIGHT,
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            request = manifest["request"]
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT"],
+                P1_SOURCE_WEIGHT,
+            )
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "P1-pose-focus-step1000-weights-only",
+            )
+            self.assertEqual(manifest["source_weight"]["path"], P1_SOURCE_WEIGHT)
+            self.assertEqual(manifest["source_weight"]["bytes"], 12047407619)
 
 
 if __name__ == "__main__":

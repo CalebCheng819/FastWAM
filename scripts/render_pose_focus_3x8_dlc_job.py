@@ -33,6 +33,24 @@ TASK_PROFILES = (
     "robofactory_placefood_pose_focus_r5_224_5e-6",
     "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
 )
+R5_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
+    "fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
+)
+P1_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/"
+    "checkpoints/weights/step_001000.pt"
+)
+AUDITED_SOURCE_WEIGHTS = {
+    R5_SOURCE_WEIGHT: {
+        "bytes": 12047407619,
+        "initialization": "R5-action-step1000-weights-only",
+    },
+    P1_SOURCE_WEIGHT: {
+        "bytes": 12047407619,
+        "initialization": "P1-pose-focus-step1000-weights-only",
+    },
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-focus-source-bundle", type=pathlib.Path, required=True)
     parser.add_argument("--pose-focus-code-commit", required=True)
     parser.add_argument("--task-profile", choices=TASK_PROFILES, default=TASK_PROFILES[0])
+    parser.add_argument(
+        "--source-weight",
+        choices=tuple(AUDITED_SOURCE_WEIGHTS),
+        default=R5_SOURCE_WEIGHT,
+    )
     parser.add_argument("--max-running-minutes", type=int, default=10080)
     parser.add_argument(
         "--allow-local-bundle-for-tests",
@@ -134,6 +157,7 @@ def main() -> int:
         raise SystemExit("pose_focus-code-commit must be an exact lowercase Git revision")
 
     launcher_bytes = launcher_from_bundle(args.pose_focus_source_bundle, args.pose_focus_code_commit)
+    source_weight = AUDITED_SOURCE_WEIGHTS[args.source_weight]
     payload = base64.b64encode(launcher_bytes).decode("ascii")
     outer_shell = (
         "set -euo pipefail; "
@@ -166,6 +190,8 @@ def main() -> int:
         "FASTWAM_POSE_FOCUS_SOURCE_BUNDLE": bundle_text,
         "FASTWAM_POSE_FOCUS_CODE_COMMIT": args.pose_focus_code_commit,
         "FASTWAM_POSE_FOCUS_TASK_PROFILE": args.task_profile,
+        "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT": args.source_weight,
+        "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES": str(source_weight["bytes"]),
         "FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT": "/tmp/fastwam-pose_focus-source-checkouts",
         "FASTWAM_POSE_FOCUS_PROVENANCE_MODE": "stat_cmp",
         "FASTWAM_POSE_FOCUS_INPUT_CACHE_ROOT": "/tmp/fastwam-pose_focus-input-cache",
@@ -260,7 +286,7 @@ def main() -> int:
             "EnableSanityCheck": False,
             "Tags": {
                 "experiment": "POSE_FOCUS",
-                "initialization": "R5-action-step1000-weights-only",
+                "initialization": source_weight["initialization"],
                 "optimizer": "fresh",
                 "task": "PlaceFood-rf",
                 "objective": (
@@ -290,6 +316,11 @@ def main() -> int:
             "bundle": bundle_text,
             "code_commit": args.pose_focus_code_commit,
             "path": LAUNCHER_PATH,
+        },
+        "source_weight": {
+            "path": args.source_weight,
+            "bytes": source_weight["bytes"],
+            "initialization": source_weight["initialization"],
         },
         "launcher_payload_base64": payload,
         "pose_focus_provenance_contract": {
