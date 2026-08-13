@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import stat
@@ -282,11 +283,77 @@ def _action_bound_violations(
     return violations
 
 
+def _module_file(module: Any, label: str) -> Path:
+    value = getattr(module, "__file__", None)
+    if not value:
+        raise RuntimeError(f"{label} has no ordinary module file")
+    return Path(value).resolve(strict=True)
+
+
+def _anchor_robofactory_imports(robofactory_root: Path) -> Path:
+    root = robofactory_root.expanduser().resolve(strict=True)
+    expected_packages = {
+        "utils": (root / "utils").resolve(strict=True),
+        "tasks": (root / "tasks").resolve(strict=True),
+    }
+    root_text = str(root)
+    sys.path[:] = [entry for entry in sys.path if entry != root_text]
+    sys.path.insert(0, root_text)
+    os.chdir(root)
+    importlib.invalidate_caches()
+    for name, expected in expected_packages.items():
+        loaded = sys.modules.get(name)
+        if loaded is None:
+            continue
+        package_path = getattr(loaded, "__path__", None)
+        if package_path is None:
+            raise RuntimeError(
+                f"loaded {name!r} is not the expected RoboFactory namespace package"
+            )
+        actual = {Path(entry).resolve(strict=True) for entry in package_path}
+        if expected not in actual:
+            raise RuntimeError(
+                f"loaded {name!r} does not include RoboFactory path: "
+                f"expected={expected} actual={sorted(map(str, actual))}"
+            )
+    return root
+
+
+def _preflight_environment_imports(robofactory_root: Path) -> dict[str, str]:
+    root = _anchor_robofactory_imports(robofactory_root)
+
+    import cv2
+    import mani_skill
+    import sapien
+    import tasks.place_food as place_food
+    import utils.scenes as scenes
+    from OpenGL import EGL
+
+    if not callable(getattr(EGL, "eglQueryString", None)):
+        raise RuntimeError("PyOpenGL EGL binding lacks eglQueryString")
+    expected = {
+        "place_food": (root / "tasks" / "place_food.py").resolve(strict=True),
+        "scenes": (root / "utils" / "scenes" / "__init__.py").resolve(strict=True),
+    }
+    actual = {
+        "place_food": _module_file(place_food, "tasks.place_food"),
+        "scenes": _module_file(scenes, "utils.scenes"),
+    }
+    if actual != expected:
+        raise RuntimeError(
+            f"RoboFactory module provenance mismatch: {actual} != {expected}"
+        )
+    return {
+        **{name: str(path) for name, path in actual.items()},
+        "cv2": str(_module_file(cv2, "cv2")),
+        "mani_skill": str(_module_file(mani_skill, "mani_skill")),
+        "sapien": str(_module_file(sapien, "sapien")),
+    }
+
+
 def _build_environment(robofactory_root: Path, task_name: str):
-    if str(robofactory_root) not in sys.path:
-        sys.path.insert(0, str(robofactory_root))
-    os.chdir(robofactory_root)
-    __import__("tasks")
+    robofactory_root = _anchor_robofactory_imports(robofactory_root)
+    _preflight_environment_imports(robofactory_root)
     import gymnasium as gym
 
     config = TASK_CONFIGS[task_name]

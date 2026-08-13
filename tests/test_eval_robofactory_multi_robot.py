@@ -2,14 +2,37 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from experiments.robofactory.eval_robofactory_multi_robot import (
+    _anchor_robofactory_imports,
     _load_panel,
     _required_fastwam_arguments,
 )
+
+
+def test_robofactory_import_anchor_rejects_shadowed_utils(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = tmp_path / "RoboFactory"
+    (root / "utils" / "scenes").mkdir(parents=True)
+    (root / "tasks").mkdir()
+    shadow = tmp_path / "site-packages" / "utils"
+    shadow.mkdir(parents=True)
+    module = types.ModuleType("utils")
+    module.__path__ = [str(shadow)]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "utils", module)
+    previous = Path.cwd()
+    try:
+        with pytest.raises(RuntimeError, match="does not include RoboFactory path"):
+            _anchor_robofactory_imports(root)
+    finally:
+        os.chdir(previous)
 
 
 def test_panel_loader_supports_no_hash_metadata_binding(tmp_path: Path):

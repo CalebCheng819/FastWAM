@@ -1,0 +1,167 @@
+{
+  "parent": {
+    "type": "data_source_id",
+    "data_source_id": "7456bae9-0c32-4754-9014-213b1ef8df63"
+  },
+  "properties": {
+    "Name": {
+      "title": [
+        {
+          "text": {
+            "content": "FastWAM GAU0 step-5000 PlaceFood same-panel closed-loop eval"
+          }
+        }
+      ]
+    },
+    "Status": {
+      "status": {
+        "name": "Draft"
+      }
+    },
+    "Project": {
+      "select": {
+        "name": "FastWAM"
+      }
+    },
+    "Mode": {
+      "select": {
+        "name": "exploratory"
+      }
+    },
+    "Experiment ID": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R9-20260814"
+          }
+        }
+      ]
+    },
+    "Hypothesis / Objective": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "Objective: evaluate the archived FastWAM GAU0 step-5000 checkpoint on the exact GAU1 PlaceFood-rf eight-episode panel and compare closed-loop outcomes under the same evaluator contract. Hypothesis: removing compact Gaussian conditioning may change closed-loop PlaceFood performance relative to the GAU1 0/8 baseline while panel, seeds, action decoding, and evaluator settings remain fixed."
+          }
+        }
+      ]
+    },
+    "Acceptance Criterion": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "Priority=7; exactly one DLC job; GAU0 model config enable_gaussian=false; no Gaussian teacher construction; agent_gaussian=None; exact historical panel indices 0-7, policy seeds 10000-10007, environment seeds 333183/333327/333225/333180/333251/333130/333167/333234; eight terminal episode records; infrastructure errors separated from task failures; compare against GAU1 0/8 and disclose normalization provenance difference."
+          }
+        }
+      ]
+    },
+    "Config": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "PlaceFood-rf N=2; action horizon=32; exec horizon=5; max steps=300; diffusion inference steps=20; checkpoint step=5000; FastWAM GAU0; video/action joint checkpoint architecture; hub enabled; Gaussian disabled."
+          }
+        }
+      ]
+    },
+    "Data Version": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "Exact historical GAU1 panel /mnt/workspace/fastwam_eval_runtime/panels/robofactory_n234_s42_val8_v1.json; primary comparison uses exact historical GAU1 evaluator normalization /mnt/workspace/fastwam_eval_runtime/inputs/dataset_stats.step5000.92dfdeec.json. GAU0 training-native 3226-byte stats differ from the 2828-byte evaluator stats and are a declared sensitivity factor."
+          }
+        }
+      ]
+    },
+    "Environment": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "Alibaba PAI DLC cn-beijing, workspace 270969, resource quota quotaksvqq2oh2pg; immutable source snapshot and OSS outputs required; image and direct-byte inventory pending preflight."
+          }
+        }
+      ]
+    },
+    "Hardware": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "Planned Worker 1x8 RTX 4090; eight isolated one-GPU single-episode evaluators run concurrently per arm, with the two eight-episode arms run sequentially (16 evaluator invocations total); DLC Priority=7."
+          }
+        }
+      ]
+    },
+    "Seeds": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "training seed=42; panel task indices=0..7; policy seeds=10000..10007; environment seeds=[333183,333327,333225,333180,333251,333130,333167,333234]."
+          }
+        }
+      ]
+    },
+    "Git Commit": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "base=f89a7a5b7ca0674c78bca5f329398dfa28fb8758; GAU0 training source=dd64664c0a97f1c24c3824159dd8a267120bdd5e; immutable evaluation source commit is supplied and frozen by the prepare reservation"
+          }
+        }
+      ]
+    },
+    "Baseline": {
+      "url": "https://app.notion.com/p/FastWAM-step-5000-multi-robot-PlaceFood-closed-loop-smoke8-3b121e7789cc81179c65d04661996449"
+    },
+    "Estimated Runtime": {
+      "number": 21600
+    }
+  },
+  "children": [
+    {
+      "object": "block",
+      "type": "callout",
+      "callout": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "PRELAUNCH DRAFT: no DLC job has been submitted and no cloud output has been created."
+            }
+          }
+        ],
+        "icon": {
+          "type": "emoji",
+          "emoji": "🧪"
+        }
+      }
+    },
+    {
+      "object": "block",
+      "type": "paragraph",
+      "paragraph": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "Primary matched comparison: GAU0 versus historical GAU1 under the same eight PlaceFood-rf episodes, environment seeds, policy seeds, execution horizon, diffusion steps, and evaluator normalization. This is not an isolated causal Gaussian ablation because checkpoint training lineage and trainable scope differ. A second GAU0 arm using training-native normalization is reported only as sensitivity analysis."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "object": "block",
+      "type": "paragraph",
+      "paragraph": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "Submission gate: code tests pass; no-Gaussian branch proves teacher construction is skipped and agent_gaussian=None; checkpoint, panel, stats, simulator, context, source snapshot, output absence, capacity, exact candidate count, and Priority=7 are all re-read immediately before the one-shot submit."
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
