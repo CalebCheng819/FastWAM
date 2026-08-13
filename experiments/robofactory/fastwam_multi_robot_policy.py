@@ -26,11 +26,15 @@ formal evaluation is launched by this module.
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.machinery
 import io
 import inspect
 import json
 import os
 import re
+import sys
+import types
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -691,6 +695,80 @@ def _activate_legacy_metadata_no_hash_mode(model) -> None:
         raise RuntimeError("Legacy runtime rejected stat_cmp checkpoint loading")
 
 
+def _supports_keyword(callable_object, keyword: str) -> bool:
+    parameters = inspect.signature(callable_object).parameters.values()
+    return any(
+        parameter.name == keyword
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _load_evaluator_metadata_no_hash_teacher():
+    """Load this evaluator's teacher without replacing the model runtime package."""
+
+    package_root = (PROJECT_ROOT / "src/fastwam").resolve(strict=True)
+    namespace = "_fastwam_evaluator_runtime"
+    package = sys.modules.get(namespace)
+    if package is None:
+        package = types.ModuleType(namespace)
+        package.__package__ = namespace
+        package.__path__ = [str(package_root)]
+        package.__spec__ = importlib.machinery.ModuleSpec(
+            namespace,
+            loader=None,
+            is_package=True,
+        )
+        package.__spec__.submodule_search_locations = [str(package_root)]
+        sys.modules[namespace] = package
+    else:
+        roots = tuple(
+            Path(path).expanduser().resolve()
+            for path in getattr(package, "__path__", ())
+        )
+        if roots != (package_root,):
+            raise RuntimeError(
+                "Evaluator teacher namespace is already bound to another source: "
+                f"expected={package_root} actual={roots}"
+            )
+
+    teacher_module = importlib.import_module(
+        f"{namespace}.datasets.gaussian_cache.teacher"
+    )
+    teacher_class = getattr(
+        teacher_module,
+        "ExternalPolicyLightningTeacher",
+        None,
+    )
+    if teacher_class is None:
+        raise RuntimeError("Evaluator teacher class is missing")
+    source = Path(inspect.getfile(teacher_class)).resolve(strict=True)
+    expected_source = package_root / "datasets/gaussian_cache/teacher.py"
+    if source != expected_source:
+        raise RuntimeError(
+            "Evaluator teacher source mismatch: "
+            f"expected={expected_source} actual={source}"
+        )
+    if not _supports_keyword(teacher_class, "integrity_mode"):
+        raise RuntimeError(
+            "Evaluator metadata_no_hash teacher lacks integrity_mode support"
+        )
+    return teacher_class
+
+
+def _select_external_teacher_class(runtime_teacher_class, integrity_mode: str):
+    """Select a teacher implementation while keeping model imports untouched."""
+
+    if _supports_keyword(runtime_teacher_class, "integrity_mode"):
+        return runtime_teacher_class, "runtime_native"
+    if integrity_mode == "metadata_no_hash":
+        return (
+            _load_evaluator_metadata_no_hash_teacher(),
+            "evaluator_isolated_metadata_no_hash",
+        )
+    return runtime_teacher_class, "runtime_legacy_sha256"
+
+
 @contextmanager
 def _model_asset_environment(model_cache_root: str | Path):
     root = Path(model_cache_root).expanduser().resolve(strict=True)
@@ -832,6 +910,13 @@ class FastWAMMultiRobotPolicy:
         )
         from fastwam.runtime import create_multi_robot_fastwam
 
+        ExternalPolicyLightningTeacher, self._teacher_runtime_compatibility = (
+            _select_external_teacher_class(
+                ExternalPolicyLightningTeacher,
+                self.integrity_mode,
+            )
+        )
+
         if self.integrity_mode != "metadata_no_hash":
             model_config = compose_step5000_model_config(self.project_root)
         elif self.action_architecture == "gaussian_spatial_v2":
@@ -882,15 +967,19 @@ class FastWAMMultiRobotPolicy:
                 raise ValueError("R5 evaluator must bind trainable_scope=action")
         self.model.eval()
 
+        teacher_arguments = {
+            "repo_path": policy_lightning_repo,
+            "expected_commit": policy_lightning_commit,
+            "checkpoint_path": noposplat_checkpoint_path,
+            "checkpoint_sha256": noposplat_checkpoint_sha256,
+            "config_path": policy_lightning_config_path,
+            "device": self.device if teacher_device is None else teacher_device,
+            "require_clean_repo": True,
+        }
+        if _supports_keyword(ExternalPolicyLightningTeacher, "integrity_mode"):
+            teacher_arguments["integrity_mode"] = self.integrity_mode
         self.teacher: GaussianTeacher = ExternalPolicyLightningTeacher(
-            repo_path=policy_lightning_repo,
-            expected_commit=policy_lightning_commit,
-            checkpoint_path=noposplat_checkpoint_path,
-            checkpoint_sha256=noposplat_checkpoint_sha256,
-            integrity_mode=self.integrity_mode,
-            config_path=policy_lightning_config_path,
-            device=self.device if teacher_device is None else teacher_device,
-            require_clean_repo=True,
+            **teacher_arguments
         )
         self._prepared: PreparedObservation | None = None
 
@@ -1034,6 +1123,7 @@ class FastWAMMultiRobotPolicy:
             "sigma_shift": self.sigma_shift,
             "seed": self.seed,
             "seed_schedule": "episode_seed_plus_query_index_v1",
+            "teacher_runtime_compatibility": self._teacher_runtime_compatibility,
             "teacher": dict(self.teacher.provenance()),
             "gaussian_pairing": "global_agent_unify_v1",
             "gaussian_compaction": "opacity-aware-moment-matching-cell-mean-alpha-v2",

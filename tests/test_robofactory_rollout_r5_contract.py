@@ -413,6 +413,70 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertIs(adapted, config)
         self.assertEqual(adapted.checkpoint_integrity_mode, "metadata_no_hash")
 
+    def test_metadata_no_hash_keeps_runtime_teacher_with_modern_interface(self) -> None:
+        class ModernTeacher:
+            def __init__(self, *, integrity_mode="sha256"):
+                self.integrity_mode = integrity_mode
+
+        selected, compatibility = policy._select_external_teacher_class(
+            ModernTeacher,
+            "metadata_no_hash",
+        )
+
+        self.assertIs(selected, ModernTeacher)
+        self.assertEqual(compatibility, "runtime_native")
+
+    def test_metadata_no_hash_isolates_evaluator_teacher_from_legacy_runtime(self) -> None:
+        class LegacyTeacher:
+            def __init__(self, *, checkpoint_sha256):
+                self.checkpoint_sha256 = checkpoint_sha256
+
+        class EvaluatorTeacher:
+            def __init__(self, *, integrity_mode="sha256"):
+                self.integrity_mode = integrity_mode
+
+        with mock.patch.object(
+            policy,
+            "_load_evaluator_metadata_no_hash_teacher",
+            return_value=EvaluatorTeacher,
+        ) as loader:
+            selected, compatibility = policy._select_external_teacher_class(
+                LegacyTeacher,
+                "metadata_no_hash",
+            )
+
+        loader.assert_called_once_with()
+        self.assertIs(selected, EvaluatorTeacher)
+        self.assertEqual(
+            compatibility,
+            "evaluator_isolated_metadata_no_hash",
+        )
+
+    def test_sha256_mode_preserves_legacy_runtime_teacher(self) -> None:
+        class LegacyTeacher:
+            def __init__(self, *, checkpoint_sha256):
+                self.checkpoint_sha256 = checkpoint_sha256
+
+        selected, compatibility = policy._select_external_teacher_class(
+            LegacyTeacher,
+            "sha256",
+        )
+
+        self.assertIs(selected, LegacyTeacher)
+        self.assertEqual(compatibility, "runtime_legacy_sha256")
+
+    def test_evaluator_teacher_loader_is_source_pinned_and_no_hash_capable(self) -> None:
+        teacher = policy._load_evaluator_metadata_no_hash_teacher()
+
+        self.assertTrue(policy._supports_keyword(teacher, "integrity_mode"))
+        self.assertEqual(
+            Path(policy.inspect.getfile(teacher)).resolve(),
+            (
+                Path(policy.PROJECT_ROOT)
+                / "src/fastwam/datasets/gaussian_cache/teacher.py"
+            ).resolve(),
+        )
+
     def test_r5_config_alias_matches_b4_contract(self) -> None:
         self.assertEqual(
             policy.compose_r5_action_model_config(),
