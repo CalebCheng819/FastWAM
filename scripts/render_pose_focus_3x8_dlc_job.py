@@ -35,6 +35,7 @@ TASK_PROFILES = (
     "robofactory_placefood_gaussian_spatial_p4_224_5e-6",
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
+    "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
 )
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
@@ -52,12 +53,17 @@ P5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-placefood-semantic-phase-p5-s42-24g-r1-20260814/"
     "checkpoints/weights/step_001000.pt"
 )
+P6_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-spatial-semantic-p6-s42-24g-r1-20260814/"
+    "checkpoints/weights/step_001000.pt"
+)
 SOURCE_WEIGHTS = {
-    TASK_PROFILES[0]: (R5_SOURCE_WEIGHT, "R5-action-step1000-weights-only"),
-    TASK_PROFILES[1]: (R5_SOURCE_WEIGHT, "R5-action-step1000-weights-only"),
-    TASK_PROFILES[2]: (P1_SOURCE_WEIGHT, "P1-pose-focus-step1000-weights-only"),
-    TASK_PROFILES[3]: (P2_SOURCE_WEIGHT, "P2-action-step1000-weights-only"),
-    TASK_PROFILES[4]: (P5_SOURCE_WEIGHT, "P5-action-step1000-weights-only"),
+    TASK_PROFILES[0]: (R5_SOURCE_WEIGHT, 12047407619, "R5-action-step1000-weights-only"),
+    TASK_PROFILES[1]: (R5_SOURCE_WEIGHT, 12047407619, "R5-action-step1000-weights-only"),
+    TASK_PROFILES[2]: (P1_SOURCE_WEIGHT, 12047407619, "P1-pose-focus-step1000-weights-only"),
+    TASK_PROFILES[3]: (P2_SOURCE_WEIGHT, 12047407619, "P2-action-step1000-weights-only"),
+    TASK_PROFILES[4]: (P5_SOURCE_WEIGHT, 12047407619, "P5-action-step1000-weights-only"),
+    TASK_PROFILES[5]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
 }
 OBJECTIVES = {
     TASK_PROFILES[0]: "active-agent-continuous-pose",
@@ -65,6 +71,7 @@ OBJECTIVES = {
     TASK_PROFILES[2]: "robot0-gaussian-spatial-cross-attention",
     TASK_PROFILES[3]: "placefood-task-semantic-phase-sampling",
     TASK_PROFILES[4]: "placefood-spatial-gaussian-semantic-phase",
+    TASK_PROFILES[5]: "placefood-task-conditioned-gaussian-relation",
 }
 
 
@@ -171,7 +178,7 @@ def main() -> int:
     if not HEX40.fullmatch(args.pose_focus_code_commit):
         raise SystemExit("pose_focus-code-commit must be an exact lowercase Git revision")
 
-    source_path, initialization = SOURCE_WEIGHTS[args.task_profile]
+    source_path, source_bytes, initialization = SOURCE_WEIGHTS[args.task_profile]
     if args.source_weight is not None and args.source_weight != source_path:
         raise SystemExit("source-weight does not match the audited task-profile source")
 
@@ -209,7 +216,7 @@ def main() -> int:
         "FASTWAM_POSE_FOCUS_CODE_COMMIT": args.pose_focus_code_commit,
         "FASTWAM_POSE_FOCUS_TASK_PROFILE": args.task_profile,
         "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT": source_path,
-        "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES": "12047407619",
+        "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES": str(source_bytes),
         "FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT": "/tmp/fastwam-pose_focus-source-checkouts",
         "FASTWAM_POSE_FOCUS_PROVENANCE_MODE": "stat_cmp",
         "FASTWAM_POSE_FOCUS_INPUT_CACHE_ROOT": "/tmp/fastwam-pose_focus-input-cache",
@@ -334,7 +341,7 @@ def main() -> int:
         "launcher_payload_base64": payload,
         "source_weight": {
             "path": source_path,
-            "bytes": 12047407619,
+            "bytes": source_bytes,
             "initialization": initialization,
         },
         "pose_focus_provenance_contract": {

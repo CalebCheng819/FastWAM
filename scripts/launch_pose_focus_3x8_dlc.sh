@@ -171,20 +171,27 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6) ;;
   robofactory_placefood_gaussian_spatial_p4_224_5e-6|robofactory_placefood_semantic_phase_p5_224_5e-6) ;;
   robofactory_placefood_spatial_semantic_p6_224_5e-6) ;;
+  robofactory_placefood_task_gaussian_relation_p7_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
 P1_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/checkpoints/weights/step_001000.pt"
 P2_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-phase-x0-r5-s42-24g-r1-20260813/checkpoints/weights/step_001000.pt"
 P5_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-semantic-phase-p5-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
+P6_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-spatial-semantic-p6-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
 CANONICAL_SOURCE="${R5_SOURCE}"
+CANONICAL_SOURCE_BYTES="12047407619"
 case "${TASK_PROFILE}" in
   robofactory_placefood_gaussian_spatial_p4_224_5e-6) CANONICAL_SOURCE="${P1_SOURCE}" ;;
   robofactory_placefood_semantic_phase_p5_224_5e-6) CANONICAL_SOURCE="${P2_SOURCE}" ;;
   robofactory_placefood_spatial_semantic_p6_224_5e-6) CANONICAL_SOURCE="${P5_SOURCE}" ;;
+  robofactory_placefood_task_gaussian_relation_p7_224_5e-6)
+    CANONICAL_SOURCE="${P6_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12047407747"
+    ;;
 esac
 SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-${CANONICAL_SOURCE}}"
-EXPECTED_WEIGHT_BYTES="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES:-12047407619}"
+EXPECTED_WEIGHT_BYTES="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES:-${CANONICAL_SOURCE_BYTES}}"
 
 require_env RUN_ID
 require_env FASTWAM_POSE_FOCUS_ATTEMPT_ID
@@ -237,7 +244,8 @@ fi
 if [[ "${TEST_MODE}" != "1" ]]; then
   [[ "${SOURCE_WEIGHT}" == "${CANONICAL_SOURCE}" ]] || \
     die "production source does not match the audited source for ${TASK_PROFILE}"
-  [[ "${EXPECTED_WEIGHT_BYTES}" == "12047407619" ]] || die "production source byte count must remain 12047407619"
+  [[ "${EXPECTED_WEIGHT_BYTES}" == "${CANONICAL_SOURCE_BYTES}" ]] || \
+    die "production source byte count differs from the audited profile value"
 fi
 [[ "${SOURCE_WEIGHT}" == *.pt ]] || die "source must be a weight .pt file, not a training-state directory"
 [[ "${SOURCE_WEIGHT}" != */checkpoints/state/* ]] || die "32-GPU optimizer/training state is forbidden"
@@ -364,10 +372,15 @@ scale = yaml.safe_load(scale_path.read_text(encoding="utf-8"))
 is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_gaussian_spatial_p4_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
+    "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
 }
+is_gaussian_relation = (
+    task_path.stem == "robofactory_placefood_task_gaussian_relation_p7_224_5e-6"
+)
 is_semantic_phase = task_path.stem in {
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
+    "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -428,6 +441,7 @@ if task_path.stem in {
     "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
+    "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -469,12 +483,20 @@ for label, mapping, expected in (
         if actual != wanted:
             raise SystemExit(f"{label} profile drift at {key}: expected {wanted!r}, got {actual!r}")
 if is_gaussian_spatial:
-    gaussian_expected = {
-        "weights_only_warm_start.architecture_upgrade": "gaussian_spatial_v2_from_pooled_v1",
-        "model.action_dit_config.gaussian_conditioning_mode": "spatial_cross_attention",
-        "model.action_dit_config.gaussian_residual_floor": 0.1,
-        "model.action_dit_config.gaussian_attention_temperature": 0.1,
-    }
+    if is_gaussian_relation:
+        gaussian_expected = {
+            "weights_only_warm_start.architecture_upgrade": "gaussian_relation_v3_from_spatial_v2",
+            "model.action_dit_config.gaussian_conditioning_mode": "task_conditioned_relation_attention",
+            "model.action_dit_config.gaussian_residual_floor": 0.1,
+            "model.action_dit_config.gaussian_relation_num_heads": 8,
+        }
+    else:
+        gaussian_expected = {
+            "weights_only_warm_start.architecture_upgrade": "gaussian_spatial_v2_from_pooled_v1",
+            "model.action_dit_config.gaussian_conditioning_mode": "spatial_cross_attention",
+            "model.action_dit_config.gaussian_residual_floor": 0.1,
+            "model.action_dit_config.gaussian_attention_temperature": 0.1,
+        }
     for key, wanted in gaussian_expected.items():
         try:
             actual = value_at(task, key)
@@ -484,11 +506,14 @@ if is_gaussian_spatial:
             raise SystemExit(
                 f"Gaussian spatial profile drift at {key}: expected {wanted!r}, got {actual!r}"
             )
-    expected_parent = (
-        "robofactory_placefood_semantic_phase_p5_224_5e-6"
-        if is_semantic_phase
-        else "robofactory_placefood_pose_focus_r5_224_5e-6"
-    )
+    if is_gaussian_relation:
+        expected_parent = "robofactory_placefood_spatial_semantic_p6_224_5e-6"
+    else:
+        expected_parent = (
+            "robofactory_placefood_semantic_phase_p5_224_5e-6"
+            if is_semantic_phase
+            else "robofactory_placefood_pose_focus_r5_224_5e-6"
+        )
 else:
     expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
 defaults = task.get("defaults", [])
