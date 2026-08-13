@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persistent, fail-closed launcher for the POSE_FOCUS 1x8 or 3x8 GPU treatment.
+# Persistent, fail-closed launcher for the POSE_FOCUS 1x4, 1x8, or 3x8 treatment.
 # The outer DLC command runs once per worker. It stages an audited source weight before
-# spawning the eight local Accelerate ranks, so every child reads node-local
+# spawning the requested local Accelerate ranks, so every child reads node-local
 # storage and no rank can accidentally restore the old 32-GPU optimizer state.
 
 die() {
@@ -45,7 +45,7 @@ require_env FASTWAM_POSE_FOCUS_ATTEMPT_ID
 
 # PAI injects node topology through these names.  Preserve the outer worker
 # values before any helper can mutate the environment; they are deliberately
-# removed immediately before Accelerate creates its own 24-rank world.
+# removed immediately before Accelerate creates its own GPU-process world.
 NUM_MACHINES="${WORLD_SIZE:-}"
 MACHINE_RANK="${RANK:-}"
 GPUS_PER_NODE="${NPROC_PER_NODE:-}"
@@ -171,6 +171,7 @@ PYTHON_BIN="${FASTWAM_POSE_FOCUS_PYTHON:-}"
 DRY_RUN="${FASTWAM_POSE_FOCUS_DRY_RUN:-0}"
 TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focus_r5_224_5e-6}"
 EXPECTED_POD_COUNT="${FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT:-3}"
+EXPECTED_GPUS_PER_NODE="${FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_NODE:-8}"
 case "${TASK_PROFILE}" in
   robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6|robofactory_placefood_gaussian_spatial_p4_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
@@ -192,9 +193,14 @@ printf 'POSE_FOCUS runtime provenance binding: FASTWAM_B4_ATTEMPT_ID=%s\n' "${FA
 
 [[ "${EXPECTED_POD_COUNT}" == "1" || "${EXPECTED_POD_COUNT}" == "3" ]] || \
   die "FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT must be 1 or 3"
+[[ "${EXPECTED_GPUS_PER_NODE}" == "4" || "${EXPECTED_GPUS_PER_NODE}" == "8" ]] || \
+  die "FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_NODE must be 4 or 8"
 [[ "${NUM_MACHINES}" == "${EXPECTED_POD_COUNT}" ]] || \
   die "WORLD_SIZE must match expected DLC worker count ${EXPECTED_POD_COUNT}, got ${NUM_MACHINES:-unset}"
-[[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
+[[ "${GPUS_PER_NODE}" == "${EXPECTED_GPUS_PER_NODE}" ]] || \
+  die "NPROC_PER_NODE must match expected GPU count ${EXPECTED_GPUS_PER_NODE}, got ${GPUS_PER_NODE:-unset}"
+[[ "${EXPECTED_POD_COUNT}:${EXPECTED_GPUS_PER_NODE}" != "3:4" ]] || \
+  die "3x4 is not an audited POSE_FOCUS topology"
 is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer, got ${MACHINE_RANK:-unset}"
 ((10#${MACHINE_RANK} < 10#${NUM_MACHINES})) || \
   die "RANK must be below WORLD_SIZE=${NUM_MACHINES}, got ${MACHINE_RANK}"
@@ -203,7 +209,10 @@ is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a non-loopback addr
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || die "MASTER_PORT must be in [1,65535]"
 GLOBAL_WORLD_SIZE=$((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE}))
-if [[ "${EXPECTED_POD_COUNT}" == "1" ]]; then
+if [[ "${EXPECTED_POD_COUNT}:${EXPECTED_GPUS_PER_NODE}" == "1:4" ]]; then
+  SCALE_PROFILE="robofactory_multi_robot_4gpu_pose_focus_accum6"
+  EXPECTED_GRADIENT_ACCUMULATION_STEPS=6
+elif [[ "${EXPECTED_POD_COUNT}" == "1" ]]; then
   SCALE_PROFILE="robofactory_multi_robot_8gpu_pose_focus_accum3"
   EXPECTED_GRADIENT_ACCUMULATION_STEPS=3
 else
@@ -519,7 +528,7 @@ fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
 workers=${NUM_MACHINES}
-gpus_per_worker=8
+gpus_per_worker=${GPUS_PER_NODE}
 global_world_size=${GLOBAL_WORLD_SIZE}
 gradient_accumulation_steps=${EXPECTED_GRADIENT_ACCUMULATION_STEPS}
 effective_rank_accumulation_product=24
@@ -532,7 +541,8 @@ stage_steps=1000
 
 if [[ "${DRY_RUN}" == "0" ]]; then
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"
-  [[ "${gpu_count}" == "8" ]] || die "each worker must expose exactly 8 GPUs, observed ${gpu_count:-0}"
+  [[ "${gpu_count}" == "${GPUS_PER_NODE}" ]] || \
+    die "each worker must expose exactly ${GPUS_PER_NODE} GPUs, observed ${gpu_count:-0}"
 
   if [[ "${MACHINE_RANK}" == "0" ]]; then
     [[ ! -e "${OUTPUT_DIR}" ]] || die "output already exists; RUN_ID is not unique: ${OUTPUT_DIR}"

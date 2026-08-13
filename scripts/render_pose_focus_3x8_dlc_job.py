@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC job for POSE_FOCUS 1x8 or 3x8."""
+"""Render, but never submit, a PAI DLC job for POSE_FOCUS 1x4, 1x8, or 3x8."""
 
 from __future__ import annotations
 
@@ -75,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-running-minutes", type=int, default=10080)
     parser.add_argument("--pod-count", type=int, choices=(1, 3), default=3)
+    parser.add_argument("--gpus-per-pod", type=int, choices=(4, 8), default=8)
     parser.add_argument(
         "--allow-local-bundle-for-tests",
         action="store_true",
@@ -136,6 +137,8 @@ def main() -> int:
         raise SystemExit("run-id and attempt-id must be safe unique identifiers")
     if args.max_running_minutes <= 0:
         raise SystemExit("max-running-minutes must be positive")
+    if args.pod_count == 3 and args.gpus_per_pod != 8:
+        raise SystemExit("3x4 is not an audited POSE_FOCUS topology")
     for name in ("bootstrap_script", "offline_env_source_root", "offline_env_manifest"):
         if not getattr(args, name).startswith("/oss-chengjuntao/"):
             raise SystemExit(f"{name.replace('_', '-')} must be below /oss-chengjuntao/")
@@ -193,6 +196,7 @@ def main() -> int:
         "FASTWAM_POSE_FOCUS_CODE_COMMIT": args.pose_focus_code_commit,
         "FASTWAM_POSE_FOCUS_TASK_PROFILE": args.task_profile,
         "FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT": str(args.pod_count),
+        "FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_NODE": str(args.gpus_per_pod),
         "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT": args.source_weight,
         "FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES": str(source_weight["bytes"]),
         "FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT": "/tmp/fastwam-pose_focus-source-checkouts",
@@ -236,7 +240,7 @@ def main() -> int:
         "NCCL_IB_HCA": "erdma",
         "NCCL_DEBUG": "INFO",
         "NCCL_DEBUG_SUBSYS": "INIT,NET",
-        "NPROC_PER_NODE": "8",
+        "NPROC_PER_NODE": str(args.gpus_per_pod),
     }
     request = {
         "Accessibility": "PRIVATE",
@@ -255,7 +259,8 @@ def main() -> int:
         ],
         "Description": (
             "PlaceFood R5 action-only treatment: "
-            f"{args.task_profile}, {args.pod_count} workers x 8 GPUs, 1000 steps"
+            f"{args.task_profile}, {args.pod_count} workers x "
+            f"{args.gpus_per_pod} GPUs, 1000 steps"
         ),
         "DisplayName": args.run_id,
         "Envs": envs,
@@ -267,10 +272,10 @@ def main() -> int:
                 "LocalMountSpecs": [],
                 "PodCount": args.pod_count,
                 "ResourceConfig": {
-                    "CPU": "126",
-                    "GPU": "8",
-                    "Memory": "960Gi",
-                    "SharedMemory": "960Gi",
+                    "CPU": "63" if args.gpus_per_pod == 4 else "126",
+                    "GPU": str(args.gpus_per_pod),
+                    "Memory": "480Gi" if args.gpus_per_pod == 4 else "960Gi",
+                    "SharedMemory": "480Gi" if args.gpus_per_pod == 4 else "960Gi",
                 },
                 "RestartPolicy": "Never",
                 "StartupDependencies": [],
@@ -303,7 +308,13 @@ def main() -> int:
                 ),
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": (
-                    "1x8-world8-accum3" if args.pod_count == 1 else "3x8-world24-accum1"
+                    "1x4-world4-accum6"
+                    if args.gpus_per_pod == 4
+                    else (
+                        "1x8-world8-accum3"
+                        if args.pod_count == 1
+                        else "3x8-world24-accum1"
+                    )
                 ),
             },
         },

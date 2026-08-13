@@ -19,6 +19,7 @@ P2_TASK_NAME = "robofactory_placefood_pose_phase_x0_r5_224_5e-6.yaml"
 P4_TASK_NAME = "robofactory_placefood_gaussian_spatial_p4_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
 SCALE_8GPU_NAME = "robofactory_multi_robot_8gpu_pose_focus_accum3.yaml"
+SCALE_4GPU_NAME = "robofactory_multi_robot_4gpu_pose_focus_accum6.yaml"
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
     "fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -56,6 +57,9 @@ class PoseFocusLauncherTests(unittest.TestCase):
         )
         (repo / "configs" / "scale" / SCALE_8GPU_NAME).write_bytes(
             (REPO / "configs" / "scale" / SCALE_8GPU_NAME).read_bytes()
+        )
+        (repo / "configs" / "scale" / SCALE_4GPU_NAME).write_bytes(
+            (REPO / "configs" / "scale" / SCALE_4GPU_NAME).read_bytes()
         )
         (repo / "src" / "fastwam").mkdir(parents=True)
         (repo / "src" / "fastwam" / "__init__.py").write_text(
@@ -229,6 +233,35 @@ class PoseFocusLauncherTests(unittest.TestCase):
             self.assertIn("--num_processes 8", result.stdout)
             self.assertIn(
                 "+scale=robofactory_multi_robot_8gpu_pose_focus_accum3",
+                result.stdout,
+            )
+
+    def test_dry_run_resolves_four_gpu_effective_batch24_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env.update(
+                {
+                    "FASTWAM_POSE_FOCUS_TASK_PROFILE": P4_TASK_NAME.removesuffix(".yaml"),
+                    "FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT": "1",
+                    "FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_NODE": "4",
+                    "WORLD_SIZE": "1",
+                    "NPROC_PER_NODE": "4",
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--num_machines 1", result.stdout)
+            self.assertIn("--num_processes 4", result.stdout)
+            self.assertIn(
+                "+scale=robofactory_multi_robot_4gpu_pose_focus_accum6",
                 result.stdout,
             )
 
@@ -474,6 +507,98 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 request["Envs"]["FASTWAM_POSE_FOCUS_EXPECTED_POD_COUNT"], "1"
             )
             self.assertEqual(request["Settings"]["Tags"]["topology"], "1x8-world8-accum3")
+
+    def test_renderer_supports_priority7_four_gpu_accum6_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-gaussian-spatial-p4-4g-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--task-profile",
+                P4_TASK_NAME.removesuffix(".yaml"),
+                "--source-weight",
+                P1_SOURCE_WEIGHT,
+                "--pod-count",
+                "1",
+                "--gpus-per-pod",
+                "4",
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(output.read_text(encoding="utf-8"))["request"]
+            self.assertEqual(request["Priority"], 7)
+            self.assertEqual(request["JobSpecs"][0]["PodCount"], 1)
+            self.assertEqual(request["JobSpecs"][0]["ResourceConfig"]["GPU"], "4")
+            self.assertEqual(request["Envs"]["NPROC_PER_NODE"], "4")
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_NODE"], "4"
+            )
+            self.assertEqual(request["Settings"]["Tags"]["topology"], "1x4-world4-accum6")
+
+    def test_renderer_rejects_unaudited_three_by_four_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-gaussian-spatial-p4-3x4-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--pod-count",
+                "3",
+                "--gpus-per-pod",
+                "4",
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("3x4 is not an audited POSE_FOCUS topology", result.stderr)
 
 
 if __name__ == "__main__":
