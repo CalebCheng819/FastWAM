@@ -1,16 +1,51 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from experiments.robofactory import diagnose_place_food_fixed as diagnostic
 from experiments.robofactory import run_fixed_policy_closedloop_panel as panel_runner
 
 
 class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
+    def test_jsonl_append_falls_back_when_append_write_is_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+            diagnostic._append_jsonl(path, {"step": 1})
+
+            with mock.patch.object(
+                diagnostic.os,
+                "write",
+                side_effect=OSError(errno.EINVAL, "unsupported append"),
+            ):
+                diagnostic._append_jsonl(path, {"step": 2})
+
+            self.assertEqual(
+                [json.loads(line) for line in path.read_text().splitlines()],
+                [{"step": 1}, {"step": 2}],
+            )
+
+    def test_jsonl_append_accepts_unsupported_fsync_without_duplication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.jsonl"
+
+            with mock.patch.object(
+                diagnostic.os,
+                "fsync",
+                side_effect=OSError(errno.EINVAL, "unsupported fsync"),
+            ):
+                diagnostic._append_jsonl(path, {"step": 1})
+
+            self.assertEqual(
+                [json.loads(line) for line in path.read_text().splitlines()],
+                [{"step": 1}],
+            )
+
     def test_python_executable_preserves_virtualenv_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

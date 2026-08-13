@@ -10,6 +10,7 @@ policy by teacher forcing over the episode's stored expert states.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import math
 import os
@@ -266,12 +267,51 @@ def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
         )
         + "\n"
     ).encode()
-    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.write(descriptor, encoded)
-        os.fsync(descriptor)
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+    except OSError as error:
+        if error.errno != errno.EINVAL:
+            raise
+        _atomic_append_bytes(path, encoded)
+        return
+
+    written = 0
+    try:
+        while written < len(encoded):
+            try:
+                count = os.write(descriptor, encoded[written:])
+            except OSError as error:
+                if error.errno != errno.EINVAL:
+                    raise
+                break
+            if count <= 0:
+                raise OSError("JSONL append made no progress")
+            written += count
+        if written == len(encoded):
+            try:
+                os.fsync(descriptor)
+            except OSError as error:
+                if error.errno != errno.EINVAL:
+                    raise
     finally:
         os.close(descriptor)
+
+    if written < len(encoded):
+        _atomic_append_bytes(path, encoded[written:])
+
+
+def _atomic_append_bytes(path: Path, payload: bytes) -> None:
+    temporary = path.parent / f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    try:
+        with temporary.open("wb") as destination:
+            if path.exists():
+                with path.open("rb") as source:
+                    shutil.copyfileobj(source, destination)
+            destination.write(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _validate_video(path: Path, *, expected_frames: int) -> dict[str, Any]:
