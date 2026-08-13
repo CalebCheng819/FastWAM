@@ -160,6 +160,15 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
 
                 self.assertEqual(target_action_budget, 1920)
 
+    def test_panel_cli_accepts_intermediate_horizons(self) -> None:
+        horizon_action = next(
+            action
+            for action in panel_runner._parser()._actions
+            if action.dest == "exec_horizon"
+        )
+
+        self.assertEqual(tuple(horizon_action.choices), (1, 5, 16, 20, 24, 32))
+
     def test_panel_official_topp_contract_rejects_unequal_h5_budget(self) -> None:
         with self.assertRaisesRegex(ValueError, r"\(384, 30000\)"):
             panel_runner._validate_control_contract("official_topp", 5, 60, 30000)

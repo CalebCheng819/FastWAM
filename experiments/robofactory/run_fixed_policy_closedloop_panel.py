@@ -579,7 +579,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--nvidia-driver-lib-dir", type=Path, required=True)
     parser.add_argument("--nvidia-vulkan-icd", type=Path, required=True)
     parser.add_argument("--nvidia-egl-vendor-json", type=Path, required=True)
-    parser.add_argument("--exec-horizon", type=int, choices=(1, 5, 32), default=5)
+    parser.add_argument(
+        "--exec-horizon", type=int, choices=(1, 5, 16, 20, 24, 32), default=5
+    )
     parser.add_argument(
         "--control-adapter",
         choices=("direct", "official_topp"),
