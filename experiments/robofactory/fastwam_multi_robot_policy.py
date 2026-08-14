@@ -94,6 +94,7 @@ _STATE_DIMENSION = 18
 _NATIVE_RGB_SIZE = (240, 320)
 _MODEL_RGB_SIZE = (224, 320)
 _COMPACT_GAUSSIAN_SHAPE = (13, 28, 40)
+_METRIC_GAUSSIAN_SHAPE = (13, 60, 80)
 
 
 class GaussianTeacher(Protocol):
@@ -136,6 +137,7 @@ class PreparedObservation:
     agent_states: torch.Tensor
     agent_geometry: torch.Tensor
     agent_ids: torch.Tensor
+    metric_agent_gaussian: torch.Tensor | None = None
 
 
 def sha256_file(path: str | Path) -> str:
@@ -502,6 +504,7 @@ def prepare_observation(
     stats: NormalizationStats,
     *,
     allowed_agent_counts: Sequence[int] = (2, 3, 4),
+    gaussian_source: str = "noposplat",
 ) -> PreparedObservation:
     agent_names = ordered_agent_names(observation)
     allowed = {int(count) for count in allowed_agent_counts}
@@ -523,6 +526,34 @@ def prepare_observation(
         agent_names,
         stats,
     )
+    source = str(gaussian_source).strip().lower()
+    if source not in {"noposplat", "metric_geometry"}:
+        raise ValueError(
+            "gaussian_source must be 'noposplat' or 'metric_geometry', "
+            f"got {gaussian_source!r}"
+        )
+    metric_agent_gaussian = None
+    if source == "metric_geometry":
+        from fastwam.datasets.metric_geometry import encode_metric_agent_geometry
+
+        metric_agent_gaussian = encode_metric_agent_geometry(
+            observation,
+            tuple(
+                f"head_camera_agent{agent_id}"
+                for agent_id in range(len(agent_names))
+            ),
+            output_size=_METRIC_GAUSSIAN_SHAPE[1:],
+        )
+        expected_metric_shape = (len(agent_names), *_METRIC_GAUSSIAN_SHAPE)
+        if (
+            tuple(metric_agent_gaussian.shape) != expected_metric_shape
+            or metric_agent_gaussian.dtype != torch.float16
+        ):
+            raise ValueError(
+                f"Metric geometry must be FP16 {expected_metric_shape}, got "
+                f"shape={tuple(metric_agent_gaussian.shape)} "
+                f"dtype={metric_agent_gaussian.dtype}"
+            )
     return PreparedObservation(
         agent_names=agent_names,
         global_rgb=global_rgb,
@@ -530,6 +561,7 @@ def prepare_observation(
         agent_states=states,
         agent_geometry=geometry,
         agent_ids=ids,
+        metric_agent_gaussian=metric_agent_gaussian,
     )
 
 
@@ -662,6 +694,17 @@ def compose_gaussian_spatial_action_model_config(
     return config
 
 
+def compose_metric_gaussian_action_model_config(
+    project_root: str | Path = PROJECT_ROOT,
+):
+    """Resolve the P13 metric-geometry spatial-Gaussian architecture."""
+
+    config = compose_gaussian_spatial_action_model_config(project_root)
+    config.action_dit_config.gaussian_height = _METRIC_GAUSSIAN_SHAPE[1]
+    config.action_dit_config.gaussian_width = _METRIC_GAUSSIAN_SHAPE[2]
+    return config
+
+
 def compose_task_conditioned_relation_action_model_config(
     project_root: str | Path = PROJECT_ROOT,
 ):
@@ -676,7 +719,7 @@ def compose_task_conditioned_relation_action_model_config(
 
 
 def _validate_gaussian_action_contract(action_expert: Any, architecture: str) -> None:
-    if architecture == "gaussian_spatial_v2":
+    if architecture in {"gaussian_spatial_v2", "metric_gaussian_v5"}:
         observed = {
             "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
             "residual_floor": getattr(action_expert, "gaussian_residual_floor", None),
@@ -686,12 +729,28 @@ def _validate_gaussian_action_contract(action_expert: Any, architecture: str) ->
                 None,
             ),
         }
+        if architecture == "metric_gaussian_v5":
+            observed.update(
+                {
+                    "height": getattr(action_expert, "gaussian_height", None),
+                    "width": getattr(action_expert, "gaussian_width", None),
+                }
+            )
         expected = {
             "mode": "spatial_cross_attention",
             "residual_floor": 0.1,
             "attention_temperature": 0.1,
         }
-        label = "P4/P6 spatial-Gaussian"
+        if architecture == "metric_gaussian_v5":
+            expected.update(
+                {
+                    "height": _METRIC_GAUSSIAN_SHAPE[1],
+                    "width": _METRIC_GAUSSIAN_SHAPE[2],
+                }
+            )
+            label = "P13 metric-geometry spatial-Gaussian"
+        else:
+            label = "P4/P6 spatial-Gaussian"
     elif architecture == "task_conditioned_relation_v3":
         observed = {
             "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
@@ -882,8 +941,8 @@ class FastWAMMultiRobotPolicy:
         context_cache_dir: str | Path | None,
         task_name: str,
         model_cache_root: str | Path,
-        policy_lightning_repo: str | Path,
-        noposplat_checkpoint_path: str | Path,
+        policy_lightning_repo: str | Path | None,
+        noposplat_checkpoint_path: str | Path | None,
         device: str | torch.device = "cuda:0",
         teacher_device: str | torch.device | None = None,
         model_dtype: torch.dtype = torch.bfloat16,
@@ -903,11 +962,18 @@ class FastWAMMultiRobotPolicy:
         allowed_agent_counts: Sequence[int] = (2, 3, 4),
         project_root: str | Path = PROJECT_ROOT,
         action_architecture: str = "pooled_v1",
+        gaussian_source: str = "noposplat",
     ) -> None:
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve(strict=True)
         if not self.checkpoint_path.is_file():
             raise FileNotFoundError(
                 f"FastWAM checkpoint is not a regular file: {self.checkpoint_path}"
+            )
+        self.gaussian_source = str(gaussian_source).strip().lower()
+        if self.gaussian_source not in {"noposplat", "metric_geometry"}:
+            raise ValueError(
+                "gaussian_source must be 'noposplat' or 'metric_geometry', "
+                f"got {gaussian_source!r}"
             )
         if integrity_mode not in {"sha256", "metadata_no_hash"}:
             raise ValueError(f"Unsupported policy integrity_mode: {integrity_mode!r}")
@@ -925,7 +991,10 @@ class FastWAMMultiRobotPolicy:
                 raise ValueError(
                     "checkpoint_sha256 must be omitted in metadata_no_hash mode"
                 )
-            if noposplat_checkpoint_sha256 is not None:
+            if (
+                self.gaussian_source == "noposplat"
+                and noposplat_checkpoint_sha256 is not None
+            ):
                 raise ValueError(
                     "noposplat_checkpoint_sha256 must be omitted in metadata_no_hash mode"
                 )
@@ -975,12 +1044,34 @@ class FastWAMMultiRobotPolicy:
             "pooled_v1",
             "gaussian_spatial_v2",
             "task_conditioned_relation_v3",
+            "metric_gaussian_v5",
         }
         if self.action_architecture not in supported_action_architectures:
             raise ValueError(
                 "action_architecture must be one of "
                 f"{sorted(supported_action_architectures)}, "
                 f"got {self.action_architecture!r}"
+            )
+        if self.gaussian_source == "metric_geometry":
+            if self.integrity_mode != "metadata_no_hash":
+                raise ValueError(
+                    "metric_geometry requires metadata_no_hash evaluation mode"
+                )
+            if self.action_architecture != "metric_gaussian_v5":
+                raise ValueError(
+                    "metric_geometry requires action_architecture='metric_gaussian_v5'"
+                )
+            if policy_lightning_repo is not None or noposplat_checkpoint_path is not None:
+                raise ValueError(
+                    "metric_geometry does not use Policy-Lightning or a NoPoSplat checkpoint"
+                )
+            if noposplat_checkpoint_sha256 is not None:
+                raise ValueError(
+                    "metric_geometry does not accept noposplat_checkpoint_sha256"
+                )
+        elif policy_lightning_repo is None or noposplat_checkpoint_path is None:
+            raise ValueError(
+                "noposplat requires policy_lightning_repo and noposplat_checkpoint_path"
             )
         if (
             self.integrity_mode != "metadata_no_hash"
@@ -992,17 +1083,7 @@ class FastWAMMultiRobotPolicy:
             )
 
         from hydra.utils import instantiate
-        from fastwam.datasets.gaussian_cache.teacher import (
-            ExternalPolicyLightningTeacher,
-        )
         from fastwam.runtime import create_multi_robot_fastwam
-
-        ExternalPolicyLightningTeacher, self._teacher_runtime_compatibility = (
-            _select_external_teacher_class(
-                ExternalPolicyLightningTeacher,
-                self.integrity_mode,
-            )
-        )
 
         if self.integrity_mode != "metadata_no_hash":
             model_config = compose_step5000_model_config(self.project_root)
@@ -1012,6 +1093,10 @@ class FastWAMMultiRobotPolicy:
             )
         elif self.action_architecture == "task_conditioned_relation_v3":
             model_config = compose_task_conditioned_relation_action_model_config(
+                self.project_root
+            )
+        elif self.action_architecture == "metric_gaussian_v5":
+            model_config = compose_metric_gaussian_action_model_config(
                 self.project_root
             )
         else:
@@ -1062,20 +1147,32 @@ class FastWAMMultiRobotPolicy:
                 raise ValueError("R5 evaluator must bind trainable_scope=action")
         self.model.eval()
 
-        teacher_arguments = {
-            "repo_path": policy_lightning_repo,
-            "expected_commit": policy_lightning_commit,
-            "checkpoint_path": noposplat_checkpoint_path,
-            "checkpoint_sha256": noposplat_checkpoint_sha256,
-            "config_path": policy_lightning_config_path,
-            "device": self.device if teacher_device is None else teacher_device,
-            "require_clean_repo": True,
-        }
-        if _supports_keyword(ExternalPolicyLightningTeacher, "integrity_mode"):
-            teacher_arguments["integrity_mode"] = self.integrity_mode
-        self.teacher: GaussianTeacher = ExternalPolicyLightningTeacher(
-            **teacher_arguments
-        )
+        self.teacher: GaussianTeacher | None = None
+        if self.gaussian_source == "noposplat":
+            from fastwam.datasets.gaussian_cache.teacher import (
+                ExternalPolicyLightningTeacher,
+            )
+
+            ExternalPolicyLightningTeacher, self._teacher_runtime_compatibility = (
+                _select_external_teacher_class(
+                    ExternalPolicyLightningTeacher,
+                    self.integrity_mode,
+                )
+            )
+            teacher_arguments = {
+                "repo_path": policy_lightning_repo,
+                "expected_commit": policy_lightning_commit,
+                "checkpoint_path": noposplat_checkpoint_path,
+                "checkpoint_sha256": noposplat_checkpoint_sha256,
+                "config_path": policy_lightning_config_path,
+                "device": self.device if teacher_device is None else teacher_device,
+                "require_clean_repo": True,
+            }
+            if _supports_keyword(ExternalPolicyLightningTeacher, "integrity_mode"):
+                teacher_arguments["integrity_mode"] = self.integrity_mode
+            self.teacher = ExternalPolicyLightningTeacher(**teacher_arguments)
+        else:
+            self._teacher_runtime_compatibility = "not_used_metric_geometry"
         self._prepared: PreparedObservation | None = None
 
     def reset(self) -> None:
@@ -1110,6 +1207,7 @@ class FastWAMMultiRobotPolicy:
             env_state,
             self.stats,
             allowed_agent_counts=self.allowed_agent_counts,
+            gaussian_source=self.gaussian_source,
         )
 
     def record_action(self, action: np.ndarray | torch.Tensor) -> None:
@@ -1143,7 +1241,14 @@ class FastWAMMultiRobotPolicy:
 
         if self._prepared is None:
             raise RuntimeError("No observation is recorded; call update_obs first")
-        agent_gaussian = encode_compact_agent_gaussian(self.teacher, self._prepared)
+        if self.gaussian_source == "metric_geometry":
+            agent_gaussian = self._prepared.metric_agent_gaussian
+            if agent_gaussian is None:
+                raise RuntimeError("Prepared observation lacks metric geometry")
+        else:
+            if self.teacher is None:
+                raise RuntimeError("NoPoSplat Gaussian teacher is not initialized")
+            agent_gaussian = encode_compact_agent_gaussian(self.teacher, self._prepared)
         query_index = int(self._query_index)
         inference_seed = (
             None
@@ -1207,6 +1312,7 @@ class FastWAMMultiRobotPolicy:
             ),
             "integrity_mode": self.integrity_mode,
             "action_architecture": self.action_architecture,
+            "gaussian_source": self.gaussian_source,
             "model_project_root": str(self.project_root),
             "checkpoint_path": str(self.checkpoint_path),
             "normalization_path": str(self.stats.path),
@@ -1219,10 +1325,27 @@ class FastWAMMultiRobotPolicy:
             "seed": self.seed,
             "seed_schedule": "episode_seed_plus_query_index_v1",
             "teacher_runtime_compatibility": self._teacher_runtime_compatibility,
-            "teacher": dict(self.teacher.provenance()),
-            "gaussian_pairing": "global_agent_unify_v1",
-            "gaussian_compaction": "opacity-aware-moment-matching-cell-mean-alpha-v2",
         }
+        if self.gaussian_source == "noposplat":
+            if self.teacher is None:
+                raise RuntimeError("NoPoSplat Gaussian teacher is not initialized")
+            payload.update(
+                {
+                    "teacher": dict(self.teacher.provenance()),
+                    "gaussian_pairing": "global_agent_unify_v1",
+                    "gaussian_compaction": "opacity-aware-moment-matching-cell-mean-alpha-v2",
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "metric_geometry_contract": "maniskill-calibrated-depth-world-v1",
+                    "metric_geometry_channels": "world_xyz_covariance9_valid",
+                    "metric_geometry_shape": list(_METRIC_GAUSSIAN_SHAPE),
+                    "metric_geometry_max_depth_m": 3.0,
+                    "metric_geometry_surface_band_m": 0.03,
+                }
+            )
         if self.integrity_mode == "sha256":
             payload.update(
                 {
@@ -1259,6 +1382,7 @@ __all__ = [
     "compose_r5_action_model_config",
     "compose_b4_action_model_config",
     "compose_gaussian_spatial_action_model_config",
+    "compose_metric_gaussian_action_model_config",
     "compose_task_conditioned_relation_action_model_config",
     "denormalize_and_flatten_actions",
     "encode_compact_agent_gaussian",

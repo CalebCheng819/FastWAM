@@ -133,6 +133,51 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
         self.assertIn("--formal-contract", command)
         self.assertEqual(command.count("metadata_no_hash"), 1)
 
+    def test_metric_rollout_command_omits_noposplat_teacher(self) -> None:
+        contract = {
+            "python": "/python",
+            "diagnostic": "/source/diagnostic.py",
+            "task": "PlaceFood-rf",
+            "panel": "/panel.json",
+            "dataset_root": "/dataset",
+            "robofactory_root": "/robofactory",
+            "gaussian_cache": "/gaussian",
+            "checkpoint": {"path": "/checkpoint.pt"},
+            "training_code_commit": "train-commit",
+            "evaluation_code_commit": "eval-commit",
+            "model_project_root": "/model-project",
+            "action_architecture": "metric_gaussian_v5",
+            "gaussian_source": "metric_geometry",
+            "stats": "/stats.json",
+            "context_file": "/context.pt",
+            "model_cache_root": "/model-cache",
+            "policy_lightning_repo": None,
+            "noposplat_checkpoint": None,
+            "max_steps": 300,
+            "initial_state": "raw",
+            "exec_horizon": 5,
+            "control_adapter": "direct",
+            "topp_step": 0.05,
+            "max_policy_queries": 300,
+            "max_simulator_steps": 300,
+            "action_horizon": 32,
+            "num_inference_steps": 20,
+        }
+
+        command = panel_runner._run_command(
+            contract,
+            {"episode_start": 0, "policy_seed": 10000},
+            Path("/output"),
+        )
+
+        self.assertEqual(
+            panel_runner._argv_value(command, "--gaussian-source"),
+            "metric_geometry",
+        )
+        self.assertNotIn("--policy-lightning-repo", command)
+        self.assertNotIn("--noposplat-checkpoint", command)
+        self.assertNotIn("None", command)
+
     def test_run_id_tracks_exec_horizon(self) -> None:
         identity = panel_runner.run_id(
             {
@@ -208,6 +253,18 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
         )
 
         self.assertIn("task_conditioned_relation_v3", architecture_action.choices)
+
+    def test_panel_cli_accepts_metric_geometry_architecture(self) -> None:
+        parser = panel_runner._parser()
+        architecture_action = next(
+            action for action in parser._actions if action.dest == "action_architecture"
+        )
+        source_action = next(
+            action for action in parser._actions if action.dest == "gaussian_source"
+        )
+
+        self.assertIn("metric_gaussian_v5", architecture_action.choices)
+        self.assertIn("metric_geometry", source_action.choices)
 
     def test_completed_output_checks_frozen_checkpoint_and_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

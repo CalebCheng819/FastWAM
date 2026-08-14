@@ -156,6 +156,29 @@ def build_contract(args: argparse.Namespace) -> dict[str, Any]:
     model_project_root = _directory(
         args.model_project_root, label="model project root"
     )
+    gaussian_source = str(args.gaussian_source)
+    if gaussian_source == "metric_geometry":
+        if args.action_architecture != "metric_gaussian_v5":
+            raise ValueError(
+                "metric_geometry requires action_architecture=metric_gaussian_v5"
+            )
+        if args.policy_lightning_repo is not None or args.noposplat_checkpoint is not None:
+            raise ValueError(
+                "metric_geometry does not use Policy-Lightning or NoPoSplat inputs"
+            )
+        policy_lightning_repo = None
+        noposplat_checkpoint = None
+    else:
+        if args.policy_lightning_repo is None or args.noposplat_checkpoint is None:
+            raise ValueError(
+                "noposplat requires --policy-lightning-repo and --noposplat-checkpoint"
+            )
+        policy_lightning_repo = str(
+            _directory(args.policy_lightning_repo, label="Policy-Lightning root")
+        )
+        noposplat_checkpoint = str(
+            _regular_file(args.noposplat_checkpoint, label="NoPoSplat checkpoint")
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "experiment_id": args.experiment_id,
@@ -181,17 +204,14 @@ def build_contract(args: argparse.Namespace) -> dict[str, Any]:
         "evaluation_code_commit": args.evaluation_code_commit,
         "model_project_root": str(model_project_root),
         "action_architecture": args.action_architecture,
+        "gaussian_source": gaussian_source,
         "stats": str(_regular_file(args.stats, label="normalization stats")),
         "context_file": str(_regular_file(args.context_file, label="task context")),
         "model_cache_root": str(
             _directory(args.model_cache_root, label="model cache root")
         ),
-        "policy_lightning_repo": str(
-            _directory(args.policy_lightning_repo, label="Policy-Lightning root")
-        ),
-        "noposplat_checkpoint": str(
-            _regular_file(args.noposplat_checkpoint, label="NoPoSplat checkpoint")
-        ),
+        "policy_lightning_repo": policy_lightning_repo,
+        "noposplat_checkpoint": noposplat_checkpoint,
         "nvidia_driver_lib_dir": str(
             _directory(args.nvidia_driver_lib_dir, label="NVIDIA driver libraries")
         ),
@@ -247,7 +267,8 @@ def run_id(contract: Mapping[str, Any], seed: Mapping[str, int]) -> str:
 def _run_command(
     contract: Mapping[str, Any], seed: Mapping[str, int], output: Path
 ) -> list[str]:
-    return [
+    gaussian_source = str(contract.get("gaussian_source", "noposplat"))
+    command = [
         str(contract["python"]),
         str(contract["diagnostic"]),
         "--mode",
@@ -295,16 +316,14 @@ def _run_command(
         str(contract["model_project_root"]),
         "--action-architecture",
         str(contract["action_architecture"]),
+        "--gaussian-source",
+        gaussian_source,
         "--stats",
         str(contract["stats"]),
         "--context-file",
         str(contract["context_file"]),
         "--model-cache-root",
         str(contract["model_cache_root"]),
-        "--policy-lightning-repo",
-        str(contract["policy_lightning_repo"]),
-        "--noposplat-checkpoint",
-        str(contract["noposplat_checkpoint"]),
         "--device",
         "cuda:0",
         "--teacher-device",
@@ -314,6 +333,16 @@ def _run_command(
         "--num-inference-steps",
         str(contract["num_inference_steps"]),
     ]
+    if gaussian_source == "noposplat":
+        command.extend(
+            [
+                "--policy-lightning-repo",
+                str(contract["policy_lightning_repo"]),
+                "--noposplat-checkpoint",
+                str(contract["noposplat_checkpoint"]),
+            ]
+        )
+    return command
 
 
 def _python_path(contract: Mapping[str, Any], inherited: str | None = None) -> str:
@@ -322,9 +351,10 @@ def _python_path(contract: Mapping[str, Any], inherited: str | None = None) -> s
         str(Path(contract["source_root"]) / "src"),
         str(Path(contract["source_root"]) / "experiments/robofactory"),
         str(Path(contract["source_root"])),
-        str(contract["policy_lightning_repo"]),
-        str(contract["robofactory_root"]),
     ]
+    if contract.get("policy_lightning_repo") is not None:
+        paths.append(str(contract["policy_lightning_repo"]))
+    paths.append(str(contract["robofactory_root"]))
     if inherited:
         paths.append(inherited)
     return os.pathsep.join(paths)
@@ -349,6 +379,9 @@ def _completed_output(
     manifest = _read_json(manifest_path)
     rollout = summary.get("rollout")
     argv = manifest.get("argv", [])
+    gaussian_source_matches = "gaussian_source" not in contract or (
+        _argv_value(argv, "--gaussian-source") == contract["gaussian_source"]
+    )
     return bool(
         summary.get("status") == "COMPLETED"
         and isinstance(rollout, dict)
@@ -373,6 +406,7 @@ def _completed_output(
         and _argv_value(argv, "--checkpoint") == contract["checkpoint"]["path"]
         and _argv_value(argv, "--action-architecture")
         == contract["action_architecture"]
+        and gaussian_source_matches
         and _argv_value(argv, "--model-project-root")
         == contract["model_project_root"]
         and "--oracle-intervention" not in argv
@@ -573,14 +607,20 @@ def _parser() -> argparse.ArgumentParser:
             "pooled_v1",
             "gaussian_spatial_v2",
             "task_conditioned_relation_v3",
+            "metric_gaussian_v5",
         ),
         required=True,
     )
     parser.add_argument("--stats", type=Path, required=True)
     parser.add_argument("--context-file", type=Path, required=True)
     parser.add_argument("--model-cache-root", type=Path, required=True)
-    parser.add_argument("--policy-lightning-repo", type=Path, required=True)
-    parser.add_argument("--noposplat-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--gaussian-source",
+        choices=("noposplat", "metric_geometry"),
+        default="noposplat",
+    )
+    parser.add_argument("--policy-lightning-repo", type=Path)
+    parser.add_argument("--noposplat-checkpoint", type=Path)
     parser.add_argument("--nvidia-driver-lib-dir", type=Path, required=True)
     parser.add_argument("--nvidia-vulkan-icd", type=Path, required=True)
     parser.add_argument("--nvidia-egl-vendor-json", type=Path, required=True)

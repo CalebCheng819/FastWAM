@@ -290,7 +290,12 @@ def _expert_action_at(
     return result
 
 
-def _build_environment(robofactory_root: Path, task_name: str):
+def _build_environment(
+    robofactory_root: Path,
+    task_name: str,
+    *,
+    obs_mode: str = "rgb",
+):
     if str(robofactory_root) not in sys.path:
         sys.path.insert(0, str(robofactory_root))
     os.chdir(robofactory_root)
@@ -303,7 +308,7 @@ def _build_environment(robofactory_root: Path, task_name: str):
     return gym.make(
         task_name,
         config=config,
-        obs_mode="rgb",
+        obs_mode=obs_mode,
         reward_mode="dense",
         control_mode="pd_joint_pos",
         render_mode="sensors",
@@ -710,7 +715,23 @@ def _stored_rgb_on_live_observation(
     live_agents = live_observation.get("agent")
     if not isinstance(live_agents, Mapping):
         raise KeyError("Live observation is missing the agent mapping")
-    return {
+    live_sensor_data = live_observation.get("sensor_data")
+    if not isinstance(live_sensor_data, Mapping):
+        raise KeyError("Live observation is missing the sensor_data mapping")
+    sensor_data: dict[str, dict[str, Any]] = {}
+    for camera in (
+        "head_camera_agent0",
+        "head_camera_agent1",
+        "head_camera_global",
+    ):
+        live_camera = live_sensor_data.get(camera)
+        if not isinstance(live_camera, Mapping):
+            raise KeyError(f"Live observation is missing sensor_data/{camera}")
+        sensor_data[camera] = dict(live_camera)
+        sensor_data[camera]["rgb"] = observations[
+            f"sensor_data/{camera}/rgb"
+        ][timestep]
+    result = {
         "agent": {
             name: {
                 "qpos": live_agents[name]["qpos"],
@@ -718,17 +739,15 @@ def _stored_rgb_on_live_observation(
             }
             for name in agent_names
         },
-        "sensor_data": {
-            camera: {
-                "rgb": observations[f"sensor_data/{camera}/rgb"][timestep]
-            }
-            for camera in (
-                "head_camera_agent0",
-                "head_camera_agent1",
-                "head_camera_global",
-            )
-        },
+        "sensor_data": sensor_data,
     }
+    if "sensor_param" in live_observation:
+        result["sensor_param"] = live_observation["sensor_param"]
+    return result
+
+
+def _policy_obs_mode(args: argparse.Namespace) -> str:
+    return "rgb+depth" if args.gaussian_source == "metric_geometry" else "rgb"
 
 
 def _vector(value: Any, count: int = 3) -> np.ndarray:
@@ -1474,7 +1493,11 @@ def run_first_frame_parity(
 
     from fastwam.datasets.gaussian_cache.provider import GaussianCache
 
-    env = _build_environment(args.robofactory_root, args.task)
+    env = _build_environment(
+        args.robofactory_root,
+        args.task,
+        obs_mode=_policy_obs_mode(args),
+    )
     try:
         _reset_environment(env, episode)
         env.unwrapped.set_state_dict(states[0])
@@ -1571,7 +1594,11 @@ def run_rollout(
 ) -> dict[str, Any]:
     started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=False)
-    env = _build_environment(args.robofactory_root, args.task)
+    env = _build_environment(
+        args.robofactory_root,
+        args.task,
+        obs_mode=_policy_obs_mode(args),
+    )
     multiview_writer = None
     global_writer = None
     video_stage = tempfile.TemporaryDirectory(prefix="fastwam-rollout-video-")
@@ -1863,7 +1890,11 @@ def run_expert_replay(
 
     started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=False)
-    env = _build_environment(args.robofactory_root, args.task)
+    env = _build_environment(
+        args.robofactory_root,
+        args.task,
+        obs_mode=_policy_obs_mode(args),
+    )
     multiview_writer = None
     global_writer = None
     local_stage = tempfile.TemporaryDirectory(prefix="fastwam-expert-replay-")
@@ -2060,7 +2091,11 @@ def run_teacher_forcing(
 
     started = time.monotonic()
     output_dir.mkdir(parents=True, exist_ok=False)
-    env = _build_environment(args.robofactory_root, args.task)
+    env = _build_environment(
+        args.robofactory_root,
+        args.task,
+        obs_mode=_policy_obs_mode(args),
+    )
     local_stage = tempfile.TemporaryDirectory(prefix="fastwam-teacher-forcing-")
     local_stage_dir = Path(local_stage.name)
     physical_trace_stage_path = local_stage_dir / "expert_physical_trace.jsonl"
@@ -2440,6 +2475,7 @@ def _parser() -> argparse.ArgumentParser:
             "pooled_v1",
             "gaussian_spatial_v2",
             "task_conditioned_relation_v3",
+            "metric_gaussian_v5",
         ),
         default="pooled_v1",
     )
@@ -2447,6 +2483,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--policy-lightning-commit", default=POLICY_LIGHTNING_COMMIT)
     parser.add_argument("--noposplat-checkpoint", type=Path)
     parser.add_argument("--noposplat-checkpoint-sha256")
+    parser.add_argument(
+        "--gaussian-source",
+        choices=("noposplat", "metric_geometry"),
+        default="noposplat",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--teacher-device", default="cuda:0")
     parser.add_argument("--action-horizon", type=int, default=32)
@@ -2482,9 +2523,28 @@ def main() -> None:
             "stats": args.stats,
             "gaussian_cache": args.gaussian_cache,
             "model_cache_root": args.model_cache_root,
-            "policy_lightning_repo": args.policy_lightning_repo,
-            "noposplat_checkpoint": args.noposplat_checkpoint,
         }
+        if args.gaussian_source == "noposplat":
+            required_policy_arguments.update(
+                {
+                    "policy_lightning_repo": args.policy_lightning_repo,
+                    "noposplat_checkpoint": args.noposplat_checkpoint,
+                }
+            )
+        else:
+            if args.action_architecture != "metric_gaussian_v5":
+                raise ValueError(
+                    "metric_geometry requires --action-architecture metric_gaussian_v5"
+                )
+            if args.policy_lightning_repo is not None or args.noposplat_checkpoint is not None:
+                raise ValueError(
+                    "metric_geometry does not use Policy-Lightning or NoPoSplat inputs"
+                )
+            if args.mode in ("parity", "all"):
+                raise ValueError(
+                    "Metric-geometry parity uses a different cache contract; run rollout "
+                    "or teacher-forcing explicitly"
+                )
         missing_policy_arguments = sorted(
             name for name, value in required_policy_arguments.items() if value is None
         )
@@ -2685,6 +2745,7 @@ def main() -> None:
                     else Path(__file__).resolve().parents[2]
                 ),
                 action_architecture=args.action_architecture,
+                gaussian_source=args.gaussian_source,
             )
             manifest["policy_init_seconds"] = time.monotonic() - init_started
         else:
