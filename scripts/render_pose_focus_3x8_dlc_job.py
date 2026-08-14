@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC CreateJob manifest for POSE_FOCUS 1/3x8."""
+"""Render, but never submit, a PAI DLC CreateJob manifest for POSE_FOCUS."""
 
 from __future__ import annotations
 
@@ -97,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-focus-code-commit", required=True)
     parser.add_argument("--task-profile", choices=TASK_PROFILES, default=TASK_PROFILES[0])
     parser.add_argument("--worker-count", type=int, choices=(1, 3), default=3)
+    parser.add_argument("--gpus-per-worker", type=int, choices=(4, 8), default=8)
     parser.add_argument(
         "--source-weight",
         choices=tuple(sorted({item[0] for item in SOURCE_WEIGHTS.values()})),
@@ -185,6 +186,8 @@ def main() -> int:
         raise SystemExit("offline-code-commit must be an exact lowercase Git revision")
     if not HEX40.fullmatch(args.pose_focus_code_commit):
         raise SystemExit("pose_focus-code-commit must be an exact lowercase Git revision")
+    if args.worker_count != 1 and args.gpus_per_worker != 8:
+        raise SystemExit("four-GPU topology is supported only with one worker")
 
     source_path, source_bytes, initialization = SOURCE_WEIGHTS[args.task_profile]
     if args.source_weight is not None and args.source_weight != source_path:
@@ -202,7 +205,9 @@ def main() -> int:
     user_command = "/bin/bash -c " + shlex.quote(outer_shell)
     output_dir = f"/oss-chengjuntao/artifacts/{args.run_id}"
     require_erdma = args.worker_count > 1
-    world_size = args.worker_count * 8
+    world_size = args.worker_count * args.gpus_per_worker
+    cpu_per_worker = "63" if args.gpus_per_worker == 4 else "126"
+    memory_per_worker = "480Gi" if args.gpus_per_worker == 4 else "960Gi"
     envs = {
         "RUN_ID": args.run_id,
         "FASTWAM_POSE_FOCUS_ATTEMPT_ID": args.attempt_id,
@@ -265,8 +270,9 @@ def main() -> int:
         "FASTWAM_PREFLIGHT_OUTER_TIMEOUT": "7260",
         "NCCL_DEBUG": "INFO",
         "NCCL_DEBUG_SUBSYS": "INIT,NET",
-        "NPROC_PER_NODE": "8",
+        "NPROC_PER_NODE": str(args.gpus_per_worker),
         "FASTWAM_POSE_FOCUS_EXPECTED_WORKERS": str(args.worker_count),
+        "FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_WORKER": str(args.gpus_per_worker),
     }
     if require_erdma:
         envs.update({
@@ -293,7 +299,8 @@ def main() -> int:
         ],
         "Description": (
             "PlaceFood action-only continuation: "
-            f"{args.task_profile}, {args.worker_count} workers x 8 GPUs, 1000 steps"
+            f"{args.task_profile}, {args.worker_count} workers x "
+            f"{args.gpus_per_worker} GPUs, 1000 steps"
         ),
         "DisplayName": args.run_id,
         "Envs": envs,
@@ -305,10 +312,10 @@ def main() -> int:
                 "LocalMountSpecs": [],
                 "PodCount": args.worker_count,
                 "ResourceConfig": {
-                    "CPU": "126",
-                    "GPU": "8",
-                    "Memory": "960Gi",
-                    "SharedMemory": "960Gi",
+                    "CPU": cpu_per_worker,
+                    "GPU": str(args.gpus_per_worker),
+                    "Memory": memory_per_worker,
+                    "SharedMemory": memory_per_worker,
                 },
                 "RestartPolicy": "Never",
                 "StartupDependencies": [],
@@ -332,7 +339,9 @@ def main() -> int:
                 "task": "PlaceFood-rf",
                 "objective": OBJECTIVES[args.task_profile],
                 "provenance": "stat-cmp-no-new-hash",
-                "topology": f"{args.worker_count}x8-world{world_size}",
+                "topology": (
+                    f"{args.worker_count}x{args.gpus_per_worker}-world{world_size}"
+                ),
             },
         },
         "SuccessPolicy": "AllWorkers",

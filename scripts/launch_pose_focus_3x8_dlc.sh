@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persistent, fail-closed launcher for the POSE_FOCUS 1/3 Worker x 8 GPU treatment.
+# Persistent, fail-closed launcher for the POSE_FOCUS 1x4, 1x8, or 3x8 treatment.
 # The outer DLC command runs once per worker. It stages the R5 weight before
-# spawning the eight local Accelerate ranks, so every child reads node-local
+# spawning the local Accelerate ranks, so every child reads node-local
 # storage and no rank can accidentally restore the old 32-GPU optimizer state.
 
 die() {
@@ -52,6 +52,7 @@ GPUS_PER_NODE="${NPROC_PER_NODE:-}"
 MASTER_HOST="${MASTER_ADDR:-}"
 MASTER_TCP_PORT="${MASTER_PORT:-}"
 EXPECTED_WORKERS="${FASTWAM_POSE_FOCUS_EXPECTED_WORKERS:-3}"
+EXPECTED_GPUS_PER_WORKER="${FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_WORKER:-8}"
 
 # Preserve the POSE_FOCUS source identity before the legacy dependency bootstrap is
 # sourced.  That bootstrap is allowed to provide only a node-local Python and
@@ -167,16 +168,20 @@ VAE_PATH="${FASTWAM_LOCAL_VAE_PATH:-}"
 PYTHON_BIN="${FASTWAM_POSE_FOCUS_PYTHON:-}"
 DRY_RUN="${FASTWAM_POSE_FOCUS_DRY_RUN:-0}"
 TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focus_r5_224_5e-6}"
-case "${EXPECTED_WORKERS}" in
-  1)
+case "${EXPECTED_WORKERS}x${EXPECTED_GPUS_PER_WORKER}" in
+  1x4)
+    SCALE_PROFILE="robofactory_multi_robot_4gpu_eff24_pose_focus"
+    EXPECTED_GRADIENT_ACCUMULATION_STEPS=6
+    ;;
+  1x8)
     SCALE_PROFILE="robofactory_multi_robot_8gpu_eff24_pose_focus"
     EXPECTED_GRADIENT_ACCUMULATION_STEPS=3
     ;;
-  3)
+  3x8)
     SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
     EXPECTED_GRADIENT_ACCUMULATION_STEPS=1
     ;;
-  *) die "FASTWAM_POSE_FOCUS_EXPECTED_WORKERS must be 1 or 3" ;;
+  *) die "supported POSE_FOCUS topologies are 1x4, 1x8, and 3x8" ;;
 esac
 case "${TASK_PROFILE}" in
   robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6) ;;
@@ -226,7 +231,8 @@ printf 'POSE_FOCUS runtime provenance binding: FASTWAM_B4_ATTEMPT_ID=%s\n' "${FA
 
 [[ "${NUM_MACHINES}" == "${EXPECTED_WORKERS}" ]] || \
   die "WORLD_SIZE must match FASTWAM_POSE_FOCUS_EXPECTED_WORKERS=${EXPECTED_WORKERS}, got ${NUM_MACHINES:-unset}"
-[[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
+[[ "${GPUS_PER_NODE}" == "${EXPECTED_GPUS_PER_WORKER}" ]] || \
+  die "NPROC_PER_NODE must match FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_WORKER=${EXPECTED_GPUS_PER_WORKER}, got ${GPUS_PER_NODE:-unset}"
 is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer, got ${MACHINE_RANK:-unset}"
 ((10#${MACHINE_RANK} < 10#${EXPECTED_WORKERS})) || \
   die "RANK must be below worker count ${EXPECTED_WORKERS}, got ${MACHINE_RANK}"
@@ -239,8 +245,8 @@ fi
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || die "MASTER_PORT must be in [1,65535]"
 GLOBAL_PROCESS_COUNT=$((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE}))
-[[ "${GLOBAL_PROCESS_COUNT}" == "8" || "${GLOBAL_PROCESS_COUNT}" == "24" ]] || \
-  die "global process count must be 8 or 24"
+[[ "${GLOBAL_PROCESS_COUNT}" == "4" || "${GLOBAL_PROCESS_COUNT}" == "8" || "${GLOBAL_PROCESS_COUNT}" == "24" ]] || \
+  die "global process count must be 4, 8, or 24"
 
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || die "FASTWAM_POSE_FOCUS_DRY_RUN must be 0 or 1"
 
@@ -633,7 +639,7 @@ fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
 workers=${NUM_MACHINES}
-gpus_per_worker=8
+gpus_per_worker=${GPUS_PER_NODE}
 global_world_size=${GLOBAL_PROCESS_COUNT}
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
@@ -644,7 +650,8 @@ stage_steps=1000
 
 if [[ "${DRY_RUN}" == "0" ]]; then
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"
-  [[ "${gpu_count}" == "8" ]] || die "each worker must expose exactly 8 GPUs, observed ${gpu_count:-0}"
+  [[ "${gpu_count}" == "${EXPECTED_GPUS_PER_WORKER}" ]] || \
+    die "each worker must expose exactly ${EXPECTED_GPUS_PER_WORKER} GPUs, observed ${gpu_count:-0}"
 
   if [[ "${MACHINE_RANK}" == "0" ]]; then
     [[ ! -e "${OUTPUT_DIR}" ]] || die "output already exists; RUN_ID is not unique: ${OUTPUT_DIR}"
