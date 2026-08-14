@@ -6,6 +6,12 @@ but SAPIEN crashed with exit code 139 while constructing the first environment.
 It completed zero episodes and published no output. R15 is retained as a failed
 record and is never retried or reused by R16.
 
+The first R16 publication candidate, r25, was never prepared or submitted. Its
+real worker dependency preflight caught a stale wrapper attribute before any
+durable, output, local-state, latch, or cloud mutation. R16 r26 binds that
+preflight to the base controller's frozen `PYTHON` interface and supersedes the
+unused r25 source snapshot.
+
 The R15 worker used a manual GLVND frontend shim, Vulkan loader symbols,
 and ctypes preloads. Serialization removed concurrent environment creation but
 did not remove that graphics ABI boundary. R16 instead uses the minimal NVIDIA vendor-driver namespace

@@ -32,7 +32,7 @@ RUN_ID = "fastwam-gau0-placefood-same8-r16-20260814"
 DISPLAY_NAME = "fw-gau0-placefood-same8-r16"
 SOURCE_ROOT = Path(
     "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
-    "fastwam-gau0-placefood-same8-eval-20260814-r25"
+    "fastwam-gau0-placefood-same8-eval-20260814-r26"
 )
 OUTPUT_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260814-r16")
 DURABLE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260814-r16-controller")
@@ -159,7 +159,7 @@ print(f"GAU0_MINIMAL_GRAPHICS_DEPENDENCY_PREFLIGHT_PASS loader={loader_prefix} m
     env["FASTWAM_ROBOFACTORY_ROOT"] = str(impl.ROBOFACTORY_ROOT)
     env["FASTWAM_NVIDIA_GRAPHICS_ROOT"] = str(impl.NVIDIA_GRAPHICS_ROOT)
     completed = subprocess.run(
-        [str(impl.PINNED_PYTHON), "-B", "-c", program],
+        [str(impl.PYTHON), "-B", "-c", program],
         check=False,
         env=env,
         capture_output=True,

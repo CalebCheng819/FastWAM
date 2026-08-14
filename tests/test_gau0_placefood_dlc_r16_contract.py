@@ -28,7 +28,7 @@ def test_r16_identity_isolated_and_priority_frozen():
     assert controller.EXPERIMENT_ID.endswith("R16-20260814")
     assert controller.RUN_ID == "fastwam-gau0-placefood-same8-r16-20260814"
     assert controller.DISPLAY_NAME == "fw-gau0-placefood-same8-r16"
-    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r25")
+    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r26")
     assert str(controller.OUTPUT_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r16")
     assert str(controller.DURABLE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r16-controller")
     assert str(controller.LOCAL_ROOT).endswith("gau0-placefood-same8-r16")
@@ -97,6 +97,8 @@ def test_dependency_preflight_rejects_manual_frontends_before_imports():
     assert "ctypes" not in source
     assert "vkEnumerateInstanceVersion" not in source
     assert "glvnd-runtime" not in source
+    assert "impl.PINNED_PYTHON" not in source
+    assert '[str(impl.PYTHON), "-B", "-c", program]' in source
 
 
 def test_runtime_preflights_real_environment_and_serializes_shards():
@@ -161,3 +163,5 @@ def test_r16_readme_records_failure_fix_and_scientific_boundary():
     assert "sequentially" in readme
     assert "exact historical eight" in readme
     assert "not a pure causal" in readme
+    assert "r25" in readme
+    assert "r26" in readme
