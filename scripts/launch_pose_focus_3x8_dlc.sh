@@ -190,6 +190,7 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_task_gaussian_relation_p7_224_5e-6) ;;
   robofactory_placefood_relation_gripcontact_p8_224_5e-6) ;;
   robofactory_placefood_spatial_gripcontact_p9_224_5e-6) ;;
+  robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -213,6 +214,10 @@ case "${TASK_PROFILE}" in
     CANONICAL_SOURCE_BYTES="12055814467"
     ;;
   robofactory_placefood_spatial_gripcontact_p9_224_5e-6)
+    CANONICAL_SOURCE="${P6_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12047407747"
+    ;;
+  robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6)
     CANONICAL_SOURCE="${P6_SOURCE}"
     CANONICAL_SOURCE_BYTES="12047407747"
     ;;
@@ -414,6 +419,7 @@ is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
 }
 is_gaussian_relation = task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
@@ -422,8 +428,12 @@ is_gaussian_relation = task_path.stem in {
 is_relation_gripcontact = (
     task_path.stem == "robofactory_placefood_relation_gripcontact_p8_224_5e-6"
 )
-is_spatial_gripcontact = (
-    task_path.stem == "robofactory_placefood_spatial_gripcontact_p9_224_5e-6"
+is_spatial_gripcontact = task_path.stem in {
+    "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+}
+is_lowaux_gripcontact = (
+    task_path.stem == "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6"
 )
 is_gripcontact = is_relation_gripcontact or is_spatial_gripcontact
 is_semantic_phase = task_path.stem in {
@@ -432,6 +442,7 @@ is_semantic_phase = task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -495,6 +506,7 @@ if task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -584,11 +596,13 @@ defaults = task.get("defaults", [])
 if expected_parent not in defaults:
     raise SystemExit(f"POSE_FOCUS task must inherit the audited profile {expected_parent}")
 if is_gripcontact:
+    gripper_event_weight = 0.02 if is_lowaux_gripcontact else 2.0
+    contact_proxy_weight = 0.01 if is_lowaux_gripcontact else 1.0
     b4_expected = {
         "model.loss.b4.enabled": True,
         "model.loss.b4.lambda_arm_huber": 0.0,
-        "model.loss.b4.lambda_gripper_event": 2.0,
-        "model.loss.b4.lambda_contact_intent_proxy": 1.0,
+        "model.loss.b4.lambda_gripper_event": gripper_event_weight,
+        "model.loss.b4.lambda_contact_intent_proxy": contact_proxy_weight,
         "model.loss.b4.gripper_dim": 7,
     }
     for key, wanted in b4_expected.items():

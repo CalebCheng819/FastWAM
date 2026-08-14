@@ -1,0 +1,40 @@
+# @package _global_
+
+# P10 keeps P9's P6 spatial architecture and reduces only the two action-derived
+# gripper auxiliary coefficients so they regularize rather than dominate flow.
+defaults:
+  - robofactory_placefood_spatial_semantic_p6_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: null
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: spatial_cross_attention
+    gaussian_residual_floor: 0.1
+    gaussian_attention_temperature: 0.1
+  loss:
+    b4:
+      enabled: true
+      lambda_arm_huber: 0.0
+      lambda_gripper_event: 0.02
+      lambda_contact_intent_proxy: 0.01
+      arm_huber_beta: 0.1
+      first_steps: 5
+      first_steps_weight: 2.0
+      gripper_dim: 7
+      gripper_action_mean: 0.24164481092854787
+      gripper_action_std: 0.9469631616807775
+      event_delta_threshold: 0.05
+      stable_closed_command_threshold: -0.8
+      closed_command_threshold: 0.0
+      stable_steps: 4
+      event_temperature: 0.05
+      closed_temperature: 0.1
+      background_weight: 0.25
+
+# The stable-close target remains expert-action-derived, not measured contact.
+wandb:
+  group: robofactory-placefood-spatial-gripcontact-p10-lowaux
+  name: fastwam-placefood-spatial-gripcontact-p10-lowaux-s42-8g-r1
