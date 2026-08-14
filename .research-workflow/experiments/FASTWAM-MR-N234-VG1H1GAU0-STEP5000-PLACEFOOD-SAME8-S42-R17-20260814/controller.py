@@ -33,7 +33,7 @@ RUN_ID = "fastwam-gau0-placefood-same8-r17-20260814"
 DISPLAY_NAME = "fw-gau0-placefood-same8-r17"
 SOURCE_ROOT = Path(
     "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
-    "fastwam-gau0-placefood-same8-eval-20260814-r28"
+    "fastwam-gau0-placefood-same8-eval-20260814-r29"
 )
 OUTPUT_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260814-r17")
 DURABLE_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260814-r17-controller")

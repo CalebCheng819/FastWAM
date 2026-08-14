@@ -28,7 +28,7 @@ def test_r17_identity_isolated_and_priority_frozen():
     assert controller.EXPERIMENT_ID.endswith("R17-20260814")
     assert controller.RUN_ID == "fastwam-gau0-placefood-same8-r17-20260814"
     assert controller.DISPLAY_NAME == "fw-gau0-placefood-same8-r17"
-    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r28")
+    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r29")
     assert str(controller.OUTPUT_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r17")
     assert str(controller.DURABLE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r17-controller")
     assert str(controller.LOCAL_ROOT).endswith("gau0-placefood-same8-r17")
@@ -183,3 +183,4 @@ def test_r17_readme_records_failure_fix_and_scientific_boundary():
     assert "r25" in readme
     assert "r27" in readme
     assert "r28" in readme
+    assert "r29" in readme
