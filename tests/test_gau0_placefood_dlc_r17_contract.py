@@ -28,7 +28,7 @@ def test_r17_identity_isolated_and_priority_frozen():
     assert controller.EXPERIMENT_ID.endswith("R17-20260814")
     assert controller.RUN_ID == "fastwam-gau0-placefood-same8-r17-20260814"
     assert controller.DISPLAY_NAME == "fw-gau0-placefood-same8-r17"
-    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r27")
+    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r28")
     assert str(controller.OUTPUT_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r17")
     assert str(controller.DURABLE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260814-r17-controller")
     assert str(controller.LOCAL_ROOT).endswith("gau0-placefood-same8-r17")
@@ -108,6 +108,8 @@ def test_dependency_preflight_validates_only_the_narrow_egl_frontend_before_impo
     assert "glvnd-runtime" not in source
     assert "impl.PINNED_PYTHON" not in source
     assert '[str(impl.PYTHON), "-B", "-c", program]' in source
+    assert 'str(impl.EGL_FRONTEND_BYTES)' in source
+    assert "impl.EGL_FRONTEND_SIZE_BYTES" not in source
 
 
 def test_runtime_preflights_real_environment_and_serializes_shards():
@@ -180,3 +182,4 @@ def test_r17_readme_records_failure_fix_and_scientific_boundary():
     assert "not a pure causal" in readme
     assert "r25" in readme
     assert "r27" in readme
+    assert "r28" in readme
