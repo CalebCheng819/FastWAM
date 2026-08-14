@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -224,6 +225,44 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertEqual(config.action_dit_config.gaussian_residual_floor, 0.1)
         self.assertEqual(config.action_dit_config.gaussian_attention_temperature, 0.1)
         self.assertEqual(config.loss.lambda_video, 0.0)
+
+    def test_task_conditioned_relation_config_preserves_p6_contract(self) -> None:
+        config = policy.compose_task_conditioned_relation_action_model_config()
+
+        self.assertEqual(config.training_mode, "action_only_cache")
+        self.assertEqual(config.checkpoint_integrity_mode, "metadata_no_hash")
+        self.assertTrue(config.action_dit_config.enable_gaussian)
+        self.assertEqual(
+            config.action_dit_config.gaussian_conditioning_mode,
+            "task_conditioned_relation_attention",
+        )
+        self.assertEqual(config.action_dit_config.gaussian_residual_floor, 0.1)
+        self.assertEqual(config.action_dit_config.gaussian_attention_temperature, 0.1)
+        self.assertEqual(config.action_dit_config.gaussian_relation_num_heads, 8)
+        self.assertEqual(config.loss.lambda_video, 0.0)
+
+    def test_task_conditioned_relation_runtime_contract_is_fail_closed(self) -> None:
+        valid = SimpleNamespace(
+            gaussian_conditioning_mode="task_conditioned_relation_attention",
+            gaussian_residual_floor=0.1,
+            gaussian_attention_temperature=0.1,
+            gaussian_relation_num_heads=8,
+            gaussian_relation_attention=object(),
+            gaussian_relation_gate=object(),
+            gaussian_query_norm=object(),
+            gaussian_key_norm=object(),
+        )
+
+        policy._validate_gaussian_action_contract(
+            valid,
+            "task_conditioned_relation_v3",
+        )
+        valid.gaussian_relation_attention = None
+        with self.assertRaisesRegex(RuntimeError, "P7 task-conditioned"):
+            policy._validate_gaussian_action_contract(
+                valid,
+                "task_conditioned_relation_v3",
+            )
 
     def test_expert_replay_launcher_omits_policy_inputs(self) -> None:
         root = Path(__file__).resolve().parents[1]

@@ -2436,7 +2436,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action-architecture",
-        choices=("pooled_v1", "gaussian_spatial_v2"),
+        choices=(
+            "pooled_v1",
+            "gaussian_spatial_v2",
+            "task_conditioned_relation_v3",
+        ),
         default="pooled_v1",
     )
     parser.add_argument("--policy-lightning-repo", type=Path)
@@ -2489,12 +2493,9 @@ def main() -> None:
                 "Policy mode requires arguments: "
                 + ", ".join(missing_policy_arguments)
             )
-        if (
-            args.action_architecture == "gaussian_spatial_v2"
-            and args.model_project_root is None
-        ):
+        if args.action_architecture != "pooled_v1" and args.model_project_root is None:
             raise ValueError(
-                "gaussian_spatial_v2 requires an explicit --model-project-root"
+                f"{args.action_architecture} requires an explicit --model-project-root"
             )
     if policy_needed and args.integrity_mode == "metadata_no_hash":
         if args.context_file is None:

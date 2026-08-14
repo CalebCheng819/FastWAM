@@ -6,8 +6,8 @@ must pass both ``env.unwrapped.get_obs()`` and
 The observation does not contain articulation root poses, and silently
 substituting zero geometry would change the model that is being evaluated.
 
-The adapter supports the legacy joint checkpoint and the R5 action-only
-checkpoint at commit ``1a690ab49246cbeb841618a86b5bd546f93ddd40``:
+The adapter supports the legacy joint checkpoint, the R5 action-only
+checkpoint, and the spatial/relation Gaussian action-only variants:
 
 * a native, variable-length agent axis (no fixed-capacity mask or padding),
 * global RGB resized from uint8 240x320 to 224x320 with bicubic antialiasing,
@@ -662,6 +662,86 @@ def compose_gaussian_spatial_action_model_config(
     return config
 
 
+def compose_task_conditioned_relation_action_model_config(
+    project_root: str | Path = PROJECT_ROOT,
+):
+    """Resolve the P7 task-conditioned Gaussian relation architecture."""
+
+    config = compose_gaussian_spatial_action_model_config(project_root)
+    config.action_dit_config.gaussian_conditioning_mode = (
+        "task_conditioned_relation_attention"
+    )
+    config.action_dit_config.gaussian_relation_num_heads = 8
+    return config
+
+
+def _validate_gaussian_action_contract(action_expert: Any, architecture: str) -> None:
+    if architecture == "gaussian_spatial_v2":
+        observed = {
+            "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
+            "residual_floor": getattr(action_expert, "gaussian_residual_floor", None),
+            "attention_temperature": getattr(
+                action_expert,
+                "gaussian_attention_temperature",
+                None,
+            ),
+        }
+        expected = {
+            "mode": "spatial_cross_attention",
+            "residual_floor": 0.1,
+            "attention_temperature": 0.1,
+        }
+        label = "P4/P6 spatial-Gaussian"
+    elif architecture == "task_conditioned_relation_v3":
+        observed = {
+            "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
+            "residual_floor": getattr(action_expert, "gaussian_residual_floor", None),
+            "attention_temperature": getattr(
+                action_expert,
+                "gaussian_attention_temperature",
+                None,
+            ),
+            "relation_num_heads": getattr(
+                action_expert,
+                "gaussian_relation_num_heads",
+                None,
+            ),
+            "relation_attention": getattr(
+                action_expert,
+                "gaussian_relation_attention",
+                None,
+            )
+            is not None,
+            "relation_gate": getattr(
+                action_expert,
+                "gaussian_relation_gate",
+                None,
+            )
+            is not None,
+            "query_norm": getattr(action_expert, "gaussian_query_norm", None)
+            is not None,
+            "key_norm": getattr(action_expert, "gaussian_key_norm", None) is not None,
+        }
+        expected = {
+            "mode": "task_conditioned_relation_attention",
+            "residual_floor": 0.1,
+            "attention_temperature": 0.1,
+            "relation_num_heads": 8,
+            "relation_attention": True,
+            "relation_gate": True,
+            "query_norm": True,
+            "key_norm": True,
+        }
+        label = "P7 task-conditioned Gaussian relation"
+    else:
+        return
+    if observed != expected:
+        raise RuntimeError(
+            f"{label} evaluation instantiated the wrong action architecture: "
+            f"expected={expected}, observed={observed}"
+        )
+
+
 def _adapt_metadata_no_hash_config_for_runtime(model_config, factory):
     """Bridge the pre-integrity-mode runtime without changing model semantics."""
 
@@ -891,9 +971,15 @@ class FastWAMMultiRobotPolicy:
         self.tiled = bool(tiled)
         self.project_root = Path(project_root).expanduser().resolve(strict=True)
         self.action_architecture = str(action_architecture).strip().lower()
-        if self.action_architecture not in {"pooled_v1", "gaussian_spatial_v2"}:
+        supported_action_architectures = {
+            "pooled_v1",
+            "gaussian_spatial_v2",
+            "task_conditioned_relation_v3",
+        }
+        if self.action_architecture not in supported_action_architectures:
             raise ValueError(
-                "action_architecture must be pooled_v1 or gaussian_spatial_v2, "
+                "action_architecture must be one of "
+                f"{sorted(supported_action_architectures)}, "
                 f"got {self.action_architecture!r}"
             )
         if (
@@ -901,7 +987,8 @@ class FastWAMMultiRobotPolicy:
             and self.action_architecture != "pooled_v1"
         ):
             raise ValueError(
-                "gaussian_spatial_v2 is only supported in metadata_no_hash mode"
+                "spatial/relation Gaussian architectures are only supported in "
+                "metadata_no_hash mode"
             )
 
         from hydra.utils import instantiate
@@ -921,6 +1008,10 @@ class FastWAMMultiRobotPolicy:
             model_config = compose_step5000_model_config(self.project_root)
         elif self.action_architecture == "gaussian_spatial_v2":
             model_config = compose_gaussian_spatial_action_model_config(
+                self.project_root
+            )
+        elif self.action_architecture == "task_conditioned_relation_v3":
+            model_config = compose_task_conditioned_relation_action_model_config(
                 self.project_root
             )
         else:
@@ -944,27 +1035,10 @@ class FastWAMMultiRobotPolicy:
                 _activate_legacy_metadata_no_hash_mode(self.model)
             self.model.configure_trainable_parameters("action")
         self.model.load_checkpoint(self.checkpoint_path)
-        if self.action_architecture == "gaussian_spatial_v2":
-            action_expert = getattr(self.model, "action_expert", None)
-            observed_contract = {
-                "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
-                "residual_floor": getattr(action_expert, "gaussian_residual_floor", None),
-                "attention_temperature": getattr(
-                    action_expert,
-                    "gaussian_attention_temperature",
-                    None,
-                ),
-            }
-            expected_contract = {
-                "mode": "spatial_cross_attention",
-                "residual_floor": 0.1,
-                "attention_temperature": 0.1,
-            }
-            if observed_contract != expected_contract:
-                raise RuntimeError(
-                    "P4 evaluation instantiated the wrong Gaussian action architecture: "
-                    f"expected={expected_contract}, observed={observed_contract}"
-                )
+        _validate_gaussian_action_contract(
+            getattr(self.model, "action_expert", None),
+            self.action_architecture,
+        )
         if self.integrity_mode == "sha256":
             actual_checkpoint_sha256 = getattr(
                 self.model,
@@ -1185,6 +1259,7 @@ __all__ = [
     "compose_r5_action_model_config",
     "compose_b4_action_model_config",
     "compose_gaussian_spatial_action_model_config",
+    "compose_task_conditioned_relation_action_model_config",
     "denormalize_and_flatten_actions",
     "encode_compact_agent_gaussian",
     "extract_agent_state_and_geometry",

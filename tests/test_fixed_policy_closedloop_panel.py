@@ -180,6 +180,7 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
     def test_python_path_contains_explicit_runtime_dependencies(self) -> None:
         contract = {
             "source_root": "/source",
+            "model_project_root": "/model-project",
             "policy_lightning_repo": "/policy-lightning",
             "robofactory_root": "/robofactory",
         }
@@ -189,6 +190,7 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
         self.assertEqual(
             paths,
             [
+                "/model-project/src",
                 "/source/src",
                 "/source/experiments/robofactory",
                 "/source",
@@ -197,6 +199,15 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
                 "/inherited",
             ],
         )
+
+    def test_panel_cli_accepts_task_conditioned_relation_architecture(self) -> None:
+        architecture_action = next(
+            action
+            for action in panel_runner._parser()._actions
+            if action.dest == "action_architecture"
+        )
+
+        self.assertIn("task_conditioned_relation_v3", architecture_action.choices)
 
     def test_completed_output_checks_frozen_checkpoint_and_architecture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

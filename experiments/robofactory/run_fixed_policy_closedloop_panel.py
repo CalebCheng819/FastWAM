@@ -318,6 +318,7 @@ def _run_command(
 
 def _python_path(contract: Mapping[str, Any], inherited: str | None = None) -> str:
     paths = [
+        str(Path(contract["model_project_root"]) / "src"),
         str(Path(contract["source_root"]) / "src"),
         str(Path(contract["source_root"]) / "experiments/robofactory"),
         str(Path(contract["source_root"])),
@@ -568,7 +569,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-project-root", type=Path, required=True)
     parser.add_argument(
         "--action-architecture",
-        choices=("pooled_v1", "gaussian_spatial_v2"),
+        choices=(
+            "pooled_v1",
+            "gaussian_spatial_v2",
+            "task_conditioned_relation_v3",
+        ),
         required=True,
     )
     parser.add_argument("--stats", type=Path, required=True)
