@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persistent, fail-closed launcher for the POSE_FOCUS 1x4, 1x8, or 3x8 treatment.
-# The outer DLC command runs once per worker. It stages the R5 weight before
-# spawning the local Accelerate ranks, so every child reads node-local
-# storage and no rank can accidentally restore the old 32-GPU optimizer state.
-
 die() {
   printf 'POSE_FOCUS launcher error: %s\n' "$*" >&2
   exit 1
@@ -43,9 +38,6 @@ fi
 require_env RUN_ID
 require_env FASTWAM_POSE_FOCUS_ATTEMPT_ID
 
-# PAI injects node topology through these names.  Preserve the outer worker
-# values before any helper can mutate the environment; they are deliberately
-# removed immediately before Accelerate creates its own distributed world.
 NUM_MACHINES="${WORLD_SIZE:-}"
 MACHINE_RANK="${RANK:-}"
 GPUS_PER_NODE="${NPROC_PER_NODE:-}"
@@ -54,10 +46,6 @@ MASTER_TCP_PORT="${MASTER_PORT:-}"
 EXPECTED_WORKERS="${FASTWAM_POSE_FOCUS_EXPECTED_WORKERS:-3}"
 EXPECTED_GPUS_PER_WORKER="${FASTWAM_POSE_FOCUS_EXPECTED_GPUS_PER_WORKER:-8}"
 
-# Preserve the POSE_FOCUS source identity before the legacy dependency bootstrap is
-# sourced.  That bootstrap is allowed to provide only a node-local Python and
-# its dependencies; its historical source checkout must never become the POSE_FOCUS
-# training source.
 POSE_FOCUS_SOURCE_BUNDLE="${FASTWAM_POSE_FOCUS_SOURCE_BUNDLE:-}"
 POSE_FOCUS_CODE_COMMIT="${FASTWAM_POSE_FOCUS_CODE_COMMIT:-}"
 POSE_FOCUS_LOCAL_SOURCE_ROOT="${FASTWAM_POSE_FOCUS_LOCAL_SOURCE_ROOT:-/tmp/fastwam-pose_focus-source-checkouts}"
