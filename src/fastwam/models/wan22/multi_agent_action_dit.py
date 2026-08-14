@@ -197,6 +197,7 @@ class MultiAgentActionDiT(ActionDiT):
         "agent_geometry_encoder.",
         "gaussian_adapter.",
         "gaussian_gate",
+        "gaussian_remote_gate",
         "gaussian_relation_attention.",
         "gaussian_relation_gate",
         "gaussian_query_norm.",
@@ -276,11 +277,13 @@ class MultiAgentActionDiT(ActionDiT):
         if self.gaussian_conditioning_mode not in {
             "pooled_residual",
             "spatial_cross_attention",
+            "cross_agent_spatial_attention",
             "task_conditioned_relation_attention",
         }:
             raise ValueError(
                 "`gaussian_conditioning_mode` must be pooled_residual, "
-                "spatial_cross_attention, or task_conditioned_relation_attention; "
+                "spatial_cross_attention, cross_agent_spatial_attention, or "
+                "task_conditioned_relation_attention; "
                 f"got {self.gaussian_conditioning_mode!r}"
             )
         if self.gaussian_residual_floor < 0:
@@ -304,6 +307,7 @@ class MultiAgentActionDiT(ActionDiT):
         if (
             self.gaussian_conditioning_mode in {
                 "spatial_cross_attention",
+                "cross_agent_spatial_attention",
                 "task_conditioned_relation_attention",
             }
             and self.hidden_dim % 4
@@ -378,6 +382,12 @@ class MultiAgentActionDiT(ActionDiT):
         )
         self.gaussian_relation_gate = (
             nn.Parameter(torch.zeros(1)) if relation_attention_enabled else None
+        )
+        self.gaussian_remote_gate = (
+            nn.Parameter(torch.zeros(1))
+            if self.enable_gaussian
+            and self.gaussian_conditioning_mode == "cross_agent_spatial_attention"
+            else None
         )
         self.gaussian_query_norm = (
             nn.LayerNorm(self.hidden_dim) if relation_attention_enabled else None
@@ -639,7 +649,10 @@ class MultiAgentActionDiT(ActionDiT):
                     dtype=action_emb.dtype,
                 )
                 action_emb = action_emb + gaussian_gate * gaussian_emb.unsqueeze(2)
-            elif self.gaussian_conditioning_mode == "spatial_cross_attention":
+            elif self.gaussian_conditioning_mode in {
+                "spatial_cross_attention",
+                "cross_agent_spatial_attention",
+            }:
                 spatial_tokens = self.gaussian_adapter.forward_spatial(agent_gaussian).to(
                     device=action_emb.device,
                     dtype=action_emb.dtype,
@@ -665,6 +678,37 @@ class MultiAgentActionDiT(ActionDiT):
                 ).to(dtype=action_emb.dtype)
                 effective_gate = gaussian_gate + self.gaussian_residual_floor
                 action_emb = action_emb + effective_gate * gaussian_emb
+                if self.gaussian_conditioning_mode == "cross_agent_spatial_attention":
+                    if self.gaussian_remote_gate is None:
+                        raise RuntimeError(
+                            "Cross-agent Gaussian conditioning was not initialized"
+                        )
+                    if num_agents > 1:
+                        remote_scores = torch.einsum(
+                            "bnth,bmph->bntmp",
+                            F.normalize(query.float(), dim=-1),
+                            F.normalize(spatial_tokens.float(), dim=-1),
+                        )
+                        same_agent = torch.eye(
+                            num_agents,
+                            device=remote_scores.device,
+                            dtype=torch.bool,
+                        ).view(1, num_agents, 1, num_agents, 1)
+                        remote_scores = remote_scores.masked_fill(same_agent, float("-inf"))
+                        remote_attention = torch.softmax(
+                            remote_scores.flatten(-2)
+                            / self.gaussian_attention_temperature,
+                            dim=-1,
+                        ).reshape_as(remote_scores)
+                        remote_emb = torch.einsum(
+                            "bntmp,bmph->bnth",
+                            remote_attention,
+                            spatial_tokens.float(),
+                        ).to(dtype=action_emb.dtype)
+                        action_emb = action_emb + self.gaussian_remote_gate.to(
+                            device=action_emb.device,
+                            dtype=action_emb.dtype,
+                        ) * remote_emb
             else:
                 if (
                     self.gaussian_relation_attention is None

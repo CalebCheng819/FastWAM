@@ -317,6 +317,122 @@ def test_spatial_gaussian_conditioning_is_agent_permutation_equivariant():
     assert torch.allclose(shared_action, permuted_action[:, inverse])
 
 
+def test_cross_agent_spatial_attention_is_p10_equivalent_at_zero_remote_gate():
+    torch.manual_seed(42)
+    spatial = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    cross_agent = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    load_result = cross_agent.load_state_dict(spatial.state_dict(), strict=False)
+    assert load_result.unexpected_keys == []
+    assert load_result.missing_keys == ["gaussian_remote_gate"]
+    assert cross_agent.gaussian_remote_gate is not None
+    assert torch.equal(
+        cross_agent.gaussian_remote_gate,
+        torch.zeros_like(cross_agent.gaussian_remote_gate),
+    )
+    data = _inputs(2)
+
+    def tokens(model):
+        return model.pre_dit(
+            data["action"], data["timestep"], data["context"], data["context_mask"],
+            agent_states=data["state"], agent_geometry=data["geometry"],
+            agent_ids=data["ids"], agent_gaussian=data["gaussian"],
+        )["tokens"]
+
+    assert torch.equal(tokens(spatial), tokens(cross_agent))
+
+
+def test_cross_agent_spatial_attention_uses_other_agent_view_after_gate_opens():
+    torch.manual_seed(44)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    assert model.gaussian_remote_gate is not None
+    model.gaussian_remote_gate.data.fill_(1.0)
+    data = _inputs(2)
+
+    def action_tokens(gaussian):
+        tokens = model.pre_dit(
+            data["action"], data["timestep"], data["context"], data["context_mask"],
+            agent_states=data["state"], agent_geometry=data["geometry"],
+            agent_ids=data["ids"], agent_gaussian=gaussian,
+        )["tokens"]
+        return tokens[:, : 2 * data["action"].shape[2]].reshape(1, 2, 5, -1)
+
+    original = action_tokens(data["gaussian"])
+    perturbed_gaussian = data["gaussian"].clone()
+    perturbed_gaussian[:, 1].add_(8.0)
+    perturbed = action_tokens(perturbed_gaussian)
+    assert not torch.allclose(original[:, 0], perturbed[:, 0])
+
+
+@pytest.mark.parametrize("num_agents", [1, 2, 4])
+def test_cross_agent_spatial_attention_is_agent_permutation_equivariant(num_agents):
+    torch.manual_seed(46 + num_agents)
+    model = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    assert model.gaussian_remote_gate is not None
+    model.gaussian_remote_gate.data.fill_(1.0)
+    data = _inputs(num_agents)
+
+    def action_tokens(permutation):
+        tokens = model.pre_dit(
+            data["action"][:, permutation], data["timestep"], data["context"],
+            data["context_mask"], agent_states=data["state"][:, permutation],
+            agent_geometry=data["geometry"][:, permutation],
+            agent_ids=data["ids"][:, permutation],
+            agent_gaussian=data["gaussian"][:, permutation],
+        )["tokens"]
+        horizon = data["action"].shape[2]
+        return tokens[:, : num_agents * horizon].reshape(1, num_agents, horizon, -1)
+
+    identity = torch.arange(num_agents)
+    permutation = torch.arange(num_agents - 1, -1, -1)
+    original = action_tokens(identity)
+    permuted = action_tokens(permutation)
+    assert torch.allclose(original, permuted[:, torch.argsort(permutation)])
+
+
+def test_cross_agent_spatial_attention_single_agent_is_local_only():
+    torch.manual_seed(51)
+    spatial = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    cross_agent = _tiny_action_expert(
+        enable_gaussian=True,
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    ).eval()
+    cross_agent.load_state_dict(spatial.state_dict(), strict=False)
+    assert cross_agent.gaussian_remote_gate is not None
+    cross_agent.gaussian_remote_gate.data.fill_(1.0)
+    data = _inputs(1)
+    arguments = dict(
+        action_tokens=data["action"], timestep=data["timestep"],
+        context=data["context"], context_mask=data["context_mask"],
+        agent_states=data["state"], agent_geometry=data["geometry"],
+        agent_ids=data["ids"], agent_gaussian=data["gaussian"],
+    )
+    assert torch.equal(
+        spatial.pre_dit(**arguments)["tokens"],
+        cross_agent.pre_dit(**arguments)["tokens"],
+    )
+
+
 def test_task_conditioned_relation_attention_is_p6_equivalent_at_zero_gate():
     torch.manual_seed(43)
     spatial = _tiny_action_expert(
@@ -1746,6 +1862,8 @@ def _bare_checkpoint_model(
             model.action_expert.gaussian_adapter.requires_grad_(True)
         if model.action_expert.gaussian_gate is not None:
             model.action_expert.gaussian_gate.requires_grad_(True)
+        if model.action_expert.gaussian_remote_gate is not None:
+            model.action_expert.gaussian_remote_gate.requires_grad_(True)
         for module in (
             model.action_expert.gaussian_relation_attention,
             model.action_expert.gaussian_query_norm,
@@ -2310,6 +2428,66 @@ def test_gaussian_relation_v3_loads_all_spatial_v2_tensors(tmp_path):
         target.action_expert.gaussian_relation_gate,
         torch.zeros_like(target.action_expert.gaussian_relation_gate),
     )
+
+
+def test_gaussian_cross_agent_v4_loads_all_p10_spatial_v2_tensors(tmp_path):
+    torch.manual_seed(745)
+    source = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+    checkpoint = tmp_path / "p10-spatial-v2.pt"
+    torch.save(_native_full_payload(source), checkpoint)
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    )
+    target._checkpoint_provenance_mode = "stat_cmp"
+
+    target._load_checkpoint_with_role(
+        checkpoint,
+        load_role="base_dependency",
+        active_paths=set(),
+        validate_trainable_scope=False,
+        architecture_upgrade="gaussian_cross_agent_v4_from_spatial_v2",
+    )
+
+    target_state = target.mot.state_dict()
+    for key, source_value in source.mot.state_dict().items():
+        assert torch.equal(target_state[key], source_value)
+    assert torch.equal(
+        target.action_expert.gaussian_remote_gate,
+        torch.zeros_like(target.action_expert.gaussian_remote_gate),
+    )
+
+
+def test_gaussian_cross_agent_v4_hub_io_scope_includes_remote_gate():
+    model = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    )
+    model.configure_trainable_parameters("hub_io")
+    trainable_names = {
+        name for name, parameter in model.mot.named_parameters() if parameter.requires_grad
+    }
+    assert any(name.endswith("gaussian_remote_gate") for name in trainable_names)
+
+
+def test_gaussian_cross_agent_v4_rejects_p10_without_explicit_upgrade():
+    source = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="spatial_cross_attention",
+        gaussian_residual_floor=0.1,
+    )
+    target = _bare_gaussian_checkpoint_model(
+        gaussian_conditioning_mode="cross_agent_spatial_attention",
+        gaussian_residual_floor=0.1,
+    )
+    with pytest.raises(ValueError, match="gaussian_conditioning"):
+        target._validate_multi_robot_checkpoint_metadata(
+            _native_full_payload(source),
+            "p10-spatial-v2.pt",
+            validate_treatment=False,
+        )
 
 
 def test_gaussian_relation_v3_hub_io_scope_includes_new_relation_parameters():

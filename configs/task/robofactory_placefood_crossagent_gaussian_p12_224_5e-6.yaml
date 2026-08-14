@@ -1,0 +1,22 @@
+# @package _global_
+
+# P12 keeps the accepted P10 low-auxiliary objective and adds a zero-gated
+# cross-agent spatial branch. Each action query can read only the other agents'
+# Gaussian tokens; shared weights and the runtime self mask preserve Dynamic-N
+# agent permutation equivariance.
+defaults:
+  - robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: gaussian_cross_agent_v4_from_spatial_v2
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: cross_agent_spatial_attention
+    gaussian_residual_floor: 0.1
+    gaussian_attention_temperature: 0.1
+
+wandb:
+  group: robofactory-placefood-crossagent-gaussian-p12
+  name: fastwam-placefood-crossagent-gaussian-p12-s42-8g-r1

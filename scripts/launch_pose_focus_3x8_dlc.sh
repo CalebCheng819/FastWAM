@@ -191,6 +191,7 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_relation_gripcontact_p8_224_5e-6) ;;
   robofactory_placefood_spatial_gripcontact_p9_224_5e-6) ;;
   robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6) ;;
+  robofactory_placefood_crossagent_gaussian_p12_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -199,6 +200,7 @@ P2_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-phase-x0-r5-s42-24g-r1-2
 P5_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-semantic-phase-p5-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
 P6_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-spatial-semantic-p6-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
 P7_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-task-gaussian-relation-p7-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
+P10_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-spatial-gripcontact-p10-lowaux-s42-8g-r1-20260814/checkpoints/weights/step_001000.pt"
 CANONICAL_SOURCE="${R5_SOURCE}"
 CANONICAL_SOURCE_BYTES="12047407619"
 case "${TASK_PROFILE}" in
@@ -219,6 +221,10 @@ case "${TASK_PROFILE}" in
     ;;
   robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6)
     CANONICAL_SOURCE="${P6_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12047407747"
+    ;;
+  robofactory_placefood_crossagent_gaussian_p12_224_5e-6)
+    CANONICAL_SOURCE="${P10_SOURCE}"
     CANONICAL_SOURCE_BYTES="12047407747"
     ;;
 esac
@@ -420,7 +426,11 @@ is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
 }
+is_cross_agent = (
+    task_path.stem == "robofactory_placefood_crossagent_gaussian_p12_224_5e-6"
+)
 is_gaussian_relation = task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
@@ -431,10 +441,12 @@ is_relation_gripcontact = (
 is_spatial_gripcontact = task_path.stem in {
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
 }
-is_lowaux_gripcontact = (
-    task_path.stem == "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6"
-)
+is_lowaux_gripcontact = task_path.stem in {
+    "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+}
 is_gripcontact = is_relation_gripcontact or is_spatial_gripcontact
 is_semantic_phase = task_path.stem in {
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
@@ -443,6 +455,7 @@ is_semantic_phase = task_path.stem in {
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -507,6 +520,7 @@ if task_path.stem in {
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -548,7 +562,18 @@ for label, mapping, expected in (
         if actual != wanted:
             raise SystemExit(f"{label} profile drift at {key}: expected {wanted!r}, got {actual!r}")
 if is_gaussian_spatial:
-    if is_gaussian_relation:
+    if is_cross_agent:
+        gaussian_expected = {
+            "weights_only_warm_start.architecture_upgrade": (
+                "gaussian_cross_agent_v4_from_spatial_v2"
+            ),
+            "model.action_dit_config.gaussian_conditioning_mode": (
+                "cross_agent_spatial_attention"
+            ),
+            "model.action_dit_config.gaussian_residual_floor": 0.1,
+            "model.action_dit_config.gaussian_attention_temperature": 0.1,
+        }
+    elif is_gaussian_relation:
         gaussian_expected = {
             "weights_only_warm_start.architecture_upgrade": (
                 None if is_relation_gripcontact else "gaussian_relation_v3_from_spatial_v2"
@@ -575,7 +600,11 @@ if is_gaussian_spatial:
             raise SystemExit(
                 f"Gaussian spatial profile drift at {key}: expected {wanted!r}, got {actual!r}"
             )
-    if is_gaussian_relation:
+    if is_cross_agent:
+        expected_parent = (
+            "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6"
+        )
+    elif is_gaussian_relation:
         expected_parent = (
             "robofactory_placefood_task_gaussian_relation_p7_224_5e-6"
             if is_relation_gripcontact
@@ -596,6 +625,13 @@ defaults = task.get("defaults", [])
 if expected_parent not in defaults:
     raise SystemExit(f"POSE_FOCUS task must inherit the audited profile {expected_parent}")
 if is_gripcontact:
+    gripcontact_task = task
+    if is_cross_agent:
+        gripcontact_task = yaml.safe_load(
+            task_path.with_name(
+                "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6.yaml"
+            ).read_text(encoding="utf-8")
+        )
     gripper_event_weight = 0.02 if is_lowaux_gripcontact else 2.0
     contact_proxy_weight = 0.01 if is_lowaux_gripcontact else 1.0
     b4_expected = {
@@ -607,7 +643,7 @@ if is_gripcontact:
     }
     for key, wanted in b4_expected.items():
         try:
-            actual = value_at(task, key)
+            actual = value_at(gripcontact_task, key)
         except (KeyError, TypeError) as exc:
             raise SystemExit(f"grip/contact profile is missing {key}: {exc}")
         if actual != wanted:

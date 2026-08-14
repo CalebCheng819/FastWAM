@@ -165,6 +165,7 @@ class Wan22Trainer:
             if self.weights_only_warm_start_architecture_upgrade not in {
                 "gaussian_spatial_v2_from_pooled_v1",
                 "gaussian_relation_v3_from_spatial_v2",
+                "gaussian_cross_agent_v4_from_spatial_v2",
             }:
                 raise ValueError(
                     "Unsupported weights_only_warm_start architecture_upgrade: "
