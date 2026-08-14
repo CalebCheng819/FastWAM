@@ -189,6 +189,7 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_spatial_semantic_p6_224_5e-6) ;;
   robofactory_placefood_task_gaussian_relation_p7_224_5e-6) ;;
   robofactory_placefood_relation_gripcontact_p8_224_5e-6) ;;
+  robofactory_placefood_spatial_gripcontact_p9_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -210,6 +211,10 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_relation_gripcontact_p8_224_5e-6)
     CANONICAL_SOURCE="${P7_SOURCE}"
     CANONICAL_SOURCE_BYTES="12055814467"
+    ;;
+  robofactory_placefood_spatial_gripcontact_p9_224_5e-6)
+    CANONICAL_SOURCE="${P6_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12047407747"
     ;;
 esac
 SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-${CANONICAL_SOURCE}}"
@@ -408,6 +413,7 @@ is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
 }
 is_gaussian_relation = task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
@@ -416,11 +422,16 @@ is_gaussian_relation = task_path.stem in {
 is_relation_gripcontact = (
     task_path.stem == "robofactory_placefood_relation_gripcontact_p8_224_5e-6"
 )
+is_spatial_gripcontact = (
+    task_path.stem == "robofactory_placefood_spatial_gripcontact_p9_224_5e-6"
+)
+is_gripcontact = is_relation_gripcontact or is_spatial_gripcontact
 is_semantic_phase = task_path.stem in {
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -483,6 +494,7 @@ if task_path.stem in {
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
+    "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -535,7 +547,9 @@ if is_gaussian_spatial:
         }
     else:
         gaussian_expected = {
-            "weights_only_warm_start.architecture_upgrade": "gaussian_spatial_v2_from_pooled_v1",
+            "weights_only_warm_start.architecture_upgrade": (
+                None if is_spatial_gripcontact else "gaussian_spatial_v2_from_pooled_v1"
+            ),
             "model.action_dit_config.gaussian_conditioning_mode": "spatial_cross_attention",
             "model.action_dit_config.gaussian_residual_floor": 0.1,
             "model.action_dit_config.gaussian_attention_temperature": 0.1,
@@ -556,17 +570,20 @@ if is_gaussian_spatial:
             else "robofactory_placefood_spatial_semantic_p6_224_5e-6"
         )
     else:
-        expected_parent = (
-            "robofactory_placefood_semantic_phase_p5_224_5e-6"
-            if is_semantic_phase
-            else "robofactory_placefood_pose_focus_r5_224_5e-6"
-        )
+        if is_spatial_gripcontact:
+            expected_parent = "robofactory_placefood_spatial_semantic_p6_224_5e-6"
+        else:
+            expected_parent = (
+                "robofactory_placefood_semantic_phase_p5_224_5e-6"
+                if is_semantic_phase
+                else "robofactory_placefood_pose_focus_r5_224_5e-6"
+            )
 else:
     expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
 defaults = task.get("defaults", [])
 if expected_parent not in defaults:
     raise SystemExit(f"POSE_FOCUS task must inherit the audited profile {expected_parent}")
-if is_relation_gripcontact:
+if is_gripcontact:
     b4_expected = {
         "model.loss.b4.enabled": True,
         "model.loss.b4.lambda_arm_huber": 0.0,
@@ -578,10 +595,10 @@ if is_relation_gripcontact:
         try:
             actual = value_at(task, key)
         except (KeyError, TypeError) as exc:
-            raise SystemExit(f"P8 profile is missing {key}: {exc}")
+            raise SystemExit(f"grip/contact profile is missing {key}: {exc}")
         if actual != wanted:
             raise SystemExit(
-                f"P8 profile drift at {key}: expected {wanted!r}, got {actual!r}"
+                f"grip/contact profile drift at {key}: expected {wanted!r}, got {actual!r}"
             )
 
 PY

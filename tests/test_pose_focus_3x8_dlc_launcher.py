@@ -21,6 +21,7 @@ P4_TASK_NAME = "robofactory_placefood_gaussian_spatial_p4_224_5e-6.yaml"
 P6_TASK_NAME = "robofactory_placefood_spatial_semantic_p6_224_5e-6.yaml"
 P7_TASK_NAME = "robofactory_placefood_task_gaussian_relation_p7_224_5e-6.yaml"
 P8_TASK_NAME = "robofactory_placefood_relation_gripcontact_p8_224_5e-6.yaml"
+P9_TASK_NAME = "robofactory_placefood_spatial_gripcontact_p9_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
 SCALE_8GPU_NAME = "robofactory_multi_robot_8gpu_eff24_pose_focus.yaml"
 SCALE_4GPU_NAME = "robofactory_multi_robot_4gpu_eff24_pose_focus.yaml"
@@ -75,6 +76,9 @@ class PoseFocusLauncherTests(unittest.TestCase):
         )
         (repo / "configs" / "task" / P8_TASK_NAME).write_bytes(
             (REPO / "configs" / "task" / P8_TASK_NAME).read_bytes()
+        )
+        (repo / "configs" / "task" / P9_TASK_NAME).write_bytes(
+            (REPO / "configs" / "task" / P9_TASK_NAME).read_bytes()
         )
         (repo / "configs" / "scale" / SCALE_NAME).write_bytes(
             (REPO / "configs" / "scale" / SCALE_NAME).read_bytes()
@@ -325,6 +329,25 @@ class PoseFocusLauncherTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(
                 "task=robofactory_placefood_relation_gripcontact_p8_224_5e-6",
+                result.stdout,
+            )
+
+    def test_dry_run_resolves_p9_spatial_gripcontact_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_POSE_FOCUS_TASK_PROFILE"] = P9_TASK_NAME.removesuffix(".yaml")
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "task=robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
                 result.stdout,
             )
 
@@ -788,6 +811,62 @@ class PoseFocusLauncherTests(unittest.TestCase):
             self.assertEqual(
                 request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES"],
                 "12055814467",
+            )
+
+    def test_renderer_selects_p9_source_and_objective(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id",
+                "fastwam-placefood-spatial-gripcontact-p9-test",
+                "--attempt-id",
+                "attempt-1",
+                "--output",
+                str(output),
+                "--bootstrap-script",
+                "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root",
+                "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest",
+                "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit",
+                "4" * 40,
+                "--offline-source-bundle-relative-path",
+                "source/FastWAM.bundle",
+                "--base-python",
+                "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle",
+                str(bundle),
+                "--pose-focus-code-commit",
+                commit,
+                "--task-profile",
+                P9_TASK_NAME.removesuffix(".yaml"),
+                "--source-weight",
+                P6_SOURCE_WEIGHT,
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(output.read_text(encoding="utf-8"))["request"]
+            self.assertEqual(
+                request["Settings"]["Tags"]["objective"],
+                "placefood-spatial-gripper-contact-proxy",
+            )
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "P6-action-step1000-weights-only",
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT"],
+                P6_SOURCE_WEIGHT,
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_SOURCE_WEIGHT_BYTES"],
+                "12047407747",
             )
 
 
