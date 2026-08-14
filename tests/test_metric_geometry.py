@@ -17,7 +17,10 @@ from fastwam.datasets.metric_geometry_cache import (
     MetricGeometryCache,
     MissingMetricGeometryFramesError,
 )
-from scripts.build_robofactory_metric_geometry_cache import STAT_CMP_ALLOWLIST
+from scripts.build_robofactory_metric_geometry_cache import (
+    STAT_CMP_ALLOWLIST,
+    parse_args,
+)
 
 
 def _intrinsic() -> torch.Tensor:
@@ -167,3 +170,37 @@ def test_metric_geometry_cache_detects_changed_data(tmp_path: Path) -> None:
 
 def test_metric_cache_allowlist_contains_only_runtime_files() -> None:
     assert STAT_CMP_ALLOWLIST == "stat-cmp.allowlist"
+
+
+def test_metric_cache_builder_defaults_to_gpu_rendering() -> None:
+    args = parse_args(
+        [
+            "--dataset-root",
+            "/dataset",
+            "--robofactory-root",
+            "/robofactory",
+            "--output-root",
+            "/output",
+        ]
+    )
+    assert args.sim_backend == "auto"
+    assert args.render_backend == "gpu"
+
+
+def test_metric_cache_builder_accepts_cpu_rendering() -> None:
+    args = parse_args(
+        [
+            "--dataset-root",
+            "/dataset",
+            "--robofactory-root",
+            "/robofactory",
+            "--output-root",
+            "/output",
+            "--sim-backend",
+            "cpu",
+            "--render-backend",
+            "cpu",
+        ]
+    )
+    assert args.sim_backend == "cpu"
+    assert args.render_backend == "cpu"

@@ -97,7 +97,13 @@ def _window_timesteps(
     return split, timesteps
 
 
-def _build_environment(robofactory_root: Path, task_name: str):
+def _build_environment(
+    robofactory_root: Path,
+    task_name: str,
+    *,
+    sim_backend: str = "auto",
+    render_backend: str = "gpu",
+):
     if task_name not in TASK_CONFIGS:
         raise KeyError(f"Unsupported task: {task_name}")
     for import_root in (robofactory_root.parent, robofactory_root):
@@ -121,8 +127,8 @@ def _build_environment(robofactory_root: Path, task_name: str):
         human_render_camera_configs={"shader_pack": "default"},
         viewer_camera_configs={"shader_pack": "default"},
         num_envs=1,
-        sim_backend="auto",
-        render_backend="gpu",
+        sim_backend=sim_backend,
+        render_backend=render_backend,
         enable_shadow=True,
         parallel_in_single_scene=False,
     )
@@ -181,7 +187,12 @@ def build_cache(args: argparse.Namespace) -> dict[str, Any]:
     try:
         from mani_skill.trajectory import utils as trajectory_utils
 
-        env = _build_environment(robofactory_root, args.task_name)
+        env = _build_environment(
+            robofactory_root,
+            args.task_name,
+            sim_backend=args.sim_backend,
+            render_backend=args.render_backend,
+        )
         with data_path.open("xb") as output:
             trajectory_ordinal = 0
             for discovered_source in sources:
@@ -348,6 +359,8 @@ def build_cache(args: argparse.Namespace) -> dict[str, Any]:
                 "max_depth_m": METRIC_GEOMETRY_MAX_DEPTH_M,
                 "surface_band_m": 0.03,
                 "channels": "xyz_mean_covariance_row_major_valid",
+                "sim_backend": args.sim_backend,
+                "render_backend": args.render_backend,
             },
             "sources": source_records,
             "counts": dict(sorted(counters.items())),
@@ -379,7 +392,7 @@ def build_cache(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--robofactory-root", required=True)
@@ -392,6 +405,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-set-proportion", type=float, default=0.1)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument(
+        "--sim-backend",
+        default="auto",
+        choices=("auto", "cpu", "gpu", "cuda"),
+    )
+    parser.add_argument(
+        "--render-backend",
+        default="gpu",
+        choices=("cpu", "gpu", "cuda"),
+    )
+    parser.add_argument(
         "--output-size",
         type=int,
         nargs=2,
@@ -400,7 +423,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit-trajectories", type=int)
     parser.add_argument("--progress-every", type=int, default=100)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.progress_every < 1:
         parser.error("--progress-every must be positive")
     return args
