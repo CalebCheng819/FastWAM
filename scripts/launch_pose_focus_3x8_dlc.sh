@@ -192,8 +192,14 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_spatial_gripcontact_p9_224_5e-6) ;;
   robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6) ;;
   robofactory_placefood_crossagent_gaussian_p12_224_5e-6) ;;
+  robofactory_placefood_metric_gaussian_p13_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
+if [[ "${TASK_PROFILE}" == "robofactory_placefood_metric_gaussian_p13_224_5e-6" ]]; then
+  IS_METRIC_GEOMETRY=1
+else
+  IS_METRIC_GEOMETRY=0
+fi
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
 P1_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/checkpoints/weights/step_001000.pt"
 P2_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-phase-x0-r5-s42-24g-r1-20260813/checkpoints/weights/step_001000.pt"
@@ -224,6 +230,10 @@ case "${TASK_PROFILE}" in
     CANONICAL_SOURCE_BYTES="12047407747"
     ;;
   robofactory_placefood_crossagent_gaussian_p12_224_5e-6)
+    CANONICAL_SOURCE="${P10_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12047407747"
+    ;;
+  robofactory_placefood_metric_gaussian_p13_224_5e-6)
     CANONICAL_SOURCE="${P10_SOURCE}"
     CANONICAL_SOURCE_BYTES="12047407747"
     ;;
@@ -336,15 +346,24 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   require_exact_env FASTWAM_POSE_FOCUS_CPFS_SOURCE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao"
   require_exact_env FASTWAM_POSE_FOCUS_STATS_SOURCE_ROOT "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
   require_exact_env FASTWAM_POSE_FOCUS_CPFS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/cpfs-whole-file-bundle.sha256"
-  require_exact_env FASTWAM_POSE_FOCUS_OSS_SOURCE_ROOT "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
-  require_exact_env FASTWAM_POSE_FOCUS_OSS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"
   require_exact_env FASTWAM_LOCAL_DATASET_RELATIVE_ROOT "datasets/robofactory_multi_robot"
   require_exact_env FASTWAM_LOCAL_STATS_RELATIVE_PATH "datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json"
   require_exact_env FASTWAM_LOCAL_TEXT_EMBEDS_RELATIVE_ROOT "datasets/robofactory_multi_robot/text_embeds_cache_n234"
   require_exact_env FASTWAM_LOCAL_MODEL_CACHE_RELATIVE_ROOT "checkpoints/FastWAM/model-cache"
   require_exact_env FASTWAM_LOCAL_VAE_RELATIVE_PATH "checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
-  require_exact_env FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT "compact-s42-13x28x40-fp16-meanalpha-v2"
   require_exact_env FASTWAM_LOCAL_EXPECTED_H5_FILES "24"
+  if [[ "${IS_METRIC_GEOMETRY}" == "1" ]]; then
+    require_exact_env FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT "/oss-chengjuntao/artifacts/fastwam-placefood-metric-geometry-60x80-s42-v1-20260815"
+    require_exact_env FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-placefood-metric-geometry-60x80-s42-v1-20260815/stat-cmp.allowlist"
+    OSS_STAGING_SOURCE_ROOT="${FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT}"
+    OSS_STAGING_ALLOWLIST="${FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST}"
+  else
+    require_exact_env FASTWAM_POSE_FOCUS_OSS_SOURCE_ROOT "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
+    require_exact_env FASTWAM_POSE_FOCUS_OSS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"
+    require_exact_env FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT "compact-s42-13x28x40-fp16-meanalpha-v2"
+    OSS_STAGING_SOURCE_ROOT="${FASTWAM_POSE_FOCUS_OSS_SOURCE_ROOT}"
+    OSS_STAGING_ALLOWLIST="${FASTWAM_POSE_FOCUS_OSS_ALLOWLIST}"
+  fi
   # shellcheck source=/dev/null
   source "${REPO_ROOT}/scripts/dlc_preflight.sh"
   fastwam_prepare_nvidia_host570 || die "NVIDIA host preparation failed"
@@ -366,8 +385,8 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
     --run-id "${RUN_ID}" --attempt-id "${ATTEMPT_ID}" --source-label cpfs || \
     die "CPFS stat-cmp node-local cache preparation failed"
   "${PYTHON_BIN}" "${REPO_ROOT}/scripts/b4_stat_cmp_cache.py" \
-    --source-root "${FASTWAM_POSE_FOCUS_OSS_SOURCE_ROOT}" \
-    --allowlist "${FASTWAM_POSE_FOCUS_OSS_ALLOWLIST}" \
+    --source-root "${OSS_STAGING_SOURCE_ROOT}" \
+    --allowlist "${OSS_STAGING_ALLOWLIST}" \
     --destination "${FASTWAM_LOCAL_OSS_CACHE_DIR}" \
     --run-id "${RUN_ID}" --attempt-id "${ATTEMPT_ID}" --source-label oss || \
     die "OSS stat-cmp node-local cache preparation failed"
@@ -386,7 +405,11 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   TEXT_CACHE_DIR="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_TEXT_EMBEDS_RELATIVE_ROOT}"
   MODEL_CACHE_ROOT="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_MODEL_CACHE_RELATIVE_ROOT}"
   VAE_PATH="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_VAE_RELATIVE_PATH}"
-  GAUSSIAN_CACHE_DIR="${FASTWAM_LOCAL_OSS_CACHE_DIR}/${FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT}"
+  if [[ "${IS_METRIC_GEOMETRY}" == "1" ]]; then
+    GAUSSIAN_CACHE_DIR="${FASTWAM_LOCAL_OSS_CACHE_DIR}"
+  else
+    GAUSSIAN_CACHE_DIR="${FASTWAM_LOCAL_OSS_CACHE_DIR}/${FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT}"
+  fi
   export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_CACHE_ROOT}"
   export FASTWAM_LOCAL_VAE_PATH="${VAE_PATH}"
 fi
@@ -427,7 +450,11 @@ is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+    "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 }
+is_metric_geometry = (
+    task_path.stem == "robofactory_placefood_metric_gaussian_p13_224_5e-6"
+)
 is_cross_agent = (
     task_path.stem == "robofactory_placefood_crossagent_gaussian_p12_224_5e-6"
 )
@@ -442,10 +469,12 @@ is_spatial_gripcontact = task_path.stem in {
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+    "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 }
 is_lowaux_gripcontact = task_path.stem in {
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+    "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 }
 is_gripcontact = is_relation_gripcontact or is_spatial_gripcontact
 is_semantic_phase = task_path.stem in {
@@ -456,6 +485,7 @@ is_semantic_phase = task_path.stem in {
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+    "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -521,6 +551,7 @@ if task_path.stem in {
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+    "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -562,7 +593,20 @@ for label, mapping, expected in (
         if actual != wanted:
             raise SystemExit(f"{label} profile drift at {key}: expected {wanted!r}, got {actual!r}")
 if is_gaussian_spatial:
-    if is_cross_agent:
+    if is_metric_geometry:
+        gaussian_expected = {
+            "weights_only_warm_start.architecture_upgrade": (
+                "metric_gaussian_v5_from_spatial_v2"
+            ),
+            "model.action_dit_config.gaussian_conditioning_mode": (
+                "spatial_cross_attention"
+            ),
+            "model.action_dit_config.gaussian_residual_floor": 0.1,
+            "model.action_dit_config.gaussian_attention_temperature": 0.1,
+            "model.action_dit_config.gaussian_height": 60,
+            "model.action_dit_config.gaussian_width": 80,
+        }
+    elif is_cross_agent:
         gaussian_expected = {
             "weights_only_warm_start.architecture_upgrade": (
                 "gaussian_cross_agent_v4_from_spatial_v2"
@@ -600,7 +644,11 @@ if is_gaussian_spatial:
             raise SystemExit(
                 f"Gaussian spatial profile drift at {key}: expected {wanted!r}, got {actual!r}"
             )
-    if is_cross_agent:
+    if is_metric_geometry:
+        expected_parent = (
+            "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6"
+        )
+    elif is_cross_agent:
         expected_parent = (
             "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6"
         )
@@ -626,7 +674,7 @@ if expected_parent not in defaults:
     raise SystemExit(f"POSE_FOCUS task must inherit the audited profile {expected_parent}")
 if is_gripcontact:
     gripcontact_task = task
-    if is_cross_agent:
+    if is_cross_agent or is_metric_geometry:
         gripcontact_task = yaml.safe_load(
             task_path.with_name(
                 "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6.yaml"
@@ -649,6 +697,23 @@ if is_gripcontact:
         if actual != wanted:
             raise SystemExit(
                 f"grip/contact profile drift at {key}: expected {wanted!r}, got {actual!r}"
+            )
+
+if is_metric_geometry:
+    metric_expected = {
+        "data.train.gaussian_cache_format": "metric_geometry",
+        "data.val.gaussian_cache_format": "metric_geometry",
+        "data.train.gaussian_size": [60, 80],
+        "data.val.gaussian_size": [60, 80],
+    }
+    for key, wanted in metric_expected.items():
+        try:
+            actual = value_at(task, key)
+        except (KeyError, TypeError) as exc:
+            raise SystemExit(f"metric geometry profile is missing {key}: {exc}")
+        if actual != wanted:
+            raise SystemExit(
+                f"metric geometry profile drift at {key}: expected {wanted!r}, got {actual!r}"
             )
 
 PY

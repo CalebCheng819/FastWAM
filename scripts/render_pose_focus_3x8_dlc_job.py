@@ -40,6 +40,7 @@ TASK_PROFILES = (
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
+    "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 )
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
@@ -80,6 +81,7 @@ SOURCE_WEIGHTS = {
     TASK_PROFILES[7]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
     TASK_PROFILES[8]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
     TASK_PROFILES[9]: (P10_SOURCE_WEIGHT, 12047407747, "P10-action-step1000-weights-only"),
+    TASK_PROFILES[10]: (P10_SOURCE_WEIGHT, 12047407747, "P10-action-step1000-weights-only"),
 }
 OBJECTIVES = {
     TASK_PROFILES[0]: "active-agent-continuous-pose",
@@ -92,6 +94,7 @@ OBJECTIVES = {
     TASK_PROFILES[7]: "placefood-spatial-gripper-contact-proxy",
     TASK_PROFILES[8]: "placefood-spatial-gripper-contact-lowaux",
     TASK_PROFILES[9]: "placefood-crossagent-gaussian-lowaux",
+    TASK_PROFILES[10]: "placefood-metric-depth-spatial-lowaux",
 }
 
 
@@ -263,6 +266,15 @@ def main() -> int:
         "FASTWAM_POSE_FOCUS_OSS_ALLOWLIST": (
             "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-"
             "20260802T1235Z/oss-compact-whole-file-bundle.sha256"
+        ),
+        "FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT": (
+            "/oss-chengjuntao/artifacts/"
+            "fastwam-placefood-metric-geometry-60x80-s42-v1-20260815"
+        ),
+        "FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST": (
+            "/oss-chengjuntao/artifacts/"
+            "fastwam-placefood-metric-geometry-60x80-s42-v1-20260815/"
+            "stat-cmp.allowlist"
         ),
         "FASTWAM_LOCAL_DATASET_RELATIVE_ROOT": "datasets/robofactory_multi_robot",
         "FASTWAM_LOCAL_STATS_RELATIVE_PATH": (

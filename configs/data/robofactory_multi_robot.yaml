@@ -27,6 +27,7 @@ train:
   # GAU1 overrides this with an immutable compact-cache root. Full-resolution
   # all-timestep 13ch tensors remain the OSS canonical source, not the hot path.
   gaussian_cache_dir: null
+  gaussian_cache_format: canonical
   gaussian_cache_verify: manifest
   gaussian_cache_expected_manifest_sha256: null
   gaussian_cache_expected_selection_sha256: null
@@ -63,6 +64,7 @@ val:
   require_train_only_stats: true
   text_embedding_cache_dir: /cpfs/user/chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234
   gaussian_cache_dir: null
+  gaussian_cache_format: canonical
   gaussian_cache_verify: manifest
   gaussian_cache_expected_manifest_sha256: null
   gaussian_cache_expected_selection_sha256: null

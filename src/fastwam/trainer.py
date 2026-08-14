@@ -1207,6 +1207,7 @@ class Wan22Trainer:
             "split_seed",
             "randomize_agent_order",
             "require_train_only_stats",
+            "gaussian_cache_format",
             "gaussian_cache_verify",
             "gaussian_cache_expected_manifest_sha256",
             "gaussian_cache_expected_selection_sha256",

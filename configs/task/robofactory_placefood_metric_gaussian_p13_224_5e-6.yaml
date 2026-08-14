@@ -1,0 +1,33 @@
+# @package _global_
+
+# P13 isolates the representation change from P10: the action objective and
+# local spatial attention are unchanged, while NoPoSplat learned-gauge maps are
+# replaced by calibrated observation-only depth geometry at 60x80 resolution.
+defaults:
+  - robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: metric_gaussian_v5_from_spatial_v2
+
+data:
+  train:
+    gaussian_cache_format: metric_geometry
+    gaussian_cache_verify: stat_cmp
+    gaussian_size: [60, 80]
+  val:
+    gaussian_cache_format: metric_geometry
+    gaussian_cache_verify: stat_cmp
+    gaussian_size: [60, 80]
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: spatial_cross_attention
+    gaussian_residual_floor: 0.1
+    gaussian_attention_temperature: 0.1
+    gaussian_height: 60
+    gaussian_width: 80
+
+wandb:
+  group: robofactory-placefood-metric-gaussian-p13
+  name: fastwam-placefood-metric-gaussian-p13-s42-8g-r1

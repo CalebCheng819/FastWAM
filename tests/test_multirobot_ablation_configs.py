@@ -767,6 +767,38 @@ def test_crossagent_gaussian_p12_keeps_p10_objective_and_upgrades_architecture(
     assert cfg["gradient_accumulation_steps"] == 3
 
 
+def test_metric_gaussian_p13_keeps_p10_objective_and_changes_geometry(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT",
+        TEST_POSE_FOCUS_BASE_CHECKPOINT,
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_metric_gaussian_p13_224_5e-6",
+        "+scale=robofactory_multi_robot_8gpu_eff24_pose_focus",
+    )
+
+    assert cfg["weights_only_warm_start"]["architecture_upgrade"] == (
+        "metric_gaussian_v5_from_spatial_v2"
+    )
+    action_cfg = cfg["model"]["action_dit_config"]
+    assert action_cfg["gaussian_conditioning_mode"] == "spatial_cross_attention"
+    assert action_cfg["gaussian_height"] == 60
+    assert action_cfg["gaussian_width"] == 80
+    for split in ("train", "val"):
+        data_cfg = cfg["data"][split]
+        assert data_cfg["gaussian_cache_format"] == "metric_geometry"
+        assert data_cfg["gaussian_cache_verify"] == "stat_cmp"
+        assert data_cfg["gaussian_size"] == [60, 80]
+    b4 = cfg["model"]["loss"]["b4"]
+    assert b4["lambda_gripper_event"] == 0.02
+    assert b4["lambda_contact_intent_proxy"] == 0.01
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["max_steps"] == 1000
+    assert cfg["gradient_accumulation_steps"] == 3
+
+
 def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):
     _set_gaussian_env(monkeypatch)
     cfg = _compose_arm("robofactory_multi_robot_vg1_hub1_gau1_224_1e-4")

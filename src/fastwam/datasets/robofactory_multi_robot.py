@@ -15,6 +15,7 @@ import torchvision.transforms.functional as transforms_F
 from omegaconf import DictConfig, OmegaConf
 
 from fastwam.datasets.gaussian_cache import FrameKey, GaussianCache, sha256_file
+from fastwam.datasets.metric_geometry_cache import MetricGeometryCache
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fastwam.utils.logging_config import get_logger
 
@@ -308,6 +309,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         stats_source_root: Optional[str] = None,
         text_embedding_cache_dir: Optional[str] = None,
         gaussian_cache_dir: Optional[str] = None,
+        gaussian_cache_format: str = "canonical",
         gaussian_cache_verify: str = "manifest",
         gaussian_cache_expected_manifest_sha256: Optional[str] = None,
         gaussian_cache_expected_selection_sha256: Optional[str] = None,
@@ -378,6 +380,12 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             if gaussian_cache_dir is None
             else Path(gaussian_cache_dir).expanduser().resolve()
         )
+        self.gaussian_cache_format = str(gaussian_cache_format).strip().lower()
+        if self.gaussian_cache_format not in {"canonical", "metric_geometry"}:
+            raise ValueError(
+                "gaussian_cache_format must be 'canonical' or 'metric_geometry', "
+                f"got {gaussian_cache_format!r}"
+            )
         self.gaussian_cache_verify = str(gaussian_cache_verify).strip().lower()
         self.gaussian_cache_expected_manifest_sha256 = _optional_sha256(
             gaussian_cache_expected_manifest_sha256,
@@ -433,7 +441,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             release_command_threshold=self.placefood_release_command_threshold,
         )
         self._h5_handles: dict[str, h5py.File] = {}
-        self._gaussian_cache: Optional[GaussianCache] = None
+        self._gaussian_cache: Optional[GaussianCache | MetricGeometryCache] = None
         self._text_context_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         self._epoch = 0
 
@@ -455,6 +463,16 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                 "gaussian_cache_verify='stat_cmp' cannot honor SHA-256 identity pins; "
                 "leave all gaussian_cache_expected_*_sha256 fields unset"
             )
+        if self.gaussian_cache_format == "metric_geometry":
+            if self.gaussian_cache_verify != "stat_cmp":
+                raise ValueError(
+                    "metric_geometry caches require gaussian_cache_verify='stat_cmp'"
+                )
+            if any(value is not None for value in gaussian_identity_pins):
+                raise ValueError(
+                    "metric_geometry caches use metadata provenance and do not accept "
+                    "gaussian_cache_expected_*_sha256 pins"
+                )
 
         if self.action_horizon <= 0 or self.action_horizon % self.action_video_freq_ratio:
             raise ValueError(
@@ -1029,18 +1047,42 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         context, context_mask = cached
         return context.clone(), context_mask.clone()
 
-    def _get_gaussian_cache(self) -> GaussianCache:
+    def _get_gaussian_cache(self) -> GaussianCache | MetricGeometryCache:
         if self.gaussian_cache_dir is None:
             raise RuntimeError("Gaussian cache was requested but gaussian_cache_dir is not set")
         if self._gaussian_cache is None:
-            self._gaussian_cache = GaussianCache.open(
-                self.gaussian_cache_dir,
-                verify=self.gaussian_cache_verify,
-            )
+            if self.gaussian_cache_format == "metric_geometry":
+                self._gaussian_cache = MetricGeometryCache.open(
+                    self.gaussian_cache_dir
+                )
+            else:
+                self._gaussian_cache = GaussianCache.open(
+                    self.gaussian_cache_dir,
+                    verify=self.gaussian_cache_verify,
+                )
         return self._gaussian_cache
 
     def _preflight_gaussian_cache(self) -> None:
         cache = self._get_gaussian_cache()
+        expected_shape = (self.gaussian_channels, *self.gaussian_size)
+        if self.gaussian_cache_format == "metric_geometry":
+            if tuple(cache.frame_shape) != expected_shape:
+                raise ValueError(
+                    f"Metric geometry cache frame shape must be {expected_shape}, "
+                    f"got {tuple(cache.frame_shape)} from {self.gaussian_cache_dir}"
+                )
+            cache.preflight_keys(
+                FrameKey(
+                    entry["source_path"],
+                    entry["trajectory"],
+                    int(entry["start"]),
+                    agent_name,
+                )
+                for entry in self.entries
+                for agent_name in entry["agent_names"]
+            )
+            return
+
         manifest = cache.manifest
         stat_cmp = self.gaussian_cache_verify == "stat_cmp"
         if not stat_cmp and self.gaussian_cache_expected_manifest_sha256 is not None:
@@ -1090,7 +1132,6 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                     f"expected={self.gaussian_cache_expected_source_identity_sha256} "
                     f"actual={actual_source_identity_sha256} root={self.gaussian_cache_dir}"
                 )
-        expected_shape = (self.gaussian_channels, *self.gaussian_size)
         if tuple(cache.schema.frame_shape) != expected_shape:
             raise ValueError(
                 f"Gaussian cache frame shape must be {expected_shape}, "
