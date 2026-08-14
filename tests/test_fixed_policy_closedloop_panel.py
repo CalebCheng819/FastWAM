@@ -254,6 +254,15 @@ class FixedPolicyClosedLoopPanelTests(unittest.TestCase):
 
         self.assertIn("task_conditioned_relation_v3", architecture_action.choices)
 
+    def test_panel_cli_accepts_cross_agent_architecture(self) -> None:
+        architecture_action = next(
+            action
+            for action in panel_runner._parser()._actions
+            if action.dest == "action_architecture"
+        )
+
+        self.assertIn("cross_agent_gaussian_v4", architecture_action.choices)
+
     def test_panel_cli_accepts_metric_geometry_architecture(self) -> None:
         parser = panel_runner._parser()
         architecture_action = next(

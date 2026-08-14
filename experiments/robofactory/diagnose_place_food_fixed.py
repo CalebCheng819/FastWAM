@@ -2474,6 +2474,7 @@ def _parser() -> argparse.ArgumentParser:
         choices=(
             "pooled_v1",
             "gaussian_spatial_v2",
+            "cross_agent_gaussian_v4",
             "task_conditioned_relation_v3",
             "metric_gaussian_v5",
         ),

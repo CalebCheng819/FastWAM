@@ -241,6 +241,39 @@ class B4RolloutContractTests(unittest.TestCase):
         self.assertEqual(config.action_dit_config.gaussian_relation_num_heads, 8)
         self.assertEqual(config.loss.lambda_video, 0.0)
 
+    def test_cross_agent_config_preserves_spatial_action_only_contract(self) -> None:
+        config = policy.compose_cross_agent_gaussian_action_model_config()
+
+        self.assertEqual(config.training_mode, "action_only_cache")
+        self.assertEqual(config.checkpoint_integrity_mode, "metadata_no_hash")
+        self.assertTrue(config.action_dit_config.enable_gaussian)
+        self.assertEqual(
+            config.action_dit_config.gaussian_conditioning_mode,
+            "cross_agent_spatial_attention",
+        )
+        self.assertEqual(config.action_dit_config.gaussian_residual_floor, 0.1)
+        self.assertEqual(config.action_dit_config.gaussian_attention_temperature, 0.1)
+        self.assertEqual(config.loss.lambda_video, 0.0)
+
+    def test_cross_agent_runtime_contract_is_fail_closed(self) -> None:
+        valid = SimpleNamespace(
+            gaussian_conditioning_mode="cross_agent_spatial_attention",
+            gaussian_residual_floor=0.1,
+            gaussian_attention_temperature=0.1,
+            gaussian_remote_gate=object(),
+        )
+
+        policy._validate_gaussian_action_contract(
+            valid,
+            "cross_agent_gaussian_v4",
+        )
+        valid.gaussian_remote_gate = None
+        with self.assertRaisesRegex(RuntimeError, "P12 cross-agent"):
+            policy._validate_gaussian_action_contract(
+                valid,
+                "cross_agent_gaussian_v4",
+            )
+
     def test_task_conditioned_relation_runtime_contract_is_fail_closed(self) -> None:
         valid = SimpleNamespace(
             gaussian_conditioning_mode="task_conditioned_relation_attention",

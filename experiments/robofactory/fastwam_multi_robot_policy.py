@@ -705,6 +705,18 @@ def compose_metric_gaussian_action_model_config(
     return config
 
 
+def compose_cross_agent_gaussian_action_model_config(
+    project_root: str | Path = PROJECT_ROOT,
+):
+    """Resolve the P12 cross-agent spatial-Gaussian architecture."""
+
+    config = compose_gaussian_spatial_action_model_config(project_root)
+    config.action_dit_config.gaussian_conditioning_mode = (
+        "cross_agent_spatial_attention"
+    )
+    return config
+
+
 def compose_task_conditioned_relation_action_model_config(
     project_root: str | Path = PROJECT_ROOT,
 ):
@@ -751,6 +763,25 @@ def _validate_gaussian_action_contract(action_expert: Any, architecture: str) ->
             label = "P13 metric-geometry spatial-Gaussian"
         else:
             label = "P4/P6 spatial-Gaussian"
+    elif architecture == "cross_agent_gaussian_v4":
+        observed = {
+            "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
+            "residual_floor": getattr(action_expert, "gaussian_residual_floor", None),
+            "attention_temperature": getattr(
+                action_expert,
+                "gaussian_attention_temperature",
+                None,
+            ),
+            "remote_gate": getattr(action_expert, "gaussian_remote_gate", None)
+            is not None,
+        }
+        expected = {
+            "mode": "cross_agent_spatial_attention",
+            "residual_floor": 0.1,
+            "attention_temperature": 0.1,
+            "remote_gate": True,
+        }
+        label = "P12 cross-agent spatial-Gaussian"
     elif architecture == "task_conditioned_relation_v3":
         observed = {
             "mode": getattr(action_expert, "gaussian_conditioning_mode", None),
@@ -1043,6 +1074,7 @@ class FastWAMMultiRobotPolicy:
         supported_action_architectures = {
             "pooled_v1",
             "gaussian_spatial_v2",
+            "cross_agent_gaussian_v4",
             "task_conditioned_relation_v3",
             "metric_gaussian_v5",
         }
@@ -1089,6 +1121,10 @@ class FastWAMMultiRobotPolicy:
             model_config = compose_step5000_model_config(self.project_root)
         elif self.action_architecture == "gaussian_spatial_v2":
             model_config = compose_gaussian_spatial_action_model_config(
+                self.project_root
+            )
+        elif self.action_architecture == "cross_agent_gaussian_v4":
+            model_config = compose_cross_agent_gaussian_action_model_config(
                 self.project_root
             )
         elif self.action_architecture == "task_conditioned_relation_v3":
@@ -1382,6 +1418,7 @@ __all__ = [
     "compose_r5_action_model_config",
     "compose_b4_action_model_config",
     "compose_gaussian_spatial_action_model_config",
+    "compose_cross_agent_gaussian_action_model_config",
     "compose_metric_gaussian_action_model_config",
     "compose_task_conditioned_relation_action_model_config",
     "denormalize_and_flatten_actions",
