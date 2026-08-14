@@ -1,0 +1,11 @@
+# FastWAM GAU0 PlaceFood matched evaluation R17
+
+R17 is the isolated replacement for two preserved failed launch identities. R15 created exactly one Priority-7 DLC job and completed zero episodes: its manual GLVND frontend shim reached SAPIEN environment construction but returned exit code 139. R16 also created exactly one Priority-7 job and completed zero episodes: the minimal NVIDIA vendor-driver namespace lacked the `libEGL.so.1` frontend required by PyOpenGL, so dependency preflight failed at `eglQueryString` before environment construction.
+
+R17 keeps the R16 vendor ICD and driver namespace, but adds one private scratch symlink, `libEGL.so.1`, to the frozen GLVND EGL frontend. It does not add the complete graphics library directory to `LD_LIBRARY_PATH`, does not inject a Vulkan loader, and leaves SAPIEN on its built-in Vulkan path. The controller and worker both verify the exact one-entry shim, its ordinary target and recorded byte size, the loader prefix, PyOpenGL EGL symbols, RoboFactory imports, and a real PlaceFood environment construction before any episode runs.
+
+The scientific panel is unchanged. It evaluates the same GAU0 checkpoint without Gaussian conditioning on the exact historical eight PlaceFood validation initial states used by the completed GAU1 baseline. Each arm is run sequentially as four two-episode shards with 300 environment steps, 60 policy queries, execution horizon 5, action horizon 32, and 20 diffusion inference steps per episode. The first arm uses the historical GAU1 normalization statistics and the second uses GAU0-native statistics; both must finish before terminal publication.
+
+The comparison controls checkpoint, panel, evaluator, seeds, limits, and policy settings, but it is not a pure causal Gaussian ablation because the historical GAU1 baseline used a different trained checkpoint and included Gaussian-conditioned training/runtime inputs. Results must therefore be reported as a matched operational comparison, with per-arm completion and failure modes, not as proof that Gaussian conditioning alone caused any difference.
+
+Source publication identities are isolated: R15 used r25, R16 used r26, and this R17 controller freezes r27. Failed job records, durable latches, outputs, and local state from R15/R16 are retained and never retried or reused.
