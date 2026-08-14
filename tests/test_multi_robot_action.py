@@ -1002,6 +1002,36 @@ def test_pose_clean_arm_and_b4_auxiliary_losses_compose_in_one_objective():
     assert metrics["contact_intent_proxy"] > 0.0
 
 
+def test_pose_focus_and_b4_auxiliary_losses_can_be_initialized_together():
+    model = FastWAMMultiRobot(
+        video_expert=torch.nn.Identity(),
+        action_expert=_tiny_action_expert(),
+        mot=torch.nn.Identity(),
+        vae=torch.nn.Identity(),
+        text_dim=16,
+        loss_lambda_video=0.0,
+        b4_aux_loss_enabled=True,
+        b4_arm_huber_loss_weight=0.0,
+        b4_gripper_event_loss_weight=2.0,
+        b4_contact_intent_proxy_loss_weight=1.0,
+        b4_gripper_dim=2,
+        b4_gripper_action_mean=0.0,
+        b4_gripper_action_std=1.0,
+        pose_focus_loss_enabled=True,
+        pose_focus_active_agent_id=0,
+        pose_focus_active_arm_weight=4.0,
+        pose_focus_other_arm_weight=1.0,
+        pose_focus_gripper_weight=1.0,
+        pose_focus_first_steps=5,
+        pose_focus_first_steps_weight=2.0,
+        pose_focus_gripper_dim=2,
+        pose_focus_clean_arm_x0_loss_weight=1.0,
+    )
+
+    assert model.pose_focus_loss_enabled is True
+    assert model.b4_aux_loss_enabled is True
+
+
 def test_multi_robot_runtime_forwards_b4_loss_contract(monkeypatch):
     from fastwam import runtime
 

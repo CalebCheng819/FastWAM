@@ -236,9 +236,6 @@ class FastWAMMultiRobot(FastWAM):
                 f"pose_focus_gripper_dim={pose_focus_gripper_dim} is invalid for "
                 f"action_dim={action_dim}"
             )
-        if self.pose_focus_loss_enabled and self.b4_aux_loss_enabled:
-            raise ValueError("Pose-focus and B4 auxiliary losses cannot be enabled together")
-
     @classmethod
     def from_wan22_pretrained(
         cls,
