@@ -241,6 +241,56 @@ def test_b4_sampler_is_exact_per_rank_50_50_and_multilabel_balanced():
     assert resumed_rank_zero == full_rank_zero[2:]
 
 
+def test_phase_balanced_sampler_can_select_only_transport_windows():
+    labels = [
+        ("pregrasp",),
+        ("transport",),
+        ("transport",),
+        ("target",),
+        ("release",),
+        ("transport",),
+    ]
+    dataset = _AgentCountsDataset(
+        [2] * len(labels),
+        ["PlaceFood-rf"] * len(labels),
+        action_horizon=4,
+        b4_phase_labels=labels,
+    )
+    sampler = ResumableAgentCountBatchSampler(
+        dataset,
+        seed=31,
+        batch_size=1,
+        num_processes=2,
+        gradient_accumulation_steps=1,
+        phase_balanced_fraction=0.5,
+        phase_balanced_labels=("transport",),
+    )
+
+    phase_records = [
+        (label, batch)
+        for source, label, batch in sampler.global_epoch_schedule()
+        if source == "phase_balanced"
+    ]
+    assert sampler.phase_balanced_labels == ("transport",)
+    assert phase_records
+    assert all(label == "transport" for label, _ in phase_records)
+    assert all(
+        "transport" in dataset.b4_phase_labels[index]
+        for _, batch in phase_records
+        for index in batch
+    )
+
+    with pytest.raises(ValueError, match="absent from count/task stratum"):
+        ResumableAgentCountBatchSampler(
+            dataset,
+            seed=31,
+            batch_size=1,
+            num_processes=2,
+            phase_balanced_fraction=0.5,
+            phase_balanced_labels=("missing",),
+        )
+
+
 def test_hierarchical_balance_and_real_token_budget_batches():
     dataset = _imbalanced_dataset()
     sampler = _dynamic_sampler(dataset)
@@ -455,6 +505,7 @@ def test_trainer_build_loader_enables_b4_phase_balanced_sampler():
     trainer.agent_action_token_budget = 24
     trainer.gradient_accumulation_steps = 2
     trainer.phase_balanced_fraction = 0.5
+    trainer.phase_balanced_labels = None
 
     loader = trainer._build_loader(dataset)
 

@@ -39,6 +39,7 @@ TASK_PROFILES = (
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_spatial_transport_p11_224_5e-6",
 )
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
@@ -74,6 +75,7 @@ SOURCE_WEIGHTS = {
     TASK_PROFILES[6]: (P7_SOURCE_WEIGHT, 12055814467, "P7-action-step1000-weights-only"),
     TASK_PROFILES[7]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
     TASK_PROFILES[8]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
+    TASK_PROFILES[9]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
 }
 OBJECTIVES = {
     TASK_PROFILES[0]: "active-agent-continuous-pose",
@@ -85,6 +87,7 @@ OBJECTIVES = {
     TASK_PROFILES[6]: "placefood-relation-gripper-contact-proxy",
     TASK_PROFILES[7]: "placefood-spatial-gripper-contact-proxy",
     TASK_PROFILES[8]: "placefood-spatial-gripper-contact-lowaux",
+    TASK_PROFILES[9]: "placefood-spatial-transport-causal-sampling",
 }
 
 

@@ -242,6 +242,31 @@ def test_placefood_task_phases_align_pre_action_state_with_target_action():
     assert phases.tolist() == [0, 0, 1, 1, 2, 3]
 
 
+def test_placefood_monotonic_phases_do_not_regress_after_release():
+    meat = torch.tensor(
+        [
+            [0.00, 0.00, 0.00],
+            [0.00, 0.00, 0.04],
+            [0.15, 0.00, 0.04],
+            [0.15, 0.00, 0.04],
+            [0.00, 0.00, 0.00],
+        ]
+    )
+    target = torch.tensor([[0.20, 0.00, 0.08]] * 5)
+    gripper = torch.tensor([-1.0, -1.0, -1.0, 1.0, -1.0])
+
+    raw = derive_placefood_task_phases(meat, target, gripper)
+    monotonic = derive_placefood_task_phases(
+        meat,
+        target,
+        gripper,
+        monotonic_progression=True,
+    )
+
+    assert raw.tolist() == [0, 1, 2, 3, 0]
+    assert monotonic.tolist() == [0, 1, 2, 3, 3]
+
+
 def test_placefood_task_state_labels_affect_sampling_index_only(tmp_path):
     task_name = "PlaceFood-rf"
     instruction = "two robots place food in the target"
@@ -287,6 +312,25 @@ def test_placefood_task_state_labels_affect_sampling_index_only(tmp_path):
     sample = dataset[0]
     assert "placefood_task_phase" not in sample
     assert sample["action"].shape == (2, 32, 8)
+
+    causal_dataset = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        window_stride=8,
+        val_set_proportion=0.0,
+        is_training_set=True,
+        randomize_agent_order=False,
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={task_name: instruction},
+        b4_phase_agent_id=0,
+        phase_label_source="placefood_task_state",
+        placefood_monotonic_phase_progression=True,
+        phase_window_label_mode="start",
+    )
+    assert causal_dataset.get_b4_phase_labels(0) == ("pregrasp",)
+    assert causal_dataset.phase_sampling_schema["monotonic_progression"] is True
+    assert causal_dataset.phase_sampling_schema["window_label_mode"] == "start"
 
 
 def test_b4_targets_use_t_plus_h_and_follow_native_agent_order(tmp_path):

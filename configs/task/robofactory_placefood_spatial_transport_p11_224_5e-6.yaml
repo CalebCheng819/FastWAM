@@ -1,0 +1,32 @@
+# @package _global_
+
+# P11 keeps the P6 spatial Gaussian model and action loss fixed. It changes
+# only the task-phase sampling treatment: causal monotonic phase progression,
+# one window label from the first target action, and transport-only balancing.
+defaults:
+  - robofactory_placefood_spatial_semantic_p6_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  # The source is P6, so no architecture upgrade is required.
+  architecture_upgrade: null
+
+phase_balanced_labels: [transport]
+
+data:
+  train:
+    placefood_monotonic_phase_progression: true
+    phase_window_label_mode: start
+  val:
+    placefood_monotonic_phase_progression: true
+    phase_window_label_mode: start
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: spatial_cross_attention
+    gaussian_residual_floor: 0.1
+    gaussian_attention_temperature: 0.1
+
+wandb:
+  group: robofactory-placefood-spatial-transport-p11
+  name: fastwam-placefood-spatial-transport-p11-s42-8g-r1

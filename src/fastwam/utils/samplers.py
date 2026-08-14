@@ -202,9 +202,10 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
 
     With ``phase_balanced_fraction=0.5``, exactly half of every rank's epoch
     retains the original task/count schedule.  The other half keeps the same
-    task/count allocation but chooses, with replacement, from each window's
-    multi-label target-action phase/event-proxy strata.  This never introduces
-    fixed-capacity agent slots or mixes native agent counts within a batch.
+    task/count allocation but chooses, with replacement, from target-action
+    phase/event-proxy strata. ``phase_balanced_labels`` can restrict that half
+    to explicitly selected phases. This never introduces fixed-capacity agent
+    slots or mixes native agent counts within a batch.
     """
 
     def __init__(
@@ -221,6 +222,7 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
         gradient_accumulation_steps: int = 1,
         b4_phase_labels: Optional[Sequence[Sequence[str]]] = None,
         phase_balanced_fraction: float = 0.0,
+        phase_balanced_labels: Optional[Sequence[str]] = None,
     ):
         self.dataset = dataset
         self.seed = int(seed)
@@ -231,6 +233,15 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
         self.resume_batch_offset = 0
         self.drop_last = False
         self.phase_balanced_fraction = float(phase_balanced_fraction)
+        if isinstance(phase_balanced_labels, str):
+            phase_balanced_labels = (phase_balanced_labels,)
+        self.phase_balanced_labels = (
+            None
+            if phase_balanced_labels is None
+            else tuple(
+                sorted({str(label).strip() for label in phase_balanced_labels})
+            )
+        )
 
         if (
             self.reference_batch_size <= 0
@@ -245,6 +256,15 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             raise ValueError(
                 "phase_balanced_fraction currently supports only 0.0 or the "
                 "audited B4 50/50 mixture (0.5)"
+            )
+        if self.phase_balanced_labels is not None and (
+            not self.phase_balanced_labels
+            or any(not label for label in self.phase_balanced_labels)
+        ):
+            raise ValueError("phase_balanced_labels must contain non-empty labels")
+        if self.phase_balanced_labels is not None and not self.phase_balanced_fraction:
+            raise ValueError(
+                "phase_balanced_labels requires phase_balanced_fraction to be enabled"
             )
 
         resolved_counts = resolve_agent_counts(dataset) if agent_counts is None else tuple(agent_counts)
@@ -353,10 +373,27 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
                 zip(self.agent_counts, self.task_ids, self.b4_phase_labels)
             ):
                 for label in labels:
+                    if (
+                        self.phase_balanced_labels is not None
+                        and label not in self.phase_balanced_labels
+                    ):
+                        continue
                     phase_strata[(count, task_id, label)].append(index)
         self._phase_strata = {
             stratum: tuple(indices) for stratum, indices in sorted(phase_strata.items())
         }
+        if self.phase_balanced_fraction and self.phase_balanced_labels is not None:
+            for count, task_id in self._strata:
+                missing = [
+                    label
+                    for label in self.phase_balanced_labels
+                    if (count, task_id, label) not in self._phase_strata
+                ]
+                if missing:
+                    raise ValueError(
+                        "Selected phase-balanced labels are absent from count/task "
+                        f"stratum {(count, task_id)}: {missing}"
+                    )
         self.observed_agent_counts = tuple(observed_counts)
 
         tasks_by_count: dict[int, list[str]] = defaultdict(list)
@@ -608,6 +645,7 @@ class ResumableAgentCountBatchSampler(Sampler[list[int]]):
             "agent_action_token_budget": self.agent_action_token_budget,
             "action_horizon": self.action_horizon,
             "phase_balanced_fraction": self.phase_balanced_fraction,
+            "phase_balanced_labels": self.phase_balanced_labels,
             "schedule": self.global_epoch_schedule(epoch),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

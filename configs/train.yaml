@@ -33,6 +33,9 @@ gradient_accumulation_steps: 1
 # task/count-balanced sampler; the committed B4 task selects the audited 50/50
 # original/target-action-phase mixture without increasing epoch token exposure.
 phase_balanced_fraction: 0.0
+# Optional phase allowlist for the balanced half. Null preserves the original
+# behavior of cycling every phase exposed by the dataset.
+phase_balanced_labels: null
 mixed_precision: "bf16" # one of: [no, fp16, bf16]
 seed: 42
 max_grad_norm: 1.0

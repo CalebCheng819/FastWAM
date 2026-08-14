@@ -110,6 +110,25 @@ class Wan22Trainer:
                 "the audited B4 50/50 mixture (0.5), got "
                 f"{self.phase_balanced_fraction}"
             )
+        configured_phase_labels = cfg.get("phase_balanced_labels", None)
+        if configured_phase_labels in (None, "", "null"):
+            self.phase_balanced_labels = None
+        else:
+            if isinstance(configured_phase_labels, str):
+                configured_phase_labels = (configured_phase_labels,)
+            self.phase_balanced_labels = tuple(
+                sorted({str(label).strip() for label in configured_phase_labels})
+            )
+            if not self.phase_balanced_labels or any(
+                not label for label in self.phase_balanced_labels
+            ):
+                raise ValueError(
+                    "`phase_balanced_labels` must contain non-empty labels"
+                )
+            if not self.phase_balanced_fraction:
+                raise ValueError(
+                    "`phase_balanced_labels` requires phase_balanced_fraction>0"
+                )
 
         self.resume = cfg.resume
         self.trainable_scope = str(cfg.get("trainable_scope", "dit")).strip().lower()
@@ -984,6 +1003,7 @@ class Wan22Trainer:
                 agent_action_token_budget=self.agent_action_token_budget,
                 gradient_accumulation_steps=self.gradient_accumulation_steps,
                 phase_balanced_fraction=self.phase_balanced_fraction,
+                phase_balanced_labels=getattr(self, "phase_balanced_labels", None),
             )
             if getattr(self, "provenance_mode", "sha256") == "stat_cmp":
                 schedule_evidence_name = "schedule_exact_record_count"
@@ -994,7 +1014,7 @@ class Wan22Trainer:
             logger.info(
                 "Using hierarchical task/count-balanced batching: counts=%s tasks_by_count=%s "
                 "batch_sizes=%s token_budget=%s global_batches=%d local_microbatches=%d "
-                "optimizer_steps=%d phase_balanced_fraction=%.1f "
+                "optimizer_steps=%d phase_balanced_fraction=%.1f phase_balanced_labels=%s "
                 "original_global_batches=%d phase_balanced_global_batches=%d "
                 "%s=%s",
                 self.train_sampler.observed_agent_counts,
@@ -1005,6 +1025,7 @@ class Wan22Trainer:
                 self.train_sampler.microbatches_per_process,
                 self.train_sampler.optimizer_steps_per_epoch,
                 self.train_sampler.phase_balanced_fraction,
+                self.train_sampler.phase_balanced_labels,
                 self.train_sampler.original_global_batches_per_epoch,
                 self.train_sampler.phase_balanced_global_batches_per_epoch,
                 schedule_evidence_name,
@@ -1023,7 +1044,9 @@ class Wan22Trainer:
                 "`agent_action_token_budget` is enabled, but the dataset does not expose "
                 "agent-count metadata."
             )
-        if self.phase_balanced_fraction:
+        if self.phase_balanced_fraction or getattr(
+            self, "phase_balanced_labels", None
+        ) is not None:
             raise ValueError(
                 "`phase_balanced_fraction` is enabled, but the dataset does not expose "
                 "the variable-agent task/count and B4 phase metadata it requires."
@@ -1212,6 +1235,13 @@ class Wan22Trainer:
             "gaussian_cache_expected_source_identity_sha256",
             "gaussian_channels",
             "context_len",
+            "b4_phase_agent_id",
+            "phase_label_source",
+            "placefood_lift_threshold",
+            "placefood_target_xy_threshold",
+            "placefood_release_command_threshold",
+            "placefood_monotonic_phase_progression",
+            "phase_window_label_mode",
         )
         for name in scalar_attributes:
             if hasattr(dataset, name):
@@ -1420,6 +1450,11 @@ class Wan22Trainer:
                 "batch_size": self.batch_size,
                 "agent_action_token_budget": self.agent_action_token_budget,
                 "phase_balanced_fraction": self.phase_balanced_fraction,
+                "phase_balanced_labels": (
+                    None
+                    if getattr(self, "phase_balanced_labels", None) is None
+                    else list(self.phase_balanced_labels)
+                ),
                 "gradient_accumulation_steps": self.gradient_accumulation_steps,
                 "world_size": int(self.accelerator.num_processes),
                 "mixed_precision": self.mixed_precision,
@@ -2739,6 +2774,11 @@ class Wan22Trainer:
             "global_batches_per_epoch": self.train_sampler.global_batches_per_epoch,
             "optimizer_steps_per_epoch": self.train_sampler.optimizer_steps_per_epoch,
             "phase_balanced_fraction": self.train_sampler.phase_balanced_fraction,
+            "phase_balanced_labels": (
+                None
+                if getattr(self.train_sampler, "phase_balanced_labels", None) is None
+                else list(self.train_sampler.phase_balanced_labels)
+            ),
             "original_global_batches_per_epoch": (
                 self.train_sampler.original_global_batches_per_epoch
             ),
@@ -2792,6 +2832,7 @@ class Wan22Trainer:
         if not isinstance(saved_schedule, dict):
             raise TypeError(f"data_schedule must be a mapping: {state_file}")
         saved_schedule = dict(saved_schedule)
+        saved_schedule.setdefault("phase_balanced_labels", None)
         if not self.phase_balanced_fraction:
             # Pre-B4 trainer states already carried the deterministic schedule
             # fingerprint and totals.  Interpret their absent B4 fields as the

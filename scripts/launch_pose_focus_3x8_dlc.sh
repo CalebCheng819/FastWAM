@@ -191,6 +191,7 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_relation_gripcontact_p8_224_5e-6) ;;
   robofactory_placefood_spatial_gripcontact_p9_224_5e-6) ;;
   robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6) ;;
+  robofactory_placefood_spatial_transport_p11_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -218,6 +219,10 @@ case "${TASK_PROFILE}" in
     CANONICAL_SOURCE_BYTES="12047407747"
     ;;
   robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6)
+    CANONICAL_SOURCE="${P6_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12047407747"
+    ;;
+  robofactory_placefood_spatial_transport_p11_224_5e-6)
     CANONICAL_SOURCE="${P6_SOURCE}"
     CANONICAL_SOURCE_BYTES="12047407747"
     ;;
@@ -420,6 +425,7 @@ is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_spatial_transport_p11_224_5e-6",
 }
 is_gaussian_relation = task_path.stem in {
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
@@ -435,6 +441,9 @@ is_spatial_gripcontact = task_path.stem in {
 is_lowaux_gripcontact = (
     task_path.stem == "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6"
 )
+is_spatial_transport = (
+    task_path.stem == "robofactory_placefood_spatial_transport_p11_224_5e-6"
+)
 is_gripcontact = is_relation_gripcontact or is_spatial_gripcontact
 is_semantic_phase = task_path.stem in {
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
@@ -443,6 +452,7 @@ is_semantic_phase = task_path.stem in {
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_spatial_transport_p11_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -499,6 +509,7 @@ task_expected = {
     "model.loss.pose_focus.gripper_dim": 7,
     "model.loss.pose_focus.clean_arm_huber_beta": 0.1,
 }
+task_overlay_expected = {}
 if task_path.stem in {
     "robofactory_placefood_pose_phase_x0_r5_224_5e-6",
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
@@ -507,6 +518,7 @@ if task_path.stem in {
     "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p9_224_5e-6",
     "robofactory_placefood_spatial_gripcontact_p10_lowaux_224_5e-6",
+    "robofactory_placefood_spatial_transport_p11_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -524,6 +536,14 @@ if task_path.stem in {
             "data.val.placefood_target_xy_threshold": 0.10,
             "data.train.placefood_release_command_threshold": 0.0,
             "data.val.placefood_release_command_threshold": 0.0,
+        })
+    if is_spatial_transport:
+        task_overlay_expected.update({
+            "phase_balanced_labels": ["transport"],
+            "data.train.placefood_monotonic_phase_progression": True,
+            "data.val.placefood_monotonic_phase_progression": True,
+            "data.train.phase_window_label_mode": "start",
+            "data.val.phase_window_label_mode": "start",
         })
 else:
     task_expected["model.loss.pose_focus.lambda_clean_arm_x0"] = 0.0
@@ -547,6 +567,15 @@ for label, mapping, expected in (
             raise SystemExit(f"{label} profile is missing {key}: {exc}")
         if actual != wanted:
             raise SystemExit(f"{label} profile drift at {key}: expected {wanted!r}, got {actual!r}")
+for key, wanted in task_overlay_expected.items():
+    try:
+        actual = value_at(task, key)
+    except (KeyError, TypeError) as exc:
+        raise SystemExit(f"task profile is missing {key}: {exc}")
+    if actual != wanted:
+        raise SystemExit(
+            f"task profile drift at {key}: expected {wanted!r}, got {actual!r}"
+        )
 if is_gaussian_spatial:
     if is_gaussian_relation:
         gaussian_expected = {
@@ -560,7 +589,9 @@ if is_gaussian_spatial:
     else:
         gaussian_expected = {
             "weights_only_warm_start.architecture_upgrade": (
-                None if is_spatial_gripcontact else "gaussian_spatial_v2_from_pooled_v1"
+                None
+                if is_spatial_gripcontact or is_spatial_transport
+                else "gaussian_spatial_v2_from_pooled_v1"
             ),
             "model.action_dit_config.gaussian_conditioning_mode": "spatial_cross_attention",
             "model.action_dit_config.gaussian_residual_floor": 0.1,
@@ -582,7 +613,7 @@ if is_gaussian_spatial:
             else "robofactory_placefood_spatial_semantic_p6_224_5e-6"
         )
     else:
-        if is_spatial_gripcontact:
+        if is_spatial_gripcontact or is_spatial_transport:
             expected_parent = "robofactory_placefood_spatial_semantic_p6_224_5e-6"
         else:
             expected_parent = (

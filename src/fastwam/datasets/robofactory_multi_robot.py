@@ -138,6 +138,7 @@ def derive_placefood_task_phases(
     lift_threshold: float = 0.03,
     target_xy_threshold: float = 0.10,
     release_command_threshold: float = 0.0,
+    monotonic_progression: bool = False,
 ) -> torch.Tensor:
     """Derive exclusive PlaceFood sampling phases for target actions.
 
@@ -194,6 +195,8 @@ def derive_placefood_task_phases(
     phase[lifted] = 1
     phase[lifted & near_target] = 2
     phase[lifted & near_target & opening] = 3
+    if monotonic_progression:
+        phase = torch.cummax(phase, dim=0).values
     return phase
 
 
@@ -325,6 +328,8 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         placefood_lift_threshold: float = 0.03,
         placefood_target_xy_threshold: float = 0.10,
         placefood_release_command_threshold: float = 0.0,
+        placefood_monotonic_phase_progression: bool = False,
+        phase_window_label_mode: str = "all_present",
     ):
         self.root_dir = Path(root_dir).expanduser().resolve()
         if not self.root_dir.exists():
@@ -417,6 +422,15 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         self.placefood_release_command_threshold = float(
             placefood_release_command_threshold
         )
+        self.placefood_monotonic_phase_progression = bool(
+            placefood_monotonic_phase_progression
+        )
+        self.phase_window_label_mode = str(phase_window_label_mode).strip().lower()
+        if self.phase_window_label_mode not in {"all_present", "start"}:
+            raise ValueError(
+                "phase_window_label_mode must be 'all_present' or 'start', got "
+                f"{phase_window_label_mode!r}"
+            )
         # Validate the public proxy parameters once, before opening source data.
         derive_b4_target_action_proxies(
             torch.zeros(1, 1),
@@ -431,6 +445,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             lift_threshold=self.placefood_lift_threshold,
             target_xy_threshold=self.placefood_target_xy_threshold,
             release_command_threshold=self.placefood_release_command_threshold,
+            monotonic_progression=self.placefood_monotonic_phase_progression,
         )
         self._h5_handles: dict[str, h5py.File] = {}
         self._gaussian_cache: Optional[GaussianCache] = None
@@ -689,6 +704,9 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                             release_command_threshold=(
                                 self.placefood_release_command_threshold
                             ),
+                            monotonic_progression=(
+                                self.placefood_monotonic_phase_progression
+                            ),
                         ).unsqueeze(0)
                         phase_names = PLACEFOOD_TASK_PHASE_NAMES
                     split_trajectory_count += 1
@@ -697,9 +715,14 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                         length - self.action_horizon + 1,
                         self.window_stride,
                     ):
-                        target_phase_ids = torch.unique(
-                            trajectory_phase[:, start : start + self.action_horizon]
-                        ).tolist()
+                        if self.phase_window_label_mode == "start":
+                            target_phase_ids = torch.unique(
+                                trajectory_phase[:, start]
+                            ).tolist()
+                        else:
+                            target_phase_ids = torch.unique(
+                                trajectory_phase[:, start : start + self.action_horizon]
+                            ).tolist()
                         entries.append(
                             {
                                 "path": str(h5_path),
@@ -980,6 +1003,8 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             "lift_threshold": self.placefood_lift_threshold,
             "target_xy_threshold": self.placefood_target_xy_threshold,
             "release_command_threshold": self.placefood_release_command_threshold,
+            "monotonic_progression": self.placefood_monotonic_phase_progression,
+            "window_label_mode": self.phase_window_label_mode,
             "phase_agent_id": self.b4_phase_agent_id,
         }
 

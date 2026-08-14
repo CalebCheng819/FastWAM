@@ -734,11 +734,41 @@ def test_spatial_gripcontact_p10_keeps_p9_factors_and_scales_auxiliary_losses(
     assert cfg["max_steps"] == 1000
 
 
+def test_spatial_transport_p11_changes_only_causal_phase_sampling(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    monkeypatch.setenv(
+        "FASTWAM_POSE_FOCUS_BASE_CHECKPOINT",
+        TEST_POSE_FOCUS_BASE_CHECKPOINT,
+    )
+    cfg = _compose_arm(
+        "robofactory_placefood_spatial_transport_p11_224_5e-6",
+        "+scale=robofactory_multi_robot_8gpu_eff24_pose_focus",
+    )
+
+    assert cfg["phase_balanced_fraction"] == 0.5
+    assert cfg["phase_balanced_labels"] == ["transport"]
+    assert cfg["weights_only_warm_start"]["architecture_upgrade"] is None
+    for split in ("train", "val"):
+        assert cfg["data"][split]["placefood_monotonic_phase_progression"] is True
+        assert cfg["data"][split]["phase_window_label_mode"] == "start"
+    action_cfg = cfg["model"]["action_dit_config"]
+    assert action_cfg["gaussian_conditioning_mode"] == "spatial_cross_attention"
+    assert action_cfg["gaussian_residual_floor"] == 0.1
+    assert action_cfg["gaussian_attention_temperature"] == 0.1
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["pose_focus"]["lambda_clean_arm_x0"] == 1.0
+    assert cfg["model"]["loss"].get("b4", {}).get("enabled", False) is False
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["max_steps"] == 1000
+
+
 def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):
     _set_gaussian_env(monkeypatch)
     cfg = _compose_arm("robofactory_multi_robot_vg1_hub1_gau1_224_1e-4")
 
     assert cfg["phase_balanced_fraction"] == 0.0
+    assert cfg["phase_balanced_labels"] is None
     assert cfg["provenance_mode"] == "sha256"
     assert cfg["weights_only_warm_start"] == {
         "enabled": False,
