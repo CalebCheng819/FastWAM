@@ -36,6 +36,7 @@ TASK_PROFILES = (
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
+    "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
 )
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
@@ -57,6 +58,10 @@ P6_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-placefood-spatial-semantic-p6-s42-24g-r1-20260814/"
     "checkpoints/weights/step_001000.pt"
 )
+P7_SOURCE_WEIGHT = (
+    "/oss-chengjuntao/artifacts/fastwam-placefood-task-gaussian-relation-p7-s42-24g-r1-20260814/"
+    "checkpoints/weights/step_001000.pt"
+)
 SOURCE_WEIGHTS = {
     TASK_PROFILES[0]: (R5_SOURCE_WEIGHT, 12047407619, "R5-action-step1000-weights-only"),
     TASK_PROFILES[1]: (R5_SOURCE_WEIGHT, 12047407619, "R5-action-step1000-weights-only"),
@@ -64,6 +69,7 @@ SOURCE_WEIGHTS = {
     TASK_PROFILES[3]: (P2_SOURCE_WEIGHT, 12047407619, "P2-action-step1000-weights-only"),
     TASK_PROFILES[4]: (P5_SOURCE_WEIGHT, 12047407619, "P5-action-step1000-weights-only"),
     TASK_PROFILES[5]: (P6_SOURCE_WEIGHT, 12047407747, "P6-action-step1000-weights-only"),
+    TASK_PROFILES[6]: (P7_SOURCE_WEIGHT, 12055814467, "P7-action-step1000-weights-only"),
 }
 OBJECTIVES = {
     TASK_PROFILES[0]: "active-agent-continuous-pose",
@@ -72,6 +78,7 @@ OBJECTIVES = {
     TASK_PROFILES[3]: "placefood-task-semantic-phase-sampling",
     TASK_PROFILES[4]: "placefood-spatial-gaussian-semantic-phase",
     TASK_PROFILES[5]: "placefood-task-conditioned-gaussian-relation",
+    TASK_PROFILES[6]: "placefood-relation-gripper-contact-proxy",
 }
 
 

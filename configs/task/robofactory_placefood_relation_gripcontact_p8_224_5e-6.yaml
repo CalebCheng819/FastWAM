@@ -1,0 +1,42 @@
+# @package _global_
+
+# P8 keeps the selected P7 relation architecture and adds only gripper-event
+# and stable-close proxy supervision. The arm-Huber term stays disabled so the
+# treatment does not repeat B4's arm-regression degradation.
+defaults:
+  - robofactory_placefood_task_gaussian_relation_p7_224_5e-6
+  - _self_
+
+weights_only_warm_start:
+  architecture_upgrade: null
+
+model:
+  action_dit_config:
+    gaussian_conditioning_mode: task_conditioned_relation_attention
+    gaussian_residual_floor: 0.1
+    gaussian_relation_num_heads: 8
+  loss:
+    b4:
+      enabled: true
+      lambda_arm_huber: 0.0
+      lambda_gripper_event: 2.0
+      lambda_contact_intent_proxy: 1.0
+      arm_huber_beta: 0.1
+      first_steps: 5
+      first_steps_weight: 2.0
+      gripper_dim: 7
+      gripper_action_mean: 0.24164481092854787
+      gripper_action_std: 0.9469631616807775
+      event_delta_threshold: 0.05
+      stable_closed_command_threshold: -0.8
+      closed_command_threshold: 0.0
+      stable_steps: 4
+      event_temperature: 0.05
+      closed_temperature: 0.1
+      background_weight: 0.25
+
+# The contact-intent target is action-derived because RoboFactory H5 exposes no
+# measured contact sensor. Report it as a stable-close proxy, not true contact.
+wandb:
+  group: robofactory-placefood-relation-gripcontact-p8
+  name: fastwam-placefood-relation-gripcontact-p8-s42-24g-r1

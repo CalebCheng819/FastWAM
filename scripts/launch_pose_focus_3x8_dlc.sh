@@ -172,6 +172,7 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_gaussian_spatial_p4_224_5e-6|robofactory_placefood_semantic_phase_p5_224_5e-6) ;;
   robofactory_placefood_spatial_semantic_p6_224_5e-6) ;;
   robofactory_placefood_task_gaussian_relation_p7_224_5e-6) ;;
+  robofactory_placefood_relation_gripcontact_p8_224_5e-6) ;;
   *) die "unsupported FASTWAM_POSE_FOCUS_TASK_PROFILE=${TASK_PROFILE}" ;;
 esac
 R5_SOURCE="/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -179,6 +180,7 @@ P1_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-
 P2_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-phase-x0-r5-s42-24g-r1-20260813/checkpoints/weights/step_001000.pt"
 P5_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-semantic-phase-p5-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
 P6_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-spatial-semantic-p6-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
+P7_SOURCE="/oss-chengjuntao/artifacts/fastwam-placefood-task-gaussian-relation-p7-s42-24g-r1-20260814/checkpoints/weights/step_001000.pt"
 CANONICAL_SOURCE="${R5_SOURCE}"
 CANONICAL_SOURCE_BYTES="12047407619"
 case "${TASK_PROFILE}" in
@@ -188,6 +190,10 @@ case "${TASK_PROFILE}" in
   robofactory_placefood_task_gaussian_relation_p7_224_5e-6)
     CANONICAL_SOURCE="${P6_SOURCE}"
     CANONICAL_SOURCE_BYTES="12047407747"
+    ;;
+  robofactory_placefood_relation_gripcontact_p8_224_5e-6)
+    CANONICAL_SOURCE="${P7_SOURCE}"
+    CANONICAL_SOURCE_BYTES="12055814467"
     ;;
 esac
 SOURCE_WEIGHT="${FASTWAM_POSE_FOCUS_SOURCE_WEIGHT:-${CANONICAL_SOURCE}}"
@@ -373,14 +379,20 @@ is_gaussian_spatial = task_path.stem in {
     "robofactory_placefood_gaussian_spatial_p4_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
+    "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
 }
-is_gaussian_relation = (
-    task_path.stem == "robofactory_placefood_task_gaussian_relation_p7_224_5e-6"
+is_gaussian_relation = task_path.stem in {
+    "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
+    "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
+}
+is_relation_gripcontact = (
+    task_path.stem == "robofactory_placefood_relation_gripcontact_p8_224_5e-6"
 )
 is_semantic_phase = task_path.stem in {
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
+    "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
 }
 contract_task = task
 if is_gaussian_spatial:
@@ -442,6 +454,7 @@ if task_path.stem in {
     "robofactory_placefood_semantic_phase_p5_224_5e-6",
     "robofactory_placefood_spatial_semantic_p6_224_5e-6",
     "robofactory_placefood_task_gaussian_relation_p7_224_5e-6",
+    "robofactory_placefood_relation_gripcontact_p8_224_5e-6",
 }:
     task_expected.update({
         "phase_balanced_fraction": 0.5,
@@ -485,7 +498,9 @@ for label, mapping, expected in (
 if is_gaussian_spatial:
     if is_gaussian_relation:
         gaussian_expected = {
-            "weights_only_warm_start.architecture_upgrade": "gaussian_relation_v3_from_spatial_v2",
+            "weights_only_warm_start.architecture_upgrade": (
+                None if is_relation_gripcontact else "gaussian_relation_v3_from_spatial_v2"
+            ),
             "model.action_dit_config.gaussian_conditioning_mode": "task_conditioned_relation_attention",
             "model.action_dit_config.gaussian_residual_floor": 0.1,
             "model.action_dit_config.gaussian_relation_num_heads": 8,
@@ -507,7 +522,11 @@ if is_gaussian_spatial:
                 f"Gaussian spatial profile drift at {key}: expected {wanted!r}, got {actual!r}"
             )
     if is_gaussian_relation:
-        expected_parent = "robofactory_placefood_spatial_semantic_p6_224_5e-6"
+        expected_parent = (
+            "robofactory_placefood_task_gaussian_relation_p7_224_5e-6"
+            if is_relation_gripcontact
+            else "robofactory_placefood_spatial_semantic_p6_224_5e-6"
+        )
     else:
         expected_parent = (
             "robofactory_placefood_semantic_phase_p5_224_5e-6"
@@ -519,6 +538,23 @@ else:
 defaults = task.get("defaults", [])
 if expected_parent not in defaults:
     raise SystemExit(f"POSE_FOCUS task must inherit the audited profile {expected_parent}")
+if is_relation_gripcontact:
+    b4_expected = {
+        "model.loss.b4.enabled": True,
+        "model.loss.b4.lambda_arm_huber": 0.0,
+        "model.loss.b4.lambda_gripper_event": 2.0,
+        "model.loss.b4.lambda_contact_intent_proxy": 1.0,
+        "model.loss.b4.gripper_dim": 7,
+    }
+    for key, wanted in b4_expected.items():
+        try:
+            actual = value_at(task, key)
+        except (KeyError, TypeError) as exc:
+            raise SystemExit(f"P8 profile is missing {key}: {exc}")
+        if actual != wanted:
+            raise SystemExit(
+                f"P8 profile drift at {key}: expected {wanted!r}, got {actual!r}"
+            )
 
 PY
 

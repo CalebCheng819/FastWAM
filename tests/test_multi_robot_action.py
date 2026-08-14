@@ -967,6 +967,41 @@ def test_b4_objective_applies_all_three_auxiliary_coefficients():
     )
 
 
+def test_pose_clean_arm_and_b4_auxiliary_losses_compose_in_one_objective():
+    model = _enable_pose_focus_loss(
+        _bare_b4_loss_model(
+            lambda_arm_huber=0.0,
+            lambda_gripper_event=2.0,
+            lambda_contact_intent_proxy=1.0,
+        )
+    )
+    model.pose_focus_clean_arm_x0_loss_weight = 3.0
+    action = torch.zeros(1, 2, 6, 3)
+    action[..., -1] = -1.0
+    inputs = _b4_targets_for_action(action)
+    inputs["agent_ids"] = torch.tensor([[0, 1]])
+    pred_velocity = torch.zeros_like(action)
+    pred_velocity[:, 0, 0, 0] = -2.0
+    pred_velocity[..., -1] = -4.0
+    target_velocity = torch.zeros_like(action)
+    timestep = torch.tensor([500.0])
+
+    objective, metrics = model._multi_action_objective(
+        inputs=inputs,
+        noisy_action=action,
+        pred_action=pred_velocity,
+        target_action=target_velocity,
+        timestep_action=timestep,
+    )
+
+    expected = sum(metrics.values())
+    assert torch.allclose(objective, expected)
+    assert metrics["pose_clean_arm_x0"] > 0.0
+    assert metrics["arm_huber"] == 0.0
+    assert metrics["gripper_event"] > 0.0
+    assert metrics["contact_intent_proxy"] > 0.0
+
+
 def test_multi_robot_runtime_forwards_b4_loss_contract(monkeypatch):
     from fastwam import runtime
 

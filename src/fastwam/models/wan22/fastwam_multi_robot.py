@@ -1145,6 +1145,8 @@ class FastWAMMultiRobot(FastWAM):
         clean_arm_x0_weight = getattr(
             self, "pose_focus_clean_arm_x0_loss_weight", 0.0
         )
+        objective = flow_loss
+        metrics: dict[str, torch.Tensor] = {}
         if clean_arm_x0_weight > 0.0:
             clean_arm = self._pose_focus_clean_arm_x0_loss(
                 inputs=inputs,
@@ -1152,15 +1154,14 @@ class FastWAMMultiRobot(FastWAM):
                 pred_action=pred_action,
                 timestep_action=timestep_action,
             )
-            clean_arm_contribution = (
-                clean_arm_x0_weight * clean_arm
-            )
-            return flow_loss + clean_arm_contribution, {
+            clean_arm_contribution = clean_arm_x0_weight * clean_arm
+            objective = objective + clean_arm_contribution
+            metrics.update({
                 "flow": flow_loss,
                 "pose_clean_arm_x0": clean_arm_contribution,
-            }
+            })
         if not getattr(self, "b4_aux_loss_enabled", False):
-            return flow_loss, {}
+            return objective, metrics
         b4_losses = self._b4_auxiliary_action_losses(
             inputs=inputs,
             noisy_action=noisy_action,
@@ -1175,12 +1176,14 @@ class FastWAMMultiRobot(FastWAM):
             self.b4_contact_intent_proxy_loss_weight
             * b4_losses["contact_intent_proxy"]
         )
-        return flow_loss + arm_contribution + event_contribution + proxy_contribution, {
+        objective = objective + arm_contribution + event_contribution + proxy_contribution
+        metrics.update({
             "flow": flow_loss,
             "arm_huber": arm_contribution,
             "gripper_event": event_contribution,
             "contact_intent_proxy": proxy_contribution,
-        }
+        })
+        return objective, metrics
 
     def _prepare_noisy_action(self, inputs: dict[str, Any]):
         action = inputs["action"]
