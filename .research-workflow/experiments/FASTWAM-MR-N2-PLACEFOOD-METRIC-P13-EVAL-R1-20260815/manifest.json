@@ -8,7 +8,21 @@
   "training_code_commit": "e5f20bbf91477b82990e5c571d54305c639705c6",
   "evaluation_code_commit": "resolved_from_clean_runtime_checkout",
   "checkpoint": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-s42-8g-r1-20260815/checkpoints/weights/step_001000.pt",
-  "metric_cache": "provided_by_P13_METRIC_CACHE_ROOT_and_required_to_match_training",
+    "metric_cache": "provided_by_P13_METRIC_CACHE_ROOT_and_required_to_match_training",
+    "automation": {
+        "supervisor": "scripts/supervise_p13_training_and_eval.py",
+        "record_root": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-eval-supervisor-r1-20260815",
+        "local_lock_root": "/mnt/workspace/experiments/FASTWAM-P13-EVAL-SUPERVISOR-R1-20260815/runtime",
+        "training_receipt": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-supervisor-r1-20260815/submission-receipt.json",
+        "gates": [
+            "training JobSucceeded",
+            "step_001000.pt and step_001000.pt.COMPLETE",
+            "training-selected metric cache full contract",
+            "one idle GPU for offline evaluation",
+            "four idle GPUs for closed-loop evaluation"
+        ],
+        "overwrite_existing_outputs": false
+    },
   "offline_protocol": {
     "mode": "teacher-forcing",
     "teacher_start_timestep": 5,

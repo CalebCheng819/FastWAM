@@ -27,6 +27,30 @@ bash run_teacher_forcing.sh
 bash run_closedloop_h32.sh
 ```
 
+For unattended execution on the DSW with the verified Vulkan runtime, launch
+the fail-closed supervisor instead:
+
+```bash
+python scripts/supervise_p13_training_and_eval.py \
+  --training-receipt /oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-supervisor-r1-20260815/submission-receipt.json \
+  --expected-training-output /oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-s42-8g-r1-20260815 \
+  --checkpoint /oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-s42-8g-r1-20260815/checkpoints/weights/step_001000.pt \
+  --record-root /oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-eval-supervisor-r1-20260815 \
+  --lock-root /mnt/workspace/experiments/FASTWAM-P13-EVAL-SUPERVISOR-R1-20260815/runtime \
+  --teacher-script .research-workflow/experiments/FASTWAM-MR-N2-PLACEFOOD-METRIC-P13-EVAL-R1-20260815/run_teacher_forcing.sh \
+  --closedloop-script .research-workflow/experiments/FASTWAM-MR-N2-PLACEFOOD-METRIC-P13-EVAL-R1-20260815/run_closedloop_h32.sh \
+  --teacher-output /oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-paired-tf-r1-20260815 \
+  --closedloop-output /oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-official-topp-h32-val8-r1-20260815 \
+  --run-eval
+```
+
+The supervisor does not allocate GPUs while waiting. It requires a successful
+DLC training terminal state, a non-empty checkpoint and completion marker, and
+the same validated metric cache recorded in the training receipt. It then uses
+one genuinely idle GPU for teacher forcing and four genuinely idle GPUs for the
+closed-loop panel. Existing incomplete or failed outputs are preserved and
+cause a fail-closed stop instead of being overwritten.
+
 The closed-loop launcher fails unless the offline run has terminal status
 `SUCCEEDED`. Offline error is an endpoint diagnostic, not evidence of task
 success; the val8 closed-loop aggregate is the behavioral result.
