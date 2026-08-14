@@ -353,8 +353,14 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   require_exact_env FASTWAM_LOCAL_VAE_RELATIVE_PATH "checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
   require_exact_env FASTWAM_LOCAL_EXPECTED_H5_FILES "24"
   if [[ "${IS_METRIC_GEOMETRY}" == "1" ]]; then
-    require_exact_env FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT "/oss-chengjuntao/artifacts/fastwam-placefood-metric-geometry-60x80-s42-v1-20260815"
-    require_exact_env FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-placefood-metric-geometry-60x80-s42-v1-20260815/stat-cmp.allowlist"
+    require_env FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT
+    require_env FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST
+    metric_cache_name="${FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT#/oss-chengjuntao/artifacts/}"
+    [[ "${FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT}" == "/oss-chengjuntao/artifacts/${metric_cache_name}" ]] || \
+      die "metric cache root must be one direct child below /oss-chengjuntao/artifacts"
+    is_safe_id "${metric_cache_name}" || die "metric cache root has an unsafe artifact name"
+    [[ "${FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST}" == "${FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT}/stat-cmp.allowlist" ]] || \
+      die "metric cache allowlist must belong to the selected metric cache root"
     OSS_STAGING_SOURCE_ROOT="${FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT}"
     OSS_STAGING_ALLOWLIST="${FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST}"
   else

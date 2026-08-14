@@ -1101,6 +1101,46 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 "stat-cmp.allowlist",
             )
 
+    def test_renderer_accepts_versioned_p13_metric_cache_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            metric_root = (
+                "/oss-chengjuntao/artifacts/"
+                "fastwam-placefood-metric-geometry-60x80-s42-v1-r3-oversold-20260815"
+            )
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id", "fastwam-placefood-metric-gaussian-p13-r3-test",
+                "--attempt-id", "attempt-1",
+                "--output", str(output),
+                "--bootstrap-script", "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root", "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest", "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit", "4" * 40,
+                "--offline-source-bundle-relative-path", "source/FastWAM.bundle",
+                "--base-python", "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle", str(bundle),
+                "--pose-focus-code-commit", commit,
+                "--task-profile", P13_TASK_NAME.removesuffix(".yaml"),
+                "--metric-source-root", metric_root,
+                "--worker-count", "1",
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(output.read_text(encoding="utf-8"))["request"]
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT"],
+                metric_root,
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST"],
+                f"{metric_root}/stat-cmp.allowlist",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,11 @@ TASK_PROFILES = (
     "robofactory_placefood_crossagent_gaussian_p12_224_5e-6",
     "robofactory_placefood_metric_gaussian_p13_224_5e-6",
 )
+P13_TASK_PROFILE = "robofactory_placefood_metric_gaussian_p13_224_5e-6"
+DEFAULT_METRIC_SOURCE_ROOT = (
+    "/oss-chengjuntao/artifacts/"
+    "fastwam-placefood-metric-geometry-60x80-s42-v1-20260815"
+)
 R5_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-action-n234-formal-r5-20260812/"
     "fastwam-act-n2-placefood-1k-s42-r5-20260812/checkpoints/weights/step_001000.pt"
@@ -112,6 +117,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-focus-source-bundle", type=pathlib.Path, required=True)
     parser.add_argument("--pose-focus-code-commit", required=True)
     parser.add_argument("--task-profile", choices=TASK_PROFILES, default=TASK_PROFILES[0])
+    parser.add_argument(
+        "--metric-source-root",
+        default=DEFAULT_METRIC_SOURCE_ROOT,
+        help="Completed metric-geometry cache root used by the P13 task profile.",
+    )
     parser.add_argument("--worker-count", type=int, choices=(1, 3), default=3)
     parser.add_argument("--gpus-per-worker", type=int, choices=(4, 8), default=8)
     parser.add_argument(
@@ -205,6 +215,21 @@ def main() -> int:
     if args.worker_count != 1 and args.gpus_per_worker != 8:
         raise SystemExit("four-GPU topology is supported only with one worker")
 
+    metric_source_root = args.metric_source_root
+    metric_prefix = "/oss-chengjuntao/artifacts/"
+    metric_name = metric_source_root.removeprefix(metric_prefix)
+    if (
+        not metric_source_root.startswith(metric_prefix)
+        or not SAFE_ID.fullmatch(metric_name)
+        or str(pathlib.PurePosixPath(metric_source_root)) != metric_source_root
+    ):
+        raise SystemExit(
+            "metric-source-root must be one direct safe child below "
+            "/oss-chengjuntao/artifacts"
+        )
+    if args.task_profile != P13_TASK_PROFILE and metric_source_root != DEFAULT_METRIC_SOURCE_ROOT:
+        raise SystemExit("metric-source-root override is supported only by the P13 task profile")
+
     source_path, source_bytes, initialization = SOURCE_WEIGHTS[args.task_profile]
     if args.source_weight is not None and args.source_weight != source_path:
         raise SystemExit("source-weight does not match the audited task-profile source")
@@ -267,15 +292,8 @@ def main() -> int:
             "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-"
             "20260802T1235Z/oss-compact-whole-file-bundle.sha256"
         ),
-        "FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT": (
-            "/oss-chengjuntao/artifacts/"
-            "fastwam-placefood-metric-geometry-60x80-s42-v1-20260815"
-        ),
-        "FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST": (
-            "/oss-chengjuntao/artifacts/"
-            "fastwam-placefood-metric-geometry-60x80-s42-v1-20260815/"
-            "stat-cmp.allowlist"
-        ),
+        "FASTWAM_POSE_FOCUS_METRIC_SOURCE_ROOT": metric_source_root,
+        "FASTWAM_POSE_FOCUS_METRIC_ALLOWLIST": f"{metric_source_root}/stat-cmp.allowlist",
         "FASTWAM_LOCAL_DATASET_RELATIVE_ROOT": "datasets/robofactory_multi_robot",
         "FASTWAM_LOCAL_STATS_RELATIVE_PATH": (
             "datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json"
