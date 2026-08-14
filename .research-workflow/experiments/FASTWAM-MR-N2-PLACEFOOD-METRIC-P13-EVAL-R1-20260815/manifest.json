@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-METRIC-P13-EVAL-R1-20260815",
+  "project_id": "FASTWAM-MULTIROBOT",
+  "mode": "confirmatory",
+  "status": "blocked_on_training",
+  "hypothesis": "Online calibrated metric geometry reduces the target-relative geometry gap and improves PlaceFood closed-loop control over P10.",
+  "training_code_commit": "e5f20bbf91477b82990e5c571d54305c639705c6",
+  "evaluation_code_commit": "resolved_from_clean_runtime_checkout",
+  "checkpoint": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-s42-8g-r1-20260815/checkpoints/weights/step_001000.pt",
+  "metric_cache": "provided_by_P13_METRIC_CACHE_ROOT_and_required_to_match_training",
+  "offline_protocol": {
+    "mode": "teacher-forcing",
+    "teacher_start_timestep": 5,
+    "states": 263,
+    "valid_pairs_h1": 263,
+    "valid_pairs_h5": 1305,
+    "action_horizon": 32,
+    "output": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-paired-tf-r1-20260815"
+  },
+  "closed_loop_protocol": {
+    "panel": "robofactory_n234_s42_val8_v1",
+    "initial_state": "raw",
+    "exec_horizon": 32,
+    "control_adapter": "official_topp",
+    "topp_step": 0.05,
+    "max_policy_queries": 60,
+    "max_simulator_steps": 30000,
+    "output": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-gaussian-p13-official-topp-h32-val8-r1-20260815"
+  },
+  "baseline": {
+    "name": "P10 low-aux step1000",
+    "arm_mae_h1": 0.00483,
+    "arm_mae_h5": 0.00558438,
+    "arm_mae_full_horizon": 0.0119084,
+    "closed_loop_h32_successes": 0,
+    "closed_loop_h32_episodes": 8,
+    "closed_loop_h32_grasped": 5
+  },
+  "integrity": {
+    "mode": "metadata_no_hash",
+    "evidence": [
+      "Git revisions and clean worktrees",
+      "artifact paths, byte counts, and modification times",
+      "checkpoint and cache completion markers",
+      "metric cache schema metadata"
+    ]
+  },
+  "interpretation_limit": "Teacher-forcing action error selects and diagnoses a checkpoint but cannot establish closed-loop task success.",
+  "job_ids": [],
+  "run_ids": [],
+  "primary_metrics": {},
+  "conclusion": null,
+  "failure_reason": null
+}
