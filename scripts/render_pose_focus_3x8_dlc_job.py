@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC CreateJob manifest for POSE_FOCUS 3x8."""
+"""Render, but never submit, a PAI DLC CreateJob manifest for POSE_FOCUS 1/3x8."""
 
 from __future__ import annotations
 
@@ -96,6 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pose-focus-source-bundle", type=pathlib.Path, required=True)
     parser.add_argument("--pose-focus-code-commit", required=True)
     parser.add_argument("--task-profile", choices=TASK_PROFILES, default=TASK_PROFILES[0])
+    parser.add_argument("--worker-count", type=int, choices=(1, 3), default=3)
     parser.add_argument(
         "--source-weight",
         choices=tuple(sorted({item[0] for item in SOURCE_WEIGHTS.values()})),
@@ -200,6 +201,8 @@ def main() -> int:
     )
     user_command = "/bin/bash -c " + shlex.quote(outer_shell)
     output_dir = f"/oss-chengjuntao/artifacts/{args.run_id}"
+    require_erdma = args.worker_count > 1
+    world_size = args.worker_count * 8
     envs = {
         "RUN_ID": args.run_id,
         "FASTWAM_POSE_FOCUS_ATTEMPT_ID": args.attempt_id,
@@ -257,16 +260,22 @@ def main() -> int:
         ),
         "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT": "compact-s42-13x28x40-fp16-meanalpha-v2",
         "FASTWAM_LOCAL_EXPECTED_H5_FILES": "24",
-        "FASTWAM_ERDMA_BUNDLE_ROOT": "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3",
-        "FASTWAM_ERDMA_EXPECTED_VERSION": "56.2-1.0.3",
-        "FASTWAM_PREFLIGHT_REQUIRE_ERDMA": "1",
+        "FASTWAM_PREFLIGHT_REQUIRE_ERDMA": "1" if require_erdma else "0",
         "FASTWAM_PREFLIGHT_TIMEOUT": "7200",
         "FASTWAM_PREFLIGHT_OUTER_TIMEOUT": "7260",
-        "NCCL_IB_HCA": "erdma",
         "NCCL_DEBUG": "INFO",
         "NCCL_DEBUG_SUBSYS": "INIT,NET",
         "NPROC_PER_NODE": "8",
+        "FASTWAM_POSE_FOCUS_EXPECTED_WORKERS": str(args.worker_count),
     }
+    if require_erdma:
+        envs.update({
+            "FASTWAM_ERDMA_BUNDLE_ROOT": (
+                "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3"
+            ),
+            "FASTWAM_ERDMA_EXPECTED_VERSION": "56.2-1.0.3",
+            "NCCL_IB_HCA": "erdma",
+        })
     request = {
         "Accessibility": "PRIVATE",
         "CustomEnvs": [],
@@ -284,7 +293,7 @@ def main() -> int:
         ],
         "Description": (
             "PlaceFood action-only continuation: "
-            f"{args.task_profile}, 3 workers x 8 GPUs, 1000 steps"
+            f"{args.task_profile}, {args.worker_count} workers x 8 GPUs, 1000 steps"
         ),
         "DisplayName": args.run_id,
         "Envs": envs,
@@ -294,7 +303,7 @@ def main() -> int:
                 "ElasticSpotSpecs": [],
                 "Image": IMAGE,
                 "LocalMountSpecs": [],
-                "PodCount": 3,
+                "PodCount": args.worker_count,
                 "ResourceConfig": {
                     "CPU": "126",
                     "GPU": "8",
@@ -310,11 +319,11 @@ def main() -> int:
         "Priority": 7,
         "ResourceId": RESOURCE_ID,
         "Settings": {
-            "AllocateAllRDMADevices": True,
+            "AllocateAllRDMADevices": require_erdma,
             "EnableCPUAffinity": False,
             "EnableErrorMonitoringInAIMaster": False,
             "EnableOssAppend": False,
-            "EnableRDMA": True,
+            "EnableRDMA": require_erdma,
             "EnableSanityCheck": False,
             "Tags": {
                 "experiment": "POSE_FOCUS",
@@ -323,7 +332,7 @@ def main() -> int:
                 "task": "PlaceFood-rf",
                 "objective": OBJECTIVES[args.task_profile],
                 "provenance": "stat-cmp-no-new-hash",
-                "topology": "3x8-world24",
+                "topology": f"{args.worker_count}x8-world{world_size}",
             },
         },
         "SuccessPolicy": "AllWorkers",

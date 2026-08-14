@@ -22,6 +22,7 @@ P6_TASK_NAME = "robofactory_placefood_spatial_semantic_p6_224_5e-6.yaml"
 P7_TASK_NAME = "robofactory_placefood_task_gaussian_relation_p7_224_5e-6.yaml"
 P8_TASK_NAME = "robofactory_placefood_relation_gripcontact_p8_224_5e-6.yaml"
 SCALE_NAME = "robofactory_multi_robot_24gpu_pose_focus.yaml"
+SCALE_8GPU_NAME = "robofactory_multi_robot_8gpu_eff24_pose_focus.yaml"
 P1_SOURCE_WEIGHT = (
     "/oss-chengjuntao/artifacts/fastwam-placefood-posefocus-r5-s42-24g-r2-20260813/"
     "checkpoints/weights/step_001000.pt"
@@ -76,6 +77,9 @@ class PoseFocusLauncherTests(unittest.TestCase):
         )
         (repo / "configs" / "scale" / SCALE_NAME).write_bytes(
             (REPO / "configs" / "scale" / SCALE_NAME).read_bytes()
+        )
+        (repo / "configs" / "scale" / SCALE_8GPU_NAME).write_bytes(
+            (REPO / "configs" / "scale" / SCALE_8GPU_NAME).read_bytes()
         )
         (repo / "src" / "fastwam").mkdir(parents=True)
         (repo / "src" / "fastwam" / "__init__.py").write_text(
@@ -320,6 +324,32 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 result.stdout,
             )
 
+    def test_dry_run_resolves_single_node_effective_batch24_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env.update({
+                "FASTWAM_POSE_FOCUS_EXPECTED_WORKERS": "1",
+                "WORLD_SIZE": "1",
+                "RANK": "0",
+                "MASTER_ADDR": "127.0.0.1",
+            })
+            result = subprocess.run(
+                ["bash", str(LAUNCHER)],
+                cwd=REPO,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--num_machines 1", result.stdout)
+            self.assertIn("--num_processes 8", result.stdout)
+            self.assertIn(
+                "+scale=robofactory_multi_robot_8gpu_eff24_pose_focus",
+                result.stdout,
+            )
+
     def test_renderer_pins_priority7_3x8_and_oss_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -385,6 +415,41 @@ class PoseFocusLauncherTests(unittest.TestCase):
                 {("/cpfs/user/chengjuntao", "RO"), ("/oss-chengjuntao", "RW")},
             )
             self.assertEqual(base64.b64decode(manifest["launcher_payload_base64"]), launcher_bytes)
+
+    def test_renderer_supports_single_node_without_rdma(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id", "fastwam-placefood-pose-focus-1x8-test",
+                "--attempt-id", "attempt-1",
+                "--output", str(output),
+                "--bootstrap-script", "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root", "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest", "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit", "4" * 40,
+                "--offline-source-bundle-relative-path", "source/FastWAM.bundle",
+                "--base-python", "/opt/conda/bin/python3.10",
+                "--pose-focus-source-bundle", str(bundle),
+                "--pose-focus-code-commit", commit,
+                "--task-profile", P8_TASK_NAME.removesuffix(".yaml"),
+                "--worker-count", "1",
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(output.read_text(encoding="utf-8"))["request"]
+            self.assertEqual(request["JobSpecs"][0]["PodCount"], 1)
+            self.assertEqual(request["Envs"]["FASTWAM_POSE_FOCUS_EXPECTED_WORKERS"], "1")
+            self.assertEqual(request["Envs"]["FASTWAM_PREFLIGHT_REQUIRE_ERDMA"], "0")
+            self.assertNotIn("NCCL_IB_HCA", request["Envs"])
+            self.assertNotIn("FASTWAM_ERDMA_BUNDLE_ROOT", request["Envs"])
+            self.assertFalse(request["Settings"]["EnableRDMA"])
+            self.assertFalse(request["Settings"]["AllocateAllRDMADevices"])
+            self.assertEqual(request["Settings"]["Tags"]["topology"], "1x8-world8")
 
     def test_renderer_selects_audited_p1_weight_for_p4(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

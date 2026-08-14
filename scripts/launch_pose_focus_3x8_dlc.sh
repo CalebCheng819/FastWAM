@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persistent, fail-closed launcher for the POSE_FOCUS 3 Worker x 8 GPU treatment.
+# Persistent, fail-closed launcher for the POSE_FOCUS 1/3 Worker x 8 GPU treatment.
 # The outer DLC command runs once per worker. It stages the R5 weight before
 # spawning the eight local Accelerate ranks, so every child reads node-local
 # storage and no rank can accidentally restore the old 32-GPU optimizer state.
@@ -45,12 +45,13 @@ require_env FASTWAM_POSE_FOCUS_ATTEMPT_ID
 
 # PAI injects node topology through these names.  Preserve the outer worker
 # values before any helper can mutate the environment; they are deliberately
-# removed immediately before Accelerate creates its own 24-rank world.
+# removed immediately before Accelerate creates its own distributed world.
 NUM_MACHINES="${WORLD_SIZE:-}"
 MACHINE_RANK="${RANK:-}"
 GPUS_PER_NODE="${NPROC_PER_NODE:-}"
 MASTER_HOST="${MASTER_ADDR:-}"
 MASTER_TCP_PORT="${MASTER_PORT:-}"
+EXPECTED_WORKERS="${FASTWAM_POSE_FOCUS_EXPECTED_WORKERS:-3}"
 
 # Preserve the POSE_FOCUS source identity before the legacy dependency bootstrap is
 # sourced.  That bootstrap is allowed to provide only a node-local Python and
@@ -166,7 +167,17 @@ VAE_PATH="${FASTWAM_LOCAL_VAE_PATH:-}"
 PYTHON_BIN="${FASTWAM_POSE_FOCUS_PYTHON:-}"
 DRY_RUN="${FASTWAM_POSE_FOCUS_DRY_RUN:-0}"
 TASK_PROFILE="${FASTWAM_POSE_FOCUS_TASK_PROFILE:-robofactory_placefood_pose_focus_r5_224_5e-6}"
-SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
+case "${EXPECTED_WORKERS}" in
+  1)
+    SCALE_PROFILE="robofactory_multi_robot_8gpu_eff24_pose_focus"
+    EXPECTED_GRADIENT_ACCUMULATION_STEPS=3
+    ;;
+  3)
+    SCALE_PROFILE="robofactory_multi_robot_24gpu_pose_focus"
+    EXPECTED_GRADIENT_ACCUMULATION_STEPS=1
+    ;;
+  *) die "FASTWAM_POSE_FOCUS_EXPECTED_WORKERS must be 1 or 3" ;;
+esac
 case "${TASK_PROFILE}" in
   robofactory_placefood_pose_focus_r5_224_5e-6|robofactory_placefood_pose_phase_x0_r5_224_5e-6) ;;
   robofactory_placefood_gaussian_spatial_p4_224_5e-6|robofactory_placefood_semantic_phase_p5_224_5e-6) ;;
@@ -213,15 +224,23 @@ fi
 export FASTWAM_B4_ATTEMPT_ID="${ATTEMPT_ID}"
 printf 'POSE_FOCUS runtime provenance binding: FASTWAM_B4_ATTEMPT_ID=%s\n' "${FASTWAM_B4_ATTEMPT_ID}"
 
-[[ "${NUM_MACHINES}" == "3" ]] || die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
+[[ "${NUM_MACHINES}" == "${EXPECTED_WORKERS}" ]] || \
+  die "WORLD_SIZE must match FASTWAM_POSE_FOCUS_EXPECTED_WORKERS=${EXPECTED_WORKERS}, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
-is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,2], got ${MACHINE_RANK:-unset}"
-((10#${MACHINE_RANK} < 3)) || die "RANK must be in [0,2], got ${MACHINE_RANK}"
+is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer, got ${MACHINE_RANK:-unset}"
+((10#${MACHINE_RANK} < 10#${EXPECTED_WORKERS})) || \
+  die "RANK must be below worker count ${EXPECTED_WORKERS}, got ${MACHINE_RANK}"
 [[ -z "${LOCAL_RANK:-}" || "${LOCAL_RANK}" == "0" ]] || die "outer DLC command must run only once per node (LOCAL_RANK=0)"
-is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a non-loopback address shared by all workers"
+if ((10#${EXPECTED_WORKERS} > 1)); then
+  is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a non-loopback address shared by all workers"
+else
+  [[ -n "${MASTER_HOST}" ]] || die "MASTER_ADDR must be non-empty"
+fi
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || die "MASTER_PORT must be in [1,65535]"
-[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 24 ]] || die "global world size must be exactly 24"
+GLOBAL_PROCESS_COUNT=$((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE}))
+[[ "${GLOBAL_PROCESS_COUNT}" == "8" || "${GLOBAL_PROCESS_COUNT}" == "24" ]] || \
+  die "global process count must be 8 or 24"
 
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || die "FASTWAM_POSE_FOCUS_DRY_RUN must be 0 or 1"
 
@@ -236,7 +255,7 @@ fi
 [[ -f "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" ]] || die "missing ZeRO-2 Accelerate config"
 [[ -f "${REPO_ROOT}/src/fastwam/trainer.py" ]] || die "missing trainer source"
 [[ -f "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" ]] || die "missing formal POSE_FOCUS task profile"
-[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal POSE_FOCUS 24-GPU scale profile"
+[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal POSE_FOCUS scale profile"
 if [[ "${TEST_MODE}" == "1" ]]; then
   [[ "${OUTPUT_DIR}" == /* ]] || die "test output must be an absolute path"
 else
@@ -366,13 +385,16 @@ fi
 
 "${PYTHON_BIN}" - \
   "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" \
-  "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" <<'PY' || die "formal POSE_FOCUS task/scale contract validation failed"
+  "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" \
+  "${EXPECTED_GRADIENT_ACCUMULATION_STEPS}" <<'PY' || die "formal POSE_FOCUS task/scale contract validation failed"
 import pathlib
 import sys
 
 import yaml
 
-task_path, scale_path = map(pathlib.Path, sys.argv[1:])
+task_path = pathlib.Path(sys.argv[1])
+scale_path = pathlib.Path(sys.argv[2])
+expected_gradient_accumulation_steps = int(sys.argv[3])
 task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
 scale = yaml.safe_load(scale_path.read_text(encoding="utf-8"))
 is_gaussian_spatial = task_path.stem in {
@@ -476,7 +498,7 @@ if task_path.stem in {
 else:
     task_expected["model.loss.pose_focus.lambda_clean_arm_x0"] = 0.0
 scale_expected = {
-    "gradient_accumulation_steps": 1,
+    "gradient_accumulation_steps": expected_gradient_accumulation_steps,
     "checkpoint_state_kind": "full",
     "save_training_state": True,
     "save_final_checkpoint": True,
@@ -559,27 +581,36 @@ if is_relation_gripcontact:
 PY
 
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
-  # These are the same operational eRDMA/NCCL settings used by the completed
-  # formal 32-GPU run.  The existing helper owns its archived bundle checks;
-  # this POSE_FOCUS launcher adds no source/environment digest or hash-chain contract.
-  export FASTWAM_ERDMA_BUNDLE_ROOT="${FASTWAM_ERDMA_BUNDLE_ROOT:-/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3}"
-  export FASTWAM_ERDMA_EXPECTED_VERSION="${FASTWAM_ERDMA_EXPECTED_VERSION:-56.2-1.0.3}"
-  export NCCL_IB_HCA="${NCCL_IB_HCA:-erdma}"
   export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
   export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET}"
-  export FASTWAM_PREFLIGHT_REQUIRE_ERDMA="${FASTWAM_PREFLIGHT_REQUIRE_ERDMA:-1}"
+  if ((10#${NUM_MACHINES} > 1)); then
+    EXPECTED_REQUIRE_ERDMA=1
+  else
+    EXPECTED_REQUIRE_ERDMA=0
+  fi
+  export FASTWAM_PREFLIGHT_REQUIRE_ERDMA="${FASTWAM_PREFLIGHT_REQUIRE_ERDMA:-${EXPECTED_REQUIRE_ERDMA}}"
   export FASTWAM_PREFLIGHT_TIMEOUT="${FASTWAM_PREFLIGHT_TIMEOUT:-7200}"
   export FASTWAM_PREFLIGHT_OUTER_TIMEOUT="${FASTWAM_PREFLIGHT_OUTER_TIMEOUT:-7260}"
-  [[ "${FASTWAM_ERDMA_BUNDLE_ROOT}" == "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3" ]] || \
-    die "production eRDMA bundle root drifted from the verified artifact"
-  [[ "${FASTWAM_ERDMA_EXPECTED_VERSION}" == "56.2-1.0.3" ]] || die "production eRDMA version drifted"
-  [[ "${NCCL_IB_HCA}" == "erdma" ]] || die "NCCL_IB_HCA must be erdma"
   [[ "${NCCL_DEBUG}" == "INFO" ]] || die "NCCL_DEBUG must be INFO"
   [[ "${NCCL_DEBUG_SUBSYS}" == "INIT,NET" ]] || die "NCCL_DEBUG_SUBSYS must be INIT,NET"
-  [[ "${FASTWAM_PREFLIGHT_REQUIRE_ERDMA}" == "1" ]] || die "eRDMA preflight must remain required"
-  # shellcheck source=/dev/null
-  source "${REPO_ROOT}/docker/prepare-erdma-userspace.sh"
-  fastwam_prepare_erdma_userspace || die "eRDMA userspace preparation failed"
+  [[ "${FASTWAM_PREFLIGHT_REQUIRE_ERDMA}" == "${EXPECTED_REQUIRE_ERDMA}" ]] || \
+    die "eRDMA requirement does not match the selected topology"
+  if [[ "${EXPECTED_REQUIRE_ERDMA}" == "1" ]]; then
+    # These settings match the completed multi-node formal run. The existing
+    # helper owns its archived bundle checks.
+    export FASTWAM_ERDMA_BUNDLE_ROOT="${FASTWAM_ERDMA_BUNDLE_ROOT:-/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3}"
+    export FASTWAM_ERDMA_EXPECTED_VERSION="${FASTWAM_ERDMA_EXPECTED_VERSION:-56.2-1.0.3}"
+    export NCCL_IB_HCA="${NCCL_IB_HCA:-erdma}"
+    [[ "${FASTWAM_ERDMA_BUNDLE_ROOT}" == "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3" ]] || \
+      die "production eRDMA bundle root drifted from the verified artifact"
+    [[ "${FASTWAM_ERDMA_EXPECTED_VERSION}" == "56.2-1.0.3" ]] || die "production eRDMA version drifted"
+    [[ "${NCCL_IB_HCA}" == "erdma" ]] || die "NCCL_IB_HCA must be erdma"
+    # shellcheck source=/dev/null
+    source "${REPO_ROOT}/docker/prepare-erdma-userspace.sh"
+    fastwam_prepare_erdma_userspace || die "eRDMA userspace preparation failed"
+  else
+    unset NCCL_IB_HCA
+  fi
   fastwam_run_global_allreduce_preflight \
     "${GPUS_PER_NODE}" "${NUM_MACHINES}" "${MACHINE_RANK}" \
     "${MASTER_HOST}" "${MASTER_TCP_PORT}" "${RUN_ID}" || die "global NCCL/eRDMA preflight failed"
@@ -601,9 +632,9 @@ if [[ "${TEST_MODE}" != "1" ]]; then
 fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
-workers=3
+workers=${NUM_MACHINES}
 gpus_per_worker=8
-global_world_size=24
+global_world_size=${GLOBAL_PROCESS_COUNT}
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
@@ -671,11 +702,11 @@ export FASTWAM_POSE_FOCUS_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
   --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml"
-  --num_machines 3
+  --num_machines "${NUM_MACHINES}"
   --machine_rank "${MACHINE_RANK}"
   --main_process_ip "${MASTER_HOST}"
   --main_process_port "${MASTER_TCP_PORT}"
-  --num_processes 24
+  --num_processes "${GLOBAL_PROCESS_COUNT}"
   --deepspeed_multinode_launcher standard
   "${REPO_ROOT}/scripts/train.py"
   "task=${TASK_PROFILE}"
@@ -701,8 +732,8 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-# PAI's outer-worker topology describes three node coordinators, whereas
-# Accelerate is about to construct a fresh 24-process topology.  Keeping the
+# PAI's outer-worker topology describes node coordinators, whereas Accelerate
+# is about to construct a fresh distributed topology. Keeping the
 # injected rank variables would make child rank discovery ambiguous.  All
 # values needed by Accelerate are already frozen into COMMAND above.
 unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK
