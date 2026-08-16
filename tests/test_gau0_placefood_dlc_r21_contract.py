@@ -142,8 +142,14 @@ def test_runtime_profiles_are_isolated_real_environment_probes_and_no_cpu_fallba
     assert 'timeout --signal=TERM --kill-after=30s 180s env CUDA_VISIBLE_DEVICES=0' in runtime
     assert 'environment = _build_environment(root, "PlaceFood-rf")' in runtime
     assert "environment.close()" in runtime
-    assert "GAU0_R21_GRAPHICS_PROFILE_REJECTED" in runtime
-    assert "GAU0_R21_GRAPHICS_PROFILE_SELECTED" in runtime
+    assert "GAU0_%s_GRAPHICS_PROFILE_REJECTED" in runtime
+    assert "GAU0_%s_GRAPHICS_PROFILE_SELECTED" in runtime
+    assert 'RUNTIME_GENERATION="${FASTWAM_RUNTIME_GENERATION:-R21}"' in runtime
+    assert 'export FASTWAM_RUNTIME_GENERATION' in runtime
+    assert 'scratch_egl_manifest="${scratch_root}/10_nvidia.json"' in runtime
+    assert '__EGL_VENDOR_LIBRARY_FILENAMES="${scratch_egl_manifest}"' in runtime
+    assert 'apply_sapien_egl_guard' in runtime
+    assert runtime.index('apply_sapien_egl_guard') < runtime.index('probe_program=')
     assert 'apply_graphics_profile "${selected_profile}"' in runtime
     assert "CPU rendering is not an allowed fallback" not in runtime
     assert "CUDA_VISIBLE_DEVICES=''" not in runtime

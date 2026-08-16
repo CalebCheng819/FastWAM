@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+export FASTWAM_RUNTIME_EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R22-20260817'
+export FASTWAM_RUNTIME_GENERATION='R22'
+
+exec /bin/bash "${FASTWAM_SOURCE_ROOT}/.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R21-20260817/runtime.sh" "$@"

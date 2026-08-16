@@ -2,10 +2,16 @@
 set -Eeuo pipefail
 umask 077
 
-EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R21-20260817'
+EXPERIMENT_REL="${FASTWAM_RUNTIME_EXPERIMENT_REL:-.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU0-STEP5000-PLACEFOOD-SAME8-S42-R21-20260817}"
+RUNTIME_GENERATION="${FASTWAM_RUNTIME_GENERATION:-R21}"
+[[ "${RUNTIME_GENERATION}" =~ ^R[0-9]+$ ]] || {
+  printf 'invalid FASTWAM_RUNTIME_GENERATION: %s\n' "${RUNTIME_GENERATION}" >&2
+  exit 1
+}
+export FASTWAM_RUNTIME_GENERATION
 
 die() {
-  printf 'GAU0_R21_EVAL_FATAL: %s\n' "$*" >&2
+  printf 'GAU0_%s_EVAL_FATAL: %s\n' "${RUNTIME_GENERATION}" "$*" >&2
   exit 1
 }
 
@@ -66,6 +72,29 @@ mkdir -m 0700 -- "${scratch_root}/xdg-cache" "${scratch_root}/xdg-runtime" \
   "${scratch_root}/torch" "${scratch_root}/matplotlib" "${scratch_root}/tmp" \
   "${scratch_root}/pycache" "${scratch_root}/graphics-probes"
 
+scratch_egl_manifest="${scratch_root}/10_nvidia.json"
+"${FASTWAM_PYTHON}" -B - "${scratch_egl_manifest}" "${FASTWAM_EGL_VENDOR}" <<'PY'
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+vendor = Path(sys.argv[2])
+vendor_info = vendor.lstat()
+if vendor.is_symlink() or not stat.S_ISREG(vendor_info.st_mode):
+    raise SystemExit(f"EGL vendor library must be a non-symlink ordinary file: {vendor}")
+with output.open("x", encoding="utf-8") as handle:
+    json.dump(
+        {"file_format_version": "1.0.0", "ICD": {"library_path": str(vendor)}},
+        handle,
+        separators=(",", ":"),
+    )
+    handle.write("\n")
+os.chmod(output, 0o600)
+PY
+
 export PYTHONPATH="${FASTWAM_ROBOFACTORY_ROOT}:${FASTWAM_SOURCE_ROOT}/src:${FASTWAM_PYTHON_EXTRA_ROOT}:${FASTWAM_SOURCE_ROOT}/experiments/robofactory"
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONFAULTHANDLER=1
@@ -104,6 +133,12 @@ apply_headless_contract() {
   export EGL_PLATFORM=surfaceless
   export PYOPENGL_PLATFORM=egl
   export NVIDIA_DRIVER_CAPABILITIES=all
+}
+
+apply_sapien_egl_guard() {
+  if [[ -z "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" && -z "${__EGL_VENDOR_LIBRARY_DIRS:-}" ]]; then
+    export __EGL_VENDOR_LIBRARY_FILENAMES="${scratch_egl_manifest}"
+  fi
 }
 
 build_discovered_loader() {
@@ -182,10 +217,11 @@ apply_graphics_profile() {
       return 2
       ;;
   esac
+  apply_sapien_egl_guard
   apply_headless_contract
 }
 
-probe_program=$'import os\nfrom pathlib import Path\nfrom eval_robofactory_multi_robot import _build_environment\nroot = Path(os.environ["FASTWAM_ROBOFACTORY_ROOT"])\nenvironment = _build_environment(root, "PlaceFood-rf")\nenvironment.close()\nprint("GAU0_R21_ENVIRONMENT_CONSTRUCTION_PROBE_PASS task=PlaceFood-rf device=0")\n'
+probe_program=$'import os\nfrom pathlib import Path\nfrom eval_robofactory_multi_robot import _build_environment\nroot = Path(os.environ["FASTWAM_ROBOFACTORY_ROOT"])\nenvironment = _build_environment(root, "PlaceFood-rf")\nenvironment.close()\nprint("GAU0_" + os.environ["FASTWAM_RUNTIME_GENERATION"] + "_ENVIRONMENT_CONSTRUCTION_PROBE_PASS task=PlaceFood-rf device=0")\n'
 
 profiles=(
   provider_native_headless
@@ -199,7 +235,7 @@ selected_profile=''
 for profile in "${profiles[@]}"; do
   probe_log="${scratch_root}/graphics-probes/${profile}.log"
   if ! apply_graphics_profile "${profile}"; then
-    printf 'GAU0_R21_GRAPHICS_PROFILE_SKIPPED profile=%s reason=unavailable\n' "${profile}"
+    printf 'GAU0_%s_GRAPHICS_PROFILE_SKIPPED profile=%s reason=unavailable\n' "${RUNTIME_GENERATION}" "${profile}"
     continue
   fi
   set +e
@@ -209,11 +245,11 @@ for profile in "${profiles[@]}"; do
   set -e
   if [[ "${probe_rc}" == 0 ]]; then
     selected_profile="${profile}"
-    printf 'GAU0_R21_GRAPHICS_PROFILE_SELECTED profile=%s\n' "${profile}"
+    printf 'GAU0_%s_GRAPHICS_PROFILE_SELECTED profile=%s\n' "${RUNTIME_GENERATION}" "${profile}"
     rm -- "${probe_log}"
     break
   fi
-  printf 'GAU0_R21_GRAPHICS_PROFILE_REJECTED profile=%s rc=%s\n' "${profile}" "${probe_rc}" >&2
+  printf 'GAU0_%s_GRAPHICS_PROFILE_REJECTED profile=%s rc=%s\n' "${RUNTIME_GENERATION}" "${profile}" "${probe_rc}" >&2
   tail -n 80 -- "${probe_log}" >&2 || true
 done
 [[ -n "${selected_profile}" ]] || die 'no graphics profile could construct and close PlaceFood-rf'
@@ -297,4 +333,4 @@ platform_job_id="$("${FASTWAM_PYTHON}" -B "${controller}" job-id)"
   --job-id "${platform_job_id}"
 
 "${FASTWAM_PYTHON}" -B "${controller}" validate-terminal --member gau0
-printf 'GAU0_R21_EVAL_SCIENTIFIC_COMPLETE\n'
+printf 'GAU0_%s_EVAL_SCIENTIFIC_COMPLETE\n' "${RUNTIME_GENERATION}"
