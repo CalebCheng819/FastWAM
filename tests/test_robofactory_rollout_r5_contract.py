@@ -160,6 +160,53 @@ class R5RolloutContractTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 diagnostic._publish_directory(source, destination)
 
+    def test_artifact_directory_retries_transient_readback_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "local"
+            destination = root / "published"
+            source.mkdir()
+            (source / "result.json").write_text("{}\n", encoding="utf-8")
+            inventory = {"result.json": 3}
+
+            with (
+                mock.patch.object(
+                    diagnostic,
+                    "_validate_directory_copy",
+                    side_effect=[RuntimeError("transient mismatch"), inventory, inventory],
+                ) as validate,
+                mock.patch.object(diagnostic.time, "sleep") as sleep,
+            ):
+                report = diagnostic._publish_directory(source, destination)
+
+            self.assertEqual(validate.call_count, 3)
+            sleep.assert_called_once_with(0.25)
+            self.assertTrue(report["published_readback_validated"])
+            self.assertEqual((destination / "result.json").read_text(), "{}\n")
+
+    def test_artifact_directory_rejects_persistent_readback_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "local"
+            destination = root / "published"
+            source.mkdir()
+            (source / "result.json").write_text("{}\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(
+                    diagnostic,
+                    "_validate_directory_copy",
+                    side_effect=RuntimeError("persistent mismatch"),
+                ) as validate,
+                mock.patch.object(diagnostic.time, "sleep"),
+                self.assertRaisesRegex(RuntimeError, "persistent mismatch"),
+            ):
+                diagnostic._publish_directory(source, destination)
+
+            self.assertEqual(validate.call_count, 8)
+            self.assertFalse(destination.exists())
+            self.assertEqual(list(root.glob(".published.publishing.*")), [])
+
     def test_artifact_directory_rejects_source_symlink_without_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

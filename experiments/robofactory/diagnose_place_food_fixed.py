@@ -460,6 +460,30 @@ def _validate_directory_copy(source: Path, destination: Path) -> dict[str, int]:
     return source_inventory
 
 
+def _validate_directory_copy_with_retry(
+    source: Path,
+    destination: Path,
+    *,
+    attempts: int = 8,
+    initial_delay_seconds: float = 0.25,
+) -> dict[str, int]:
+    """Retry exact readback while an object-store mount becomes consistent."""
+
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+    if initial_delay_seconds < 0:
+        raise ValueError("initial_delay_seconds must be non-negative")
+    for attempt in range(attempts):
+        try:
+            return _validate_directory_copy(source, destination)
+        except (OSError, RuntimeError):
+            if attempt + 1 == attempts:
+                raise
+            delay_seconds = min(initial_delay_seconds * (2**attempt), 2.0)
+            time.sleep(delay_seconds)
+    raise AssertionError("unreachable")
+
+
 def _publish_directory(source: Path, destination: Path) -> dict[str, Any]:
     """Publish a completed local artifact tree once and verify every byte."""
 
@@ -475,11 +499,11 @@ def _publish_directory(source: Path, destination: Path) -> dict[str, Any]:
     )
     try:
         shutil.copytree(source, temporary, symlinks=False)
-        copied_inventory = _validate_directory_copy(source, temporary)
+        copied_inventory = _validate_directory_copy_with_retry(source, temporary)
         if copied_inventory != source_inventory:
             raise RuntimeError("Artifact inventory changed while publishing")
         os.replace(temporary, destination)
-        published_inventory = _validate_directory_copy(source, destination)
+        published_inventory = _validate_directory_copy_with_retry(source, destination)
         if published_inventory != source_inventory:
             raise RuntimeError("Artifact inventory changed after publication")
     finally:
