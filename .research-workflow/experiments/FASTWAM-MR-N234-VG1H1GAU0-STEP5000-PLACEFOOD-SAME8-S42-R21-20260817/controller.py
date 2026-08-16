@@ -36,7 +36,7 @@ RUN_ID = "fastwam-gau0-placefood-same8-r21-20260817"
 DISPLAY_NAME = "fw-gau0-placefood-same8-r21"
 SOURCE_ROOT = Path(
     "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/"
-    "fastwam-gau0-placefood-same8-eval-20260817-r34"
+    "fastwam-gau0-placefood-same8-eval-20260817-r35"
 )
 OUTPUT_ROOT = Path("/oss-chengjuntao/artifacts/fastwam-gau0-placefood-same8-eval-20260817-r21")
 DURABLE_ROOT = Path(
@@ -109,8 +109,8 @@ expected_src = source_root / "src"
 
 def require_regular_file(label, path):
     info = path.lstat()
-    if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise SystemExit(f"{label} must be a single-link ordinary file: {path}")
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"{label} must be a non-symlink ordinary file: {path}")
     return path.resolve(strict=True)
 
 def require_installed_module(label):

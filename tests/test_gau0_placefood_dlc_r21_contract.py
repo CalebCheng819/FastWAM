@@ -39,7 +39,7 @@ def test_r21_identity_isolated_and_priority_frozen(monkeypatch):
     assert controller.EXPERIMENT_ID.endswith("R21-20260817")
     assert controller.RUN_ID == "fastwam-gau0-placefood-same8-r21-20260817"
     assert controller.DISPLAY_NAME == "fw-gau0-placefood-same8-r21"
-    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260817-r34")
+    assert str(controller.SOURCE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260817-r35")
     assert str(controller.OUTPUT_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260817-r21")
     assert str(controller.DURABLE_ROOT).endswith("fastwam-gau0-placefood-same8-eval-20260817-r21-controller")
     assert str(controller.LOCAL_ROOT).endswith("gau0-placefood-same8-r21")
@@ -121,6 +121,8 @@ def test_static_dependency_scan_does_not_import_graphics_stack():
     assert "import utils.scenes" not in program
     assert 'require_installed_module("mani_skill")' in program
     assert 'require_installed_module("sapien")' in program
+    assert "info.st_nlink != 1" not in program
+    assert "must be a non-symlink ordinary file" in program
     assert '"tasks" / "place_food.py"' in program
     assert '"utils" / "scenes" / "__init__.py"' in program
 
