@@ -231,6 +231,9 @@ profiles=(
   system_manifest_headless
   system_discovered_sapien_loader
 )
+if [[ "${FASTWAM_REQUIRE_PROVIDER_NATIVE_GRAPHICS:-0}" == '1' ]]; then
+  profiles=(provider_native_headless)
+fi
 selected_profile=''
 for profile in "${profiles[@]}"; do
   probe_log="${scratch_root}/graphics-probes/${profile}.log"
