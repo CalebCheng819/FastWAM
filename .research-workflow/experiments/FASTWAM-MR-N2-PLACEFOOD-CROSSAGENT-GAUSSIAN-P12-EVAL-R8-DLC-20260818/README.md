@@ -28,10 +28,19 @@ submission latch before their sole `CreateJob` call. `--audit-only` performs no
 durable or local writes.
 
 The frozen request remains strict: Priority 7, non-spot, no oversold request,
-and `EnableRDMA=false`. Post-submit `GetJob` accepts only the two provider
-normalizations observed in the failed R7 lineage (`OversoldType` absent to an
-empty string and `EnableRDMA` false to true); every other frozen request field
-must remain equal and the accepted normalizations are persisted in the receipt.
+and `EnableRDMA=false`. Post-submit `GetJob` accepts only the controlled provider
+normalizations observed in the failed R7 and first R8 readbacks:
+`OversoldType` absent to an empty string, `EnableRDMA` false to true, and an
+empty requested `CustomEnvs` projected to a public one-to-one list of the exact
+requested `Envs`. Duplicate, private, missing, extra, or changed environment
+entries still fail closed. Every other frozen request field must remain equal,
+and the accepted normalizations are persisted in the receipt.
+
+If the sole `CreateJob` succeeds but strict post-create readback stops before a
+receipt is written, `--reconcile` validates the permanent latch, recorded Job
+ID, unique provider candidate, and full frozen request before completing the
+durable receipt/state. Reconciliation has no CreateJob path and must never be
+used to retry or replace the latched job.
 
 A successful DLC state is operational evidence only; the worker terminal
 record and evaluation aggregates are required for a scientific result.

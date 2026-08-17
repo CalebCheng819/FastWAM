@@ -518,20 +518,55 @@ def _validate_expected_projection(
 def validate_provider_job(
     observed: dict[str, Any], expected: dict[str, Any], run_mode: str
 ) -> list[str]:
-    """Validate GetJob against the request plus two observed provider normalizations."""
+    """Validate GetJob against the request plus controlled provider normalizations."""
     validate_request_map(expected, run_mode)
     expected_projection = {
         key: value
         for key, value in expected.items()
-        if key not in {"Settings"}
+        if key not in {"CustomEnvs", "Settings"}
     }
     _validate_expected_projection(observed, expected_projection, "job")
+
+    expected_custom_envs = expected.get("CustomEnvs")
+    if expected_custom_envs != []:
+        raise RuntimeError("frozen request CustomEnvs must be empty")
+    observed_custom_envs = observed.get("CustomEnvs")
+    normalizations: list[str] = []
+    if observed_custom_envs not in (None, []):
+        if not isinstance(observed_custom_envs, list):
+            raise RuntimeError("provider job CustomEnvs changed type")
+        expected_envs = expected.get("Envs") or {}
+        projected: dict[str, str] = {}
+        for index, item in enumerate(observed_custom_envs):
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"provider job CustomEnvs[{index}] changed type"
+                )
+            if set(item) != {"Key", "Value", "Visible"}:
+                raise RuntimeError(
+                    f"provider job CustomEnvs[{index}] has unexpected fields"
+                )
+            key = item.get("Key")
+            value = item.get("Value")
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise RuntimeError(
+                    f"provider job CustomEnvs[{index}] has non-string key/value"
+                )
+            if item.get("Visible") != "public":
+                raise RuntimeError(
+                    f"provider job CustomEnvs[{index}] is not public"
+                )
+            if key in projected:
+                raise RuntimeError(f"provider job CustomEnvs duplicated key: {key}")
+            projected[key] = value
+        if projected != expected_envs:
+            raise RuntimeError("provider job CustomEnvs is not an exact Envs projection")
+        normalizations.append("CustomEnvs:Envs_to_public_list")
 
     observed_settings = observed.get("Settings") or {}
     expected_settings = expected.get("Settings") or {}
     if not isinstance(observed_settings, dict):
         raise RuntimeError("provider job settings changed type")
-    normalizations: list[str] = []
     for key, value in expected_settings.items():
         if key == "EnableRDMA":
             actual = observed_settings.get(key)
@@ -623,15 +658,139 @@ def submission_paths(run_mode: str) -> tuple[Path, Path, Path, Path]:
     )
 
 
+def validate_submission_evidence(
+    record: dict[str, Any],
+    *,
+    schema_version: str,
+    eval_commit: str,
+    run_mode: str,
+    target_display: str,
+) -> None:
+    expected = {
+        "schema_version": schema_version,
+        "experiment_id": EXPERIMENT_ID,
+        "display_name": target_display,
+        "run_mode": run_mode,
+        "evaluation_code_commit": eval_commit,
+        "priority": 7,
+        "duplicate_count": 0,
+        "create_job_call_permitted_once": True,
+    }
+    _validate_expected_projection(record, expected, "submission_evidence")
+    if not isinstance(record.get("latched_at_utc"), str):
+        raise RuntimeError("submission evidence has no latch time")
+
+
+def reconcile_existing_submission(run_mode: str) -> dict[str, Any]:
+    """Finish durable accounting for one already-created job without CreateJob."""
+    target_display = PROBE_DISPLAY_NAME if run_mode == "graphics_probe" else DISPLAY_NAME
+    eval_commit = validate_inputs(run_mode=run_mode)
+    body = request_body(eval_commit, run_mode=run_mode)
+    client = load_client()
+    from alibabacloud_pai_dlc20201203 import models
+
+    # Model construction is validation only.  Reconciliation never calls CreateJob.
+    build_request(body, run_mode, models)
+    latch_path, response_path, receipt_path, state_path = submission_paths(run_mode)
+    latch = read_regular_json(latch_path)
+    response = read_regular_json(response_path)
+    validate_submission_evidence(
+        latch,
+        schema_version="fastwam-p12-dlc-eval-permanent-submission-latch-v1",
+        eval_commit=eval_commit,
+        run_mode=run_mode,
+        target_display=target_display,
+    )
+    validate_submission_evidence(
+        response,
+        schema_version="fastwam-p12-dlc-eval-create-job-response-v1",
+        eval_commit=eval_commit,
+        run_mode=run_mode,
+        target_display=target_display,
+    )
+    for key, value in latch.items():
+        if key == "schema_version":
+            continue
+        if response.get(key) != value:
+            raise RuntimeError(f"CreateJob response changed latch field: {key}")
+    job_id = response.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        raise RuntimeError("CreateJob response has no job id")
+    if not isinstance(response.get("request_id"), str) or not response["request_id"]:
+        raise RuntimeError("CreateJob response has no request id")
+    if not isinstance(response.get("recorded_at_utc"), str):
+        raise RuntimeError("CreateJob response has no record time")
+
+    jobs = list_jobs(client, models)
+    duplicates = duplicate_jobs(jobs, body)
+    if len(duplicates) != 1 or duplicates[0].get("job_id") != job_id:
+        raise RuntimeError(
+            f"existing submission is not the unique frozen candidate: {duplicates}"
+        )
+    observed = client.get_job(
+        job_id, models.GetJobRequest(need_detail=True)
+    ).body.to_map()
+    provider_normalizations = validate_provider_job(observed, body, run_mode)
+    receipt = {
+        **response,
+        "schema_version": "fastwam-p12-dlc-eval-submission-v2",
+        "cloud_mutations_called": ["CreateJob"],
+        "observed_status": observed.get("Status"),
+        "outputs": [str(path) for path in outputs()],
+        "requested_topology": "1x8",
+        "submitted_at_utc": utc_now(),
+        "training_job_id": "dlc19rgpvuxr56b7",
+        "create_job_called": True,
+        "create_job_call_count": 1,
+        "provider_normalizations": provider_normalizations,
+        "reconciled_without_cloud_mutation": True,
+        "reconciled_at_utc": utc_now(),
+    }
+    if run_mode == "full_eval":
+        receipt["graphics_probe_gate"] = validate_probe_terminal()
+    if receipt_path.exists() or receipt_path.is_symlink():
+        existing_receipt = read_regular_json(receipt_path)
+        stable_keys = {
+            key: value
+            for key, value in receipt.items()
+            if key not in {"submitted_at_utc", "reconciled_at_utc", "observed_status"}
+        }
+        _validate_expected_projection(existing_receipt, stable_keys, "receipt")
+        receipt = existing_receipt
+    else:
+        write_exclusive(receipt_path, receipt)
+    state = {
+        "state": "SUBMITTED",
+        "detail": job_id,
+        "run_mode": run_mode,
+        "display_name": target_display,
+        "observed_at_utc": utc_now(),
+        "reconciled_without_cloud_mutation": True,
+    }
+    if state_path.exists() or state_path.is_symlink():
+        existing_state = read_regular_json(state_path)
+        for key in ("state", "detail", "run_mode", "display_name"):
+            if existing_state.get(key) != state[key]:
+                raise RuntimeError(f"existing submission state changed field: {key}")
+    else:
+        atomic_json(state_path, state)
+    atomic_json(LOCAL_ROOT / "submission-state.json", state)
+    return receipt
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--audit-only", action="store_true")
     mode.add_argument("--submit", action="store_true")
+    mode.add_argument("--reconcile", action="store_true")
     parser.add_argument("--probe-only", action="store_true")
     args = parser.parse_args()
     run_mode = "graphics_probe" if args.probe_only else "full_eval"
     target_display = PROBE_DISPLAY_NAME if run_mode == "graphics_probe" else DISPLAY_NAME
+    if args.reconcile:
+        print(json.dumps(reconcile_existing_submission(run_mode), sort_keys=True))
+        return
     eval_commit, body, request, client, models, listed_jobs = preflight(run_mode)
     latch_path, response_path, receipt_path, state_path = submission_paths(run_mode)
     existing = [
