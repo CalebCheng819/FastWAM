@@ -40,6 +40,11 @@ SCRATCH_ROOT="${LOCAL_ROOT}/scratch"
 [[ -f "${RUNTIME_ARCHIVE}" && ! -L "${RUNTIME_ARCHIVE}" ]] || die "runtime archive is missing"
 [[ -d "${DATASET_ROOT}" && ! -L "${DATASET_ROOT}" ]] || die "dataset root is missing"
 [[ -d "${ROBOFACTORY_ROOT}" && ! -L "${ROBOFACTORY_ROOT}" ]] || die "RoboFactory root is missing"
+[[ "$(basename -- "${ROBOFACTORY_ROOT}")" == robofactory ]] || \
+  die "RoboFactory root must name the robofactory package directory"
+ROBOFACTORY_PACKAGE_PARENT="$(dirname -- "${ROBOFACTORY_ROOT}")"
+[[ -d "${ROBOFACTORY_PACKAGE_PARENT}" && ! -L "${ROBOFACTORY_PACKAGE_PARENT}" ]] || \
+  die "RoboFactory package parent is missing"
 [[ -d "${PYTHON_EXTRA_ROOT}" && ! -L "${PYTHON_EXTRA_ROOT}" ]] || die "Python extra root is missing"
 [[ -f "${DRIVER_ROOT}/nvidia_icd.json" ]] || die "Vulkan ICD is missing"
 [[ -f "${DRIVER_ROOT}/10_nvidia.json" ]] || die "EGL vendor file is missing"
@@ -126,7 +131,11 @@ mv -T -- "${PARTIAL_REPO}" "${LOCAL_REPO}"
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONFAULTHANDLER=1
-export PYTHONPATH="${ROBOFACTORY_ROOT}:${LOCAL_REPO}/src:${PYTHON_EXTRA_ROOT}:${LOCAL_REPO}/scripts:${RUNTIME_ROOT}/site-packages"
+# RoboFactory has a mixed import contract: callers import the legacy top-level
+# `tasks` package from the package directory, while that package imports
+# `robofactory.utils` through the package parent.  Both entries are therefore
+# required, and their order is frozen to the already-proven R25 evaluator.
+export PYTHONPATH="${ROBOFACTORY_PACKAGE_PARENT}:${ROBOFACTORY_ROOT}:${LOCAL_REPO}/src:${PYTHON_EXTRA_ROOT}:${LOCAL_REPO}/scripts:${RUNTIME_ROOT}/site-packages"
 export XDG_CACHE_HOME="${SCRATCH_ROOT}/xdg-cache"
 export XDG_RUNTIME_DIR="${SCRATCH_ROOT}/xdg-runtime"
 export TORCH_HOME="${SCRATCH_ROOT}/torch"
@@ -236,8 +245,9 @@ if not callable(getattr(EGL, "eglQueryString", None)):
 import cv2
 import mani_skill
 import sapien
+import robofactory
 import tasks.place_food
-import utils.scenes
+import robofactory.utils.scenes
 print("P13_METRIC_CACHE_R25_GRAPHICS_IMPORT_PREFLIGHT_PASS")
 PY
 }

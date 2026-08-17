@@ -45,6 +45,19 @@ class P13CacheR10SubmissionTest(unittest.TestCase):
         self.assertIn("fastwam-p13-runtime-20260817-r10-r25-egl", source)
         self.assertNotIn("runtime-20260817-r9", source)
 
+    def test_shared_runtime_exports_both_robofactory_import_roots(self):
+        source = (ROOT / "scripts" / "run_p13_metric_cache_dlc.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('ROBOFACTORY_PACKAGE_PARENT="$(dirname -- "${ROBOFACTORY_ROOT}")"', source)
+        self.assertIn(
+            'export PYTHONPATH="${ROBOFACTORY_PACKAGE_PARENT}:${ROBOFACTORY_ROOT}:',
+            source,
+        )
+        self.assertIn("import robofactory", source)
+        self.assertIn("import tasks.place_food", source)
+        self.assertIn("import robofactory.utils.scenes", source)
+
     def test_new_identity_and_real_fix_commit_are_consistent(self):
         body = json.loads(REQUEST.read_text(encoding="utf-8"))
         self.assertEqual(body["DisplayName"], MODULE.DISPLAY_NAME)
