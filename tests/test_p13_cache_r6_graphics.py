@@ -36,6 +36,39 @@ class P13CacheR6GraphicsTest(unittest.TestCase):
         self.assertIn("timeout --signal=TERM --kill-after=30s 180s", self.source)
         self.assertIn("env CUDA_VISIBLE_DEVICES=0", self.source)
 
+    def test_complete_glvnd_soname_contract_is_installed(self):
+        for soname in (
+            "libEGL.so.1",
+            "libGL.so.1",
+            "libGLESv1_CM.so.1",
+            "libGLESv2.so.2",
+            "libOpenGL.so.0",
+            "libGLX.so.0",
+            "libGLdispatch.so.0",
+            "libvulkan.so.1",
+        ):
+            self.assertIn(f"[{soname}]", self.source)
+        self.assertIn("/usr/share/glvnd/egl_vendor.d", self.source)
+        self.assertIn("/etc/glvnd/egl_vendor.d", self.source)
+
+    def test_cpfs_profile_checks_egl_vendor_and_vulkan_abi_before_sapien(self):
+        profile = self.source.index('if [[ "${profile}" == cpfs_manifest_headless ]]')
+        abi_gate = self.source.index("validate_complete_cpfs_graphics_contract", profile)
+        environment_probe = self.source.index(
+            "timeout --signal=TERM --kill-after=30s 180s", abi_gate
+        )
+        self.assertLess(abi_gate, environment_probe)
+        self.assertIn('hasattr(egl, "eglQueryString")', self.source)
+        self.assertIn('hasattr(vendor, "__egl_Main")', self.source)
+        self.assertIn("vkEnumerateInstanceVersion", self.source)
+
+    def test_complete_shim_precedes_driver_paths(self):
+        self.assertIn(
+            'local cpfs_library_path="${SCRATCH_ROOT}/graphics-lib:'
+            '${DRIVER_ROOT}/lib:${DRIVER_ROOT}/driver-lib"',
+            self.source,
+        )
+
     def test_graphics_sensitive_imports_wait_for_profile_contract(self):
         preflight_start = self.source.index('"${PYTHON_BIN}" - <<\'PY\'')
         preflight_end = self.source.index("\nPY\n", preflight_start)

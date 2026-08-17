@@ -17,6 +17,14 @@ ROBOFACTORY_ROOT="${FASTWAM_P13_ROBOFACTORY_ROOT:?FASTWAM_P13_ROBOFACTORY_ROOT i
 PYTHON_BIN="${FASTWAM_P13_PYTHON:?FASTWAM_P13_PYTHON is required}"
 DRIVER_ROOT="${FASTWAM_P13_DRIVER_ROOT:?FASTWAM_P13_DRIVER_ROOT is required}"
 VULKAN_LOADER="${FASTWAM_P13_VULKAN_LOADER:?FASTWAM_P13_VULKAN_LOADER is required}"
+EGL_FRONTEND="${DRIVER_ROOT}/lib/libEGL.so.1.1.0"
+GL_FRONTEND="${DRIVER_ROOT}/lib/libGL.so.1.7.0"
+GLES1_FRONTEND="${DRIVER_ROOT}/lib/libGLESv1_CM.so.1.2.0"
+GLES2_FRONTEND="${DRIVER_ROOT}/lib/libGLESv2.so.2.1.0"
+OPENGL_FRONTEND="${DRIVER_ROOT}/lib/libOpenGL.so.0"
+GLX_FRONTEND="${DRIVER_ROOT}/lib/libGLX.so.0"
+EGL_DISPATCH="${DRIVER_ROOT}/lib/libGLdispatch.so.0"
+EGL_VENDOR="${DRIVER_ROOT}/driver-lib/libEGL_nvidia.so.570.153.02"
 LOCAL_ROOT="/tmp/fastwam-p13-metric-cache/${RUN_ID}"
 LOCAL_REPO="${LOCAL_ROOT}/source"
 PARTIAL_REPO="${LOCAL_REPO}.partial.${BASHPID}"
@@ -37,12 +45,74 @@ selected_profile=''
 [[ -f "${VULKAN_LOADER}" && ! -L "${VULKAN_LOADER}" ]] || die "Vulkan loader is missing"
 [[ ! -e "${LOCAL_ROOT}" && ! -L "${LOCAL_ROOT}" ]] || die "node-local run root already exists: ${LOCAL_ROOT}"
 
+verify_graphics_file() {
+  local label=$1 path=$2 expected_size=$3 observed_size
+  [[ -f "${path}" && ! -L "${path}" ]] || die "${label} is not an ordinary file: ${path}"
+  observed_size=$(stat -c '%s' -- "${path}")
+  [[ "${observed_size}" == "${expected_size}" ]] || \
+    die "${label} size mismatch: ${observed_size} != ${expected_size}: ${path}"
+}
+
+verify_graphics_file EGL_FRONTEND "${EGL_FRONTEND}" 80328
+verify_graphics_file GL_FRONTEND "${GL_FRONTEND}" 649416
+verify_graphics_file GLES1_FRONTEND "${GLES1_FRONTEND}" 43208
+verify_graphics_file GLES2_FRONTEND "${GLES2_FRONTEND}" 80064
+verify_graphics_file OPENGL_FRONTEND "${OPENGL_FRONTEND}" 198848
+verify_graphics_file GLX_FRONTEND "${GLX_FRONTEND}" 137616
+verify_graphics_file EGL_DISPATCH "${EGL_DISPATCH}" 952576
+verify_graphics_file EGL_VENDOR "${EGL_VENDOR}" 1358016
+verify_graphics_file VULKAN_LOADER "${VULKAN_LOADER}" 445104
+
 mkdir -m 0700 -p -- \
   "${RUNTIME_ROOT}" "${SCRATCH_ROOT}/xdg-cache" "${SCRATCH_ROOT}/xdg-runtime" \
   "${SCRATCH_ROOT}/torch" "${SCRATCH_ROOT}/matplotlib" "${SCRATCH_ROOT}/tmp" \
   "${SCRATCH_ROOT}/pycache" "${SCRATCH_ROOT}/graphics-lib" \
   "${SCRATCH_ROOT}/graphics-probes"
-ln -sf -- "${VULKAN_LOADER}" "${SCRATCH_ROOT}/graphics-lib/libvulkan.so.1"
+declare -A graphics_shim_targets=(
+  [libEGL.so.1]="${EGL_FRONTEND}"
+  [libGL.so.1]="${GL_FRONTEND}"
+  [libGLESv1_CM.so.1]="${GLES1_FRONTEND}"
+  [libGLESv2.so.2]="${GLES2_FRONTEND}"
+  [libOpenGL.so.0]="${OPENGL_FRONTEND}"
+  [libGLX.so.0]="${GLX_FRONTEND}"
+  [libGLdispatch.so.0]="${EGL_DISPATCH}"
+  [libvulkan.so.1]="${VULKAN_LOADER}"
+)
+for soname in "${!graphics_shim_targets[@]}"; do
+  ln -s -- "${graphics_shim_targets[${soname}]}" "${SCRATCH_ROOT}/graphics-lib/${soname}"
+done
+declare -A graphics_shim_aliases=(
+  [libEGL.so]=libEGL.so.1
+  [libGL.so]=libGL.so.1
+  [libGLESv1_CM.so]=libGLESv1_CM.so.1
+  [libGLESv2.so]=libGLESv2.so.2
+  [libOpenGL.so]=libOpenGL.so.0
+  [libGLX.so]=libGLX.so.0
+  [libGLdispatch.so]=libGLdispatch.so.0
+  [libvulkan.so]=libvulkan.so.1
+)
+for alias in "${!graphics_shim_aliases[@]}"; do
+  ln -s -- "${graphics_shim_aliases[${alias}]}" "${SCRATCH_ROOT}/graphics-lib/${alias}"
+done
+
+# SAPIEN probes both conventional GLVND vendor directories during import.  The
+# DLC image may omit either directory, so make the directory contract explicit
+# before any graphics-sensitive Python import.  Existing provider files are
+# preserved; an absent NVIDIA entry receives the frozen CPFS manifest.
+for egl_vendor_dir in /usr/share/glvnd/egl_vendor.d /etc/glvnd/egl_vendor.d; do
+  [[ ! -L "${egl_vendor_dir}" ]] || die "GLVND vendor directory is a symlink: ${egl_vendor_dir}"
+  if [[ -e "${egl_vendor_dir}" && ! -d "${egl_vendor_dir}" ]]; then
+    die "GLVND vendor directory path is not a directory: ${egl_vendor_dir}"
+  fi
+  install -d -m 0755 -- "${egl_vendor_dir}"
+  egl_vendor_target="${egl_vendor_dir}/10_nvidia.json"
+  if [[ ! -e "${egl_vendor_target}" && ! -L "${egl_vendor_target}" ]]; then
+    install -m 0644 -- "${DRIVER_ROOT}/10_nvidia.json" "${egl_vendor_target}"
+  else
+    [[ -f "${egl_vendor_target}" && ! -L "${egl_vendor_target}" ]] || \
+      die "existing GLVND vendor entry is not an ordinary file: ${egl_vendor_target}"
+  fi
+done
 tar -xzf "${RUNTIME_ARCHIVE}" -C "${RUNTIME_ROOT}"
 [[ -d "${RUNTIME_ROOT}/site-packages" ]] || die "runtime archive layout is invalid"
 
@@ -148,9 +218,11 @@ prepend_library_paths() {
 
 apply_cpfs_loader() {
   build_discovered_loader
-  prepend_library_paths \
-    "${SCRATCH_ROOT}/graphics-lib" \
-    "${DRIVER_ROOT}/driver-lib" "${DRIVER_ROOT}/lib64" "${DRIVER_ROOT}/lib"
+  local cpfs_library_path="${SCRATCH_ROOT}/graphics-lib:${DRIVER_ROOT}/lib:${DRIVER_ROOT}/driver-lib"
+  if [[ -d "${DRIVER_ROOT}/lib64" ]]; then
+    cpfs_library_path="${cpfs_library_path}:${DRIVER_ROOT}/lib64"
+  fi
+  export LD_LIBRARY_PATH="${cpfs_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 }
 
 first_regular_file() {
@@ -219,6 +291,54 @@ ensure_sapien_egl_contract() {
   fi
 }
 
+validate_complete_cpfs_graphics_contract() {
+  export FASTWAM_P13_GL_SHIM_ROOT="${SCRATCH_ROOT}/graphics-lib"
+  export FASTWAM_P13_EGL_FRONTEND="${EGL_FRONTEND}"
+  export FASTWAM_P13_GL_FRONTEND="${GL_FRONTEND}"
+  export FASTWAM_P13_GLES1_FRONTEND="${GLES1_FRONTEND}"
+  export FASTWAM_P13_GLES2_FRONTEND="${GLES2_FRONTEND}"
+  export FASTWAM_P13_OPENGL_FRONTEND="${OPENGL_FRONTEND}"
+  export FASTWAM_P13_GLX_FRONTEND="${GLX_FRONTEND}"
+  export FASTWAM_P13_EGL_DISPATCH="${EGL_DISPATCH}"
+  export FASTWAM_P13_EGL_VENDOR="${EGL_VENDOR}"
+  "${PYTHON_BIN}" -B - <<'PY'
+import ctypes
+import os
+from pathlib import Path
+
+shim = Path(os.environ["FASTWAM_P13_GL_SHIM_ROOT"])
+expected = {
+    "libEGL.so.1": Path(os.environ["FASTWAM_P13_EGL_FRONTEND"]),
+    "libGL.so.1": Path(os.environ["FASTWAM_P13_GL_FRONTEND"]),
+    "libGLESv1_CM.so.1": Path(os.environ["FASTWAM_P13_GLES1_FRONTEND"]),
+    "libGLESv2.so.2": Path(os.environ["FASTWAM_P13_GLES2_FRONTEND"]),
+    "libOpenGL.so.0": Path(os.environ["FASTWAM_P13_OPENGL_FRONTEND"]),
+    "libGLX.so.0": Path(os.environ["FASTWAM_P13_GLX_FRONTEND"]),
+    "libGLdispatch.so.0": Path(os.environ["FASTWAM_P13_EGL_DISPATCH"]),
+    "libvulkan.so.1": Path(os.environ["FASTWAM_P13_VULKAN_LOADER"]),
+}
+for name, target in expected.items():
+    if (shim / name).resolve(strict=True) != target.resolve(strict=True):
+        raise SystemExit(f"graphics shim target mismatch: {name}")
+
+ctypes.CDLL(str(shim / "libGLdispatch.so.0"), mode=ctypes.RTLD_GLOBAL)
+egl = ctypes.CDLL(str(shim / "libEGL.so.1"), mode=ctypes.RTLD_GLOBAL)
+if not hasattr(egl, "eglQueryString"):
+    raise SystemExit("complete EGL frontend lacks eglQueryString")
+vendor = ctypes.CDLL(os.environ["FASTWAM_P13_EGL_VENDOR"], mode=ctypes.RTLD_GLOBAL)
+if not hasattr(vendor, "__egl_Main"):
+    raise SystemExit("NVIDIA EGL vendor lacks __egl_Main")
+vulkan = ctypes.CDLL(str(shim / "libvulkan.so.1"), mode=ctypes.RTLD_GLOBAL)
+enumerate_version = vulkan.vkEnumerateInstanceVersion
+enumerate_version.argtypes = [ctypes.POINTER(ctypes.c_uint32)]
+enumerate_version.restype = ctypes.c_int32
+version = ctypes.c_uint32()
+if enumerate_version(ctypes.byref(version)) != 0:
+    raise SystemExit("vkEnumerateInstanceVersion failed")
+print("P13_METRIC_CACHE_COMPLETE_GLVND_VULKAN_ABI_PASS")
+PY
+}
+
 nvidia-smi -L
 "${PYTHON_BIN}" - <<'PY'
 import importlib
@@ -255,6 +375,9 @@ for profile in "${profiles[@]}"; do
     continue
   fi
   ensure_sapien_egl_contract
+  if [[ "${profile}" == cpfs_manifest_headless ]]; then
+    validate_complete_cpfs_graphics_contract
+  fi
   set +e
   timeout --signal=TERM --kill-after=30s 180s env CUDA_VISIBLE_DEVICES=0 \
     "${PYTHON_BIN}" -B -c "${probe_program}" >"${probe_log}" 2>&1
