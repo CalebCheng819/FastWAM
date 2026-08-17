@@ -520,18 +520,70 @@ def validate_provider_job(
 ) -> list[str]:
     """Validate GetJob against the request plus controlled provider normalizations."""
     validate_request_map(expected, run_mode)
+    normalizations: list[str] = []
     expected_projection = {
         key: value
         for key, value in expected.items()
-        if key not in {"CustomEnvs", "Settings"}
+        if key
+        not in {
+            "CustomEnvs",
+            "DataSources",
+            "JobMaxRunningTimeMinutes",
+            "Settings",
+            "SuccessPolicy",
+        }
     }
     _validate_expected_projection(observed, expected_projection, "job")
+
+    expected_data_sources = expected.get("DataSources")
+    observed_data_sources = observed.get("DataSources")
+    if not isinstance(expected_data_sources, list) or not isinstance(
+        observed_data_sources, list
+    ):
+        raise RuntimeError("provider job data sources changed type")
+    if len(observed_data_sources) != len(expected_data_sources):
+        raise RuntimeError("provider job data sources changed length")
+    for index, (actual, wanted) in enumerate(
+        zip(observed_data_sources, expected_data_sources, strict=True)
+    ):
+        if not isinstance(actual, dict) or not isinstance(wanted, dict):
+            raise RuntimeError(
+                f"provider job DataSources[{index}] changed type"
+            )
+        wanted_projection = {
+            key: value for key, value in wanted.items() if key != "MountAccess"
+        }
+        _validate_expected_projection(
+            actual, wanted_projection, f"job.DataSources[{index}]"
+        )
+        wanted_access = wanted.get("MountAccess")
+        if wanted_access not in {"RO", "RW"}:
+            raise RuntimeError(
+                f"frozen request DataSources[{index}] has invalid MountAccess"
+            )
+        if "MountAccess" not in actual:
+            normalizations.append(
+                f"DataSources[{index}].MountAccess:omitted"
+            )
+        elif actual["MountAccess"] != wanted_access:
+            raise RuntimeError(
+                f"provider job changed frozen field: "
+                f"job.DataSources[{index}].MountAccess"
+            )
+
+    for key in ("JobMaxRunningTimeMinutes", "SuccessPolicy"):
+        wanted = expected.get(key)
+        if wanted is None:
+            raise RuntimeError(f"frozen request omitted required field: {key}")
+        if key not in observed:
+            normalizations.append(f"{key}:omitted")
+        else:
+            _validate_expected_projection(observed[key], wanted, f"job.{key}")
 
     expected_custom_envs = expected.get("CustomEnvs")
     if expected_custom_envs != []:
         raise RuntimeError("frozen request CustomEnvs must be empty")
     observed_custom_envs = observed.get("CustomEnvs")
-    normalizations: list[str] = []
     if observed_custom_envs not in (None, []):
         if not isinstance(observed_custom_envs, list):
             raise RuntimeError("provider job CustomEnvs changed type")

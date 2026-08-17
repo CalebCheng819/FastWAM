@@ -32,9 +32,13 @@ and `EnableRDMA=false`. Post-submit `GetJob` accepts only the controlled provide
 normalizations observed in the failed R7 and first R8 readbacks:
 `OversoldType` absent to an empty string, `EnableRDMA` false to true, and an
 empty requested `CustomEnvs` projected to a public one-to-one list of the exact
-requested `Envs`. Duplicate, private, missing, extra, or changed environment
-entries still fail closed. Every other frozen request field must remain equal,
-and the accepted normalizations are persisted in the receipt.
+requested `Envs`. The detailed response may also omit `MountAccess` from each
+otherwise exact, ordered data-source entry and omit the top-level
+`JobMaxRunningTimeMinutes` and `SuccessPolicy`. A returned access mode, duration,
+or success policy must remain exact. Reordered, missing, extra, or changed data
+sources and duplicate, private, missing, extra, or changed environment entries
+still fail closed. Every other frozen request field must remain equal, and the
+accepted normalizations are persisted in the receipt.
 
 If the sole `CreateJob` succeeds but strict post-create readback stops before a
 receipt is written, `--reconcile` validates the permanent latch, recorded Job
