@@ -1,0 +1,73 @@
+{
+  "Accessibility": "PRIVATE",
+  "CustomEnvs": [],
+  "DataSources": [
+    {
+      "DataSourceId": "d-a5mu77ymwjio71dkmw",
+      "MountAccess": "RO",
+      "MountPath": "/cpfs/user/chengjuntao"
+    },
+    {
+      "DataSourceId": "d-n7rly4fll0q2z6v91h",
+      "MountAccess": "RW",
+      "MountPath": "/oss-chengjuntao"
+    }
+  ],
+  "Description": "P13 PlaceFood observation-only metric geometry cache; real SAPIEN environment graphics preflight, node-local render, COMPLETE-last OSS publish, dedicated-quota R6",
+  "DisplayName": "fastwam-p13-metric-cache-s42-8g-r6-graphics-probed-dedicated-20260817",
+  "Envs": {
+    "FASTWAM_P13_CACHE_OUTPUT_ROOT": "/oss-chengjuntao/artifacts/fastwam-placefood-metric-geometry-60x80-s42-v1-r6-graphics-probed-dedicated-20260817",
+    "FASTWAM_P13_CODE_REVISION": "60de16ef0628d70f58c3349a182c2fe8be3ade2c",
+    "FASTWAM_P13_DATASET_ROOT": "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot",
+    "FASTWAM_P13_DRIVER_ROOT": "/cpfs/user/chengjuntao/fastwam-deploy/nvidia-graphics-570.153.02",
+    "FASTWAM_P13_PYTHON": "/cpfs/user/chengjuntao/venvs/fastwam-gaudp-py310-20260802/bin/python",
+    "FASTWAM_P13_ROBOFACTORY_ROOT": "/cpfs/user/chengjuntao/gaudp_eval/RoboFactory/robofactory",
+    "FASTWAM_P13_RUNTIME_ARCHIVE": "/oss-chengjuntao/artifacts/fastwam-p13-runtime-20260815/site-packages.tar.gz",
+    "FASTWAM_P13_SOURCE_BUNDLE": "/oss-chengjuntao/artifacts/fastwam-p13-runtime-20260817-r6/FastWAM-p13-r6-source-60de16e.bundle",
+    "FASTWAM_P13_VULKAN_LOADER": "/cpfs/user/chengjuntao/fastwam-deploy/vulkan-loader-1.3.204/libvulkan.so.1.3.204",
+    "PYTHONNOUSERSITE": "1",
+    "RUN_ID": "fastwam-p13-metric-cache-s42-8g-r6-graphics-probed-dedicated-20260817"
+  },
+  "JobMaxRunningTimeMinutes": 180,
+  "JobSpecs": [
+    {
+      "ElasticSpotSpecs": [],
+      "Image": "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887",
+      "LocalMountSpecs": [],
+      "PodCount": 1,
+      "ResourceConfig": {
+        "CPU": "126",
+        "GPU": "8",
+        "Memory": "960Gi",
+        "SharedMemory": "960Gi"
+      },
+      "RestartPolicy": "Never",
+      "StartupDependencies": [],
+      "Type": "Worker"
+    }
+  ],
+  "JobType": "PyTorchJob",
+  "Priority": 7,
+  "ResourceId": "quotaksvqq2oh2pg",
+  "Settings": {
+    "AllocateAllRDMADevices": false,
+    "EnableCPUAffinity": false,
+    "EnableErrorMonitoringInAIMaster": false,
+    "EnableOssAppend": false,
+    "EnableRDMA": false,
+    "EnableSanityCheck": false,
+    "Tags": {
+      "experiment": "P13_METRIC_CACHE",
+      "graphics_gate": "real-environment-multi-profile",
+      "objective": "placefood-observation-only-metric-geometry",
+      "provenance": "git-stat-no-new-hash",
+      "publisher": "node-local-complete-last",
+      "scheduler": "dedicated-quota",
+      "task": "PlaceFood-rf",
+      "topology": "1x8-bind-gpu0"
+    }
+  },
+  "SuccessPolicy": "AllWorkers",
+  "UserCommand": "exec /bin/bash /oss-chengjuntao/artifacts/fastwam-p13-runtime-20260817-r6/cache-worker-r6-graphics-probed-dedicated.sh",
+  "WorkspaceId": "270969"
+}
