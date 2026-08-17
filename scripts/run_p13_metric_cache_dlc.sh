@@ -226,7 +226,10 @@ import json
 
 import torch
 
-modules = ["gymnasium", "h5py", "mani_skill", "robofactory", "sapien"]
+# Graphics-sensitive imports are exercised only after a candidate EGL/Vulkan
+# profile is installed below.  Importing SAPIEN (directly or transitively via
+# ManiSkill/RoboFactory) here would fail before the profile probe can run.
+modules = ["gymnasium", "h5py"]
 for name in modules:
     importlib.import_module(name)
 if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
@@ -251,6 +254,7 @@ for profile in "${profiles[@]}"; do
     printf 'P13_METRIC_CACHE_GRAPHICS_PROFILE_SKIPPED profile=%s reason=unavailable\n' "${profile}"
     continue
   fi
+  ensure_sapien_egl_contract
   set +e
   timeout --signal=TERM --kill-after=30s 180s env CUDA_VISIBLE_DEVICES=0 \
     "${PYTHON_BIN}" -B -c "${probe_program}" >"${probe_log}" 2>&1

@@ -36,6 +36,22 @@ class P13CacheR6GraphicsTest(unittest.TestCase):
         self.assertIn("timeout --signal=TERM --kill-after=30s 180s", self.source)
         self.assertIn("env CUDA_VISIBLE_DEVICES=0", self.source)
 
+    def test_graphics_sensitive_imports_wait_for_profile_contract(self):
+        preflight_start = self.source.index('"${PYTHON_BIN}" - <<\'PY\'')
+        preflight_end = self.source.index("\nPY\n", preflight_start)
+        preflight = self.source[preflight_start:preflight_end]
+        for module in ("mani_skill", "robofactory", "sapien"):
+            self.assertNotIn(f'"{module}"', preflight)
+
+        loop = self.source.index('for profile in "${profiles[@]}"; do')
+        applied = self.source.index('apply_graphics_profile "${profile}"', loop)
+        egl_gate = self.source.index("ensure_sapien_egl_contract", applied)
+        probe = self.source.index(
+            "timeout --signal=TERM --kill-after=30s 180s", egl_gate
+        )
+        self.assertLess(applied, egl_gate)
+        self.assertLess(egl_gate, probe)
+
     def test_selected_profile_and_egl_gate_precede_builder(self):
         selected = self.source.index('[[ -n "${selected_profile}" ]]')
         reapplied = self.source.index('apply_graphics_profile "${selected_profile}"')
