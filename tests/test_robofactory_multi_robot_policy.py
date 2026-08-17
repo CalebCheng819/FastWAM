@@ -12,6 +12,8 @@ from experiments.robofactory.fastwam_multi_robot_policy import (
     DEFAULT_INSTRUCTIONS,
     DEFAULT_PROMPT,
     NOPOSPLAT_CHECKPOINT_SHA256,
+    LEGACY_FULL_DATASET,
+    TRAIN_SPLIT,
     NormalizationStats,
     camera_rgb_uint8,
     canonicalize_root_pose,
@@ -25,6 +27,30 @@ from experiments.robofactory.fastwam_multi_robot_policy import (
     sha256_file,
     teacher_image_pairs,
 )
+
+
+def _legacy_stats_payload() -> dict:
+    return {
+        "source_root": "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot",
+        "files": 24,
+        "trajectories": 1587,
+        "cardinality": {
+            "agent_counts": [2, 3, 4],
+            "trajectories_by_agent_count": {"2": 562, "3": 802, "4": 223},
+        },
+        "action": {
+            "count": 2572601,
+            "dim": 8,
+            "mean": [0.0] * 8,
+            "std": [1.0] * 8,
+        },
+        "state": {
+            "count": 2577023,
+            "dim": 18,
+            "mean": [0.0] * 18,
+            "std": [1.0] * 18,
+        },
+    }
 
 
 def _stats() -> NormalizationStats:
@@ -186,12 +212,75 @@ def test_stats_loader_supports_no_hash_metadata_binding(tmp_path: Path):
     assert stats.path == path.resolve()
     assert stats.sha256 is None
     assert stats.size_bytes == size_bytes
+    assert stats.provenance_mode == TRAIN_SPLIT
     with pytest.raises(ValueError, match="size mismatch"):
         load_normalization_stats(
             path,
             expected_sha256=None,
             expected_size_bytes=size_bytes + 1,
             integrity_mode="metadata_no_hash",
+        )
+
+
+def test_stats_loader_accepts_exact_legacy_full_dataset_contract(tmp_path: Path):
+    path = tmp_path / "legacy-stats.json"
+    path.write_text(json.dumps(_legacy_stats_payload()), encoding="utf-8")
+
+    stats = load_normalization_stats(
+        path,
+        expected_sha256=None,
+        expected_size_bytes=path.stat().st_size,
+        integrity_mode="metadata_no_hash",
+        provenance_mode=LEGACY_FULL_DATASET,
+    )
+
+    assert stats.provenance_mode == LEGACY_FULL_DATASET
+    assert stats.action_mean.shape == (8,)
+    assert stats.state_mean.shape == (18,)
+
+
+def test_stats_provenance_modes_fail_closed_on_cross_use_and_population_drift(
+    tmp_path: Path,
+):
+    legacy = tmp_path / "legacy-stats.json"
+    legacy.write_text(json.dumps(_legacy_stats_payload()), encoding="utf-8")
+    with pytest.raises(ValueError, match="lack normalization_fit"):
+        load_normalization_stats(
+            legacy,
+            expected_sha256=None,
+            expected_size_bytes=legacy.stat().st_size,
+            integrity_mode="metadata_no_hash",
+            provenance_mode=TRAIN_SPLIT,
+        )
+
+    train_payload = _legacy_stats_payload()
+    train_payload["normalization_fit"] = {
+        "split": "train",
+        "split_seed": 42,
+        "val_set_proportion": 0.1,
+    }
+    train = tmp_path / "train-stats.json"
+    train.write_text(json.dumps(train_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="must not declare normalization_fit"):
+        load_normalization_stats(
+            train,
+            expected_sha256=None,
+            expected_size_bytes=train.stat().st_size,
+            integrity_mode="metadata_no_hash",
+            provenance_mode=LEGACY_FULL_DATASET,
+        )
+
+    drifted_payload = _legacy_stats_payload()
+    drifted_payload["action"]["count"] -= 1
+    drifted = tmp_path / "drifted-stats.json"
+    drifted.write_text(json.dumps(drifted_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="action population mismatch"):
+        load_normalization_stats(
+            drifted,
+            expected_sha256=None,
+            expected_size_bytes=drifted.stat().st_size,
+            integrity_mode="metadata_no_hash",
+            provenance_mode=LEGACY_FULL_DATASET,
         )
 
 

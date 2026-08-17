@@ -289,6 +289,7 @@ run_arm() {
   local arm="$1"
   local stats="$2"
   local stats_size="$3"
+  local stats_provenance_mode="$4"
   local arm_root="${scratch_root}/${arm}"
   local shard start end shard_name shard_runtime
 
@@ -314,7 +315,8 @@ run_arm() {
         --episode-start "${start}" \
         --output-dir "${arm_root}/${shard_name}" \
         --stats "${stats}" \
-        --stats-size-bytes "${stats_size}"
+        --stats-size-bytes "${stats_size}" \
+        --stats-provenance-mode "${stats_provenance_mode}"
     ) >"${arm_root}/${shard_name}.log" 2>&1; then
       printf '===== %s %s =====\n' "${arm}" "${shard_name}" >&2
       tail -n 120 -- "${arm_root}/${shard_name}.log" >&2 || true
@@ -324,8 +326,8 @@ run_arm() {
   done
 }
 
-run_arm gau1_stats "${FASTWAM_GAU1_STATS}" "${FASTWAM_GAU1_STATS_SIZE_BYTES}"
-run_arm gau0_native_stats "${FASTWAM_GAU0_NATIVE_STATS}" "${FASTWAM_GAU0_NATIVE_STATS_SIZE_BYTES}"
+run_arm gau1_stats "${FASTWAM_GAU1_STATS}" "${FASTWAM_GAU1_STATS_SIZE_BYTES}" train_split
+run_arm gau0_native_stats "${FASTWAM_GAU0_NATIVE_STATS}" "${FASTWAM_GAU0_NATIVE_STATS_SIZE_BYTES}" legacy_full_dataset
 
 platform_job_id="$("${FASTWAM_PYTHON}" -B "${controller}" job-id)"
 "${FASTWAM_PYTHON}" -B "${aggregator}" \

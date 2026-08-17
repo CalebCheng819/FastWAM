@@ -25,6 +25,7 @@ try:
     from .fastwam_multi_robot_policy import (
         FastWAMMultiRobotPolicy,
         NOPOSPLAT_CHECKPOINT_SHA256,
+        NORMALIZATION_STATS_PROVENANCE_MODES,
         POLICY_LIGHTNING_COMMIT,
         TRAINING_STATS_SHA256,
         require_file_sha256,
@@ -35,6 +36,7 @@ except ImportError:
     from fastwam_multi_robot_policy import (  # type: ignore[no-redef]
         FastWAMMultiRobotPolicy,
         NOPOSPLAT_CHECKPOINT_SHA256,
+        NORMALIZATION_STATS_PROVENANCE_MODES,
         POLICY_LIGHTNING_COMMIT,
         TRAINING_STATS_SHA256,
         require_file_sha256,
@@ -592,6 +594,11 @@ def main() -> None:
     parser.add_argument("--stats", type=Path)
     parser.add_argument("--stats-sha256", default=TRAINING_STATS_SHA256)
     parser.add_argument("--stats-size-bytes", type=int)
+    parser.add_argument(
+        "--stats-provenance-mode",
+        choices=NORMALIZATION_STATS_PROVENANCE_MODES,
+        default="train_split",
+    )
     parser.add_argument("--context-cache-dir", type=Path)
     parser.add_argument("--context-size-bytes", type=int)
     parser.add_argument("--model-cache-root", type=Path)
@@ -663,6 +670,7 @@ def main() -> None:
                 args.stats_sha256 if args.integrity_mode == "sha256" else None
             ),
             stats_size_bytes=args.stats_size_bytes,
+            stats_provenance_mode=args.stats_provenance_mode,
             context_cache_dir=args.context_cache_dir,
             context_size_bytes=args.context_size_bytes,
             task_name=args.task,

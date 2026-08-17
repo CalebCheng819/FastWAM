@@ -39,6 +39,21 @@ import torch
 import torchvision.transforms.functional as transforms_F
 from omegaconf import OmegaConf
 
+try:
+    from .normalization_stats_contract import (
+        LEGACY_FULL_DATASET,
+        NORMALIZATION_STATS_PROVENANCE_MODES,
+        TRAIN_SPLIT,
+        validate_normalization_stats_provenance,
+    )
+except ImportError:
+    from normalization_stats_contract import (  # type: ignore[no-redef]
+        LEGACY_FULL_DATASET,
+        NORMALIZATION_STATS_PROVENANCE_MODES,
+        TRAIN_SPLIT,
+        validate_normalization_stats_provenance,
+    )
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TRAINING_CODE_COMMIT = "00c0887118e647acf2ec7047dffa26a4231adc9e"
 TRAINING_STATS_SHA256 = (
@@ -99,6 +114,7 @@ class NormalizationStats:
     path: Path | None = None
     sha256: str | None = None
     size_bytes: int | None = None
+    provenance_mode: str = TRAIN_SPLIT
 
 
 @dataclass(frozen=True)
@@ -330,6 +346,7 @@ def load_normalization_stats(
     expected_sha256: str | None = TRAINING_STATS_SHA256,
     expected_size_bytes: int | None = None,
     integrity_mode: str = "sha256",
+    provenance_mode: str = TRAIN_SPLIT,
 ) -> NormalizationStats:
     mode = _validate_integrity_mode(integrity_mode)
     if mode == "metadata_no_hash":
@@ -355,28 +372,9 @@ def load_normalization_stats(
     payload = json.loads(resolved.read_text(encoding="utf-8"))
     if not isinstance(payload, Mapping):
         raise TypeError(f"Normalization stats must be a JSON object: {resolved}")
-    fit = payload.get("normalization_fit")
-    if not isinstance(fit, Mapping):
-        raise ValueError(
-            f"Normalization stats lack normalization_fit provenance: {resolved}"
-        )
-    expected_fit = {
-        "split": "train",
-        "split_seed": 42,
-        "val_set_proportion": 0.1,
-    }
-    for key, expected in expected_fit.items():
-        if fit.get(key) != expected:
-            raise ValueError(
-                f"Normalization stats {key} mismatch: expected={expected!r} got={fit.get(key)!r}"
-            )
-    cardinality = payload.get("cardinality")
-    if not isinstance(cardinality, Mapping) or sorted(
-        cardinality.get("agent_counts", [])
-    ) != [2, 3, 4]:
-        raise ValueError(
-            "Normalization stats must cover the exact trained cardinalities [2, 3, 4]"
-        )
+    normalized_provenance_mode = validate_normalization_stats_provenance(
+        payload, provenance_mode
+    )
 
     tensors: dict[str, torch.Tensor] = {}
     for kind, dimension in (("action", _ACTION_DIMENSION), ("state", _STATE_DIMENSION)):
@@ -399,6 +397,7 @@ def load_normalization_stats(
         path=resolved,
         sha256=actual_sha256,
         size_bytes=actual_size_bytes,
+        provenance_mode=normalized_provenance_mode,
     )
 
 
@@ -689,6 +688,7 @@ class FastWAMMultiRobotPolicy:
         integrity_mode: str = "sha256",
         checkpoint_size_bytes: int | None = None,
         stats_size_bytes: int | None = None,
+        stats_provenance_mode: str = TRAIN_SPLIT,
         context_size_bytes: int | None = None,
         gaussian_conditioning: bool = True,
         training_source_commit: str | None = None,
@@ -731,6 +731,7 @@ class FastWAMMultiRobotPolicy:
             expected_sha256=expected_stats_sha256,
             expected_size_bytes=stats_size_bytes,
             integrity_mode=self.integrity_mode,
+            provenance_mode=stats_provenance_mode,
         )
         self.text_context = load_text_context(
             context_cache_dir,
@@ -938,6 +939,7 @@ class FastWAMMultiRobotPolicy:
             "normalization_path": str(self.stats.path),
             "normalization_sha256": self.stats.sha256,
             "normalization_size_bytes": self.stats.size_bytes,
+            "normalization_provenance_mode": self.stats.provenance_mode,
             "context_path": str(self.text_context.path),
             "context_sha256": self.text_context.sha256,
             "context_size_bytes": self.text_context.size_bytes,
@@ -971,6 +973,9 @@ __all__ = [
     "TRAINING_CODE_COMMIT",
     "TRAINING_CONTEXT_SHA256_BY_TASK",
     "TRAINING_STATS_SHA256",
+    "TRAIN_SPLIT",
+    "LEGACY_FULL_DATASET",
+    "NORMALIZATION_STATS_PROVENANCE_MODES",
     "canonical_task_name",
     "canonicalize_root_pose",
     "camera_rgb_uint8",
@@ -979,6 +984,7 @@ __all__ = [
     "encode_compact_agent_gaussian",
     "extract_agent_state_and_geometry",
     "load_normalization_stats",
+    "validate_normalization_stats_provenance",
     "load_text_context",
     "model_input_image",
     "ordered_agent_names",

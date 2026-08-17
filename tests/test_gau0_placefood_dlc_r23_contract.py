@@ -73,7 +73,7 @@ def test_worker_environment_accepts_private_runtime_and_rejects_request_leaks(mo
 
 def test_r23_complete_provider_native_graphics_contract():
     runtime = (R23 / "runtime.sh").read_text(encoding="utf-8")
-    assert "FASTWAM_RUNTIME_GENERATION='R23'" in runtime
+    assert "FASTWAM_RUNTIME_GENERATION:-R23" in runtime
     for soname in (
         "libEGL.so.1", "libGL.so.1", "libGLESv1_CM.so.1", "libGLESv2.so.2",
         "libOpenGL.so.0", "libGLX.so.0", "libGLdispatch.so.0", "libvulkan.so.1",
