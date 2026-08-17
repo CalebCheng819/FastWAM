@@ -37,6 +37,7 @@ WORKER_COMMAND = (
     "exec /bin/bash /oss-chengjuntao/artifacts/fastwam-p13-runtime-20260817-r6/"
     "cache-worker-r6-graphics-probed-dedicated.sh"
 )
+GRAPHICS_GATE_TAG = "real-environment-multi-profile"
 
 
 def utc_now() -> str:
@@ -153,7 +154,7 @@ def validate_request_map(body: dict[str, Any]) -> None:
     tags = settings.get("Tags") or {}
     if tags.get("scheduler") != "dedicated-quota":
         raise RuntimeError("dedicated scheduler tag missing")
-    if tags.get("graphics_gate") != "real-environment-multi-profile":
+    if tags.get("graphics_gate") != GRAPHICS_GATE_TAG:
         raise RuntimeError("R6 graphics gate tag missing")
     envs = body.get("Envs") or {}
     expected_envs = {
@@ -234,7 +235,7 @@ def main() -> None:
         "source_revision": SOURCE_REVISION,
         "priority": 7,
         "scheduler": "dedicated-quota",
-        "graphics_gate": "real-environment-multi-profile",
+        "graphics_gate": GRAPHICS_GATE_TAG,
         "listed_jobs": listed_jobs,
         "duplicate_count": 0,
     }
