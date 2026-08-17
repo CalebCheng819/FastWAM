@@ -64,7 +64,14 @@ class P13CacheGraphicsTest(unittest.TestCase):
         self.assertIn("vkEnumerateInstanceVersion", self.source)
         self.assertIn("from OpenGL import EGL", self.source)
         self.assertIn('getattr(EGL, "eglQueryString", None)', self.source)
-        for module in ("cv2", "mani_skill", "sapien", "tasks.place_food", "utils.scenes"):
+        for module in (
+            "cv2",
+            "mani_skill",
+            "sapien",
+            "robofactory",
+            "tasks.place_food",
+            "robofactory.utils.scenes",
+        ):
             self.assertIn(f"import {module}", self.source)
 
     def test_complete_shim_precedes_driver_paths(self):
@@ -79,8 +86,13 @@ class P13CacheGraphicsTest(unittest.TestCase):
 
     def test_r25_python_extra_precedes_local_runtime_site_packages(self):
         self.assertIn(
-            'export PYTHONPATH="${ROBOFACTORY_ROOT}:${LOCAL_REPO}/src:'
+            'export PYTHONPATH="${ROBOFACTORY_PACKAGE_PARENT}:${ROBOFACTORY_ROOT}:'
+            '${LOCAL_REPO}/src:'
             '${PYTHON_EXTRA_ROOT}:${LOCAL_REPO}/scripts:${RUNTIME_ROOT}/site-packages"',
+            self.source,
+        )
+        self.assertIn(
+            'ROBOFACTORY_PACKAGE_PARENT="$(dirname -- "${ROBOFACTORY_ROOT}")"',
             self.source,
         )
         self.assertIn("FASTWAM_P13_PYTHON_EXTRA_ROOT", self.source)
