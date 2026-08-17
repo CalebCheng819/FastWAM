@@ -15,6 +15,7 @@ OUTPUT_ROOT="${FASTWAM_P13_CACHE_OUTPUT_ROOT:?FASTWAM_P13_CACHE_OUTPUT_ROOT is r
 DATASET_ROOT="${FASTWAM_P13_DATASET_ROOT:?FASTWAM_P13_DATASET_ROOT is required}"
 ROBOFACTORY_ROOT="${FASTWAM_P13_ROBOFACTORY_ROOT:?FASTWAM_P13_ROBOFACTORY_ROOT is required}"
 PYTHON_BIN="${FASTWAM_P13_PYTHON:?FASTWAM_P13_PYTHON is required}"
+PYTHON_EXTRA_ROOT="${FASTWAM_P13_PYTHON_EXTRA_ROOT:?FASTWAM_P13_PYTHON_EXTRA_ROOT is required}"
 DRIVER_ROOT="${FASTWAM_P13_DRIVER_ROOT:?FASTWAM_P13_DRIVER_ROOT is required}"
 VULKAN_LOADER="${FASTWAM_P13_VULKAN_LOADER:?FASTWAM_P13_VULKAN_LOADER is required}"
 EGL_FRONTEND="${DRIVER_ROOT}/lib/libEGL.so.1.1.0"
@@ -31,7 +32,6 @@ PARTIAL_REPO="${LOCAL_REPO}.partial.${BASHPID}"
 RUNTIME_ROOT="${LOCAL_ROOT}/runtime"
 LOCAL_CACHE="${LOCAL_ROOT}/cache-output"
 SCRATCH_ROOT="${LOCAL_ROOT}/scratch"
-selected_profile=''
 
 [[ "${RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || die "unsafe RUN_ID=${RUN_ID}"
 [[ "${CODE_REVISION}" =~ ^[0-9a-f]{40}$ ]] || die "invalid Git revision"
@@ -40,6 +40,7 @@ selected_profile=''
 [[ -f "${RUNTIME_ARCHIVE}" && ! -L "${RUNTIME_ARCHIVE}" ]] || die "runtime archive is missing"
 [[ -d "${DATASET_ROOT}" && ! -L "${DATASET_ROOT}" ]] || die "dataset root is missing"
 [[ -d "${ROBOFACTORY_ROOT}" && ! -L "${ROBOFACTORY_ROOT}" ]] || die "RoboFactory root is missing"
+[[ -d "${PYTHON_EXTRA_ROOT}" && ! -L "${PYTHON_EXTRA_ROOT}" ]] || die "Python extra root is missing"
 [[ -f "${DRIVER_ROOT}/nvidia_icd.json" ]] || die "Vulkan ICD is missing"
 [[ -f "${DRIVER_ROOT}/10_nvidia.json" ]] || die "EGL vendor file is missing"
 [[ -f "${VULKAN_LOADER}" && ! -L "${VULKAN_LOADER}" ]] || die "Vulkan loader is missing"
@@ -125,7 +126,7 @@ mv -T -- "${PARTIAL_REPO}" "${LOCAL_REPO}"
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONFAULTHANDLER=1
-export PYTHONPATH="${RUNTIME_ROOT}/site-packages:${LOCAL_REPO}/src:${LOCAL_REPO}/scripts:${ROBOFACTORY_ROOT%/robofactory}:${ROBOFACTORY_ROOT}"
+export PYTHONPATH="${ROBOFACTORY_ROOT}:${LOCAL_REPO}/src:${PYTHON_EXTRA_ROOT}:${LOCAL_REPO}/scripts:${RUNTIME_ROOT}/site-packages"
 export XDG_CACHE_HOME="${SCRATCH_ROOT}/xdg-cache"
 export XDG_RUNTIME_DIR="${SCRATCH_ROOT}/xdg-runtime"
 export TORCH_HOME="${SCRATCH_ROOT}/torch"
@@ -141,7 +142,7 @@ graphics_keys=(
   __EGL_VENDOR_LIBRARY_FILENAMES __EGL_VENDOR_LIBRARY_DIRS
   __GLX_VENDOR_LIBRARY_NAME SAPIEN_VULKAN_LIBRARY_PATH FASTWAM_GL_SHIM_ROOT
   LIBGL_DRIVERS_PATH GBM_BACKEND MUJOCO_GL EGL_PLATFORM PYOPENGL_PLATFORM
-  NVIDIA_DRIVER_CAPABILITIES
+  NVIDIA_DRIVER_CAPABILITIES FASTWAM_REQUIRE_PROVIDER_NATIVE_GRAPHICS
 )
 declare -A provider_graphics_present=()
 declare -A provider_graphics_value=()
@@ -166,132 +167,25 @@ restore_provider_graphics() {
   done
 }
 
-clear_explicit_graphics_selection() {
-  unset VK_ICD_FILENAMES VK_DRIVER_FILES
-  unset __EGL_VENDOR_LIBRARY_FILENAMES __EGL_VENDOR_LIBRARY_DIRS
-  unset __GLX_VENDOR_LIBRARY_NAME SAPIEN_VULKAN_LIBRARY_PATH
-  unset FASTWAM_GL_SHIM_ROOT LIBGL_DRIVERS_PATH GBM_BACKEND
-}
-
-apply_headless_contract() {
+apply_r25_graphics_contract() {
+  restore_provider_graphics
+  export LD_LIBRARY_PATH="${SCRATCH_ROOT}/graphics-lib:${DRIVER_ROOT}/lib:${DRIVER_ROOT}/driver-lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  export VK_ICD_FILENAMES="${DRIVER_ROOT}/nvidia_icd.json"
+  export VK_DRIVER_FILES="${VK_ICD_FILENAMES}"
+  export __EGL_VENDOR_LIBRARY_FILENAMES="${DRIVER_ROOT}/10_nvidia.json"
+  unset __EGL_VENDOR_LIBRARY_DIRS
+  export __GLX_VENDOR_LIBRARY_NAME=nvidia
+  export SAPIEN_VULKAN_LIBRARY_PATH="${SCRATCH_ROOT}/graphics-lib/libvulkan.so.1"
+  export FASTWAM_GL_SHIM_ROOT="${SCRATCH_ROOT}/graphics-lib"
+  unset LIBGL_DRIVERS_PATH GBM_BACKEND
   export MUJOCO_GL=egl
   export EGL_PLATFORM=surfaceless
   export PYOPENGL_PLATFORM=egl
   export NVIDIA_DRIVER_CAPABILITIES=all
+  export FASTWAM_REQUIRE_PROVIDER_NATIVE_GRAPHICS=1
 }
 
-build_discovered_loader() {
-  local candidate resolved entry
-  local -a loader=()
-  declare -A seen=()
-  for candidate in \
-    /usr/local/nvidia/lib64 /usr/local/nvidia/lib /usr/local/cuda/compat \
-    /usr/local/cuda/lib64 /usr/local/cuda-12.8/lib64 \
-    /usr/lib/x86_64-linux-gnu /usr/lib64 /lib/x86_64-linux-gnu; do
-    [[ -d "${candidate}" && ! -L "${candidate}" ]] || continue
-    resolved=$(readlink -f -- "${candidate}")
-    if [[ -z "${seen[$resolved]:-}" ]]; then
-      loader+=("${resolved}")
-      seen["${resolved}"]=1
-    fi
-  done
-  IFS=:
-  entry="${loader[*]}"
-  unset IFS
-  [[ -n "${entry}" ]] || return 1
-  export LD_LIBRARY_PATH="${entry}"
-}
-
-prepend_library_paths() {
-  local path current
-  current="${LD_LIBRARY_PATH:-}"
-  for path in "$@"; do
-    [[ -d "${path}" ]] || continue
-    if [[ -z "${current}" ]]; then
-      current="${path}"
-    else
-      current="${path}:${current}"
-    fi
-  done
-  export LD_LIBRARY_PATH="${current}"
-}
-
-apply_cpfs_loader() {
-  build_discovered_loader
-  local cpfs_library_path="${SCRATCH_ROOT}/graphics-lib:${DRIVER_ROOT}/lib:${DRIVER_ROOT}/driver-lib"
-  if [[ -d "${DRIVER_ROOT}/lib64" ]]; then
-    cpfs_library_path="${cpfs_library_path}:${DRIVER_ROOT}/lib64"
-  fi
-  export LD_LIBRARY_PATH="${cpfs_library_path}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-}
-
-first_regular_file() {
-  local candidate
-  for candidate in "$@"; do
-    if [[ -f "${candidate}" && ! -L "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-apply_graphics_profile() {
-  local profile=$1
-  local vk_manifest egl_manifest
-  restore_provider_graphics
-  case "${profile}" in
-    cpfs_manifest_headless)
-      clear_explicit_graphics_selection
-      apply_cpfs_loader
-      export VK_ICD_FILENAMES="${DRIVER_ROOT}/nvidia_icd.json"
-      export VK_DRIVER_FILES="${DRIVER_ROOT}/nvidia_icd.json"
-      export __EGL_VENDOR_LIBRARY_FILENAMES="${DRIVER_ROOT}/10_nvidia.json"
-      export __GLX_VENDOR_LIBRARY_NAME=nvidia
-      export SAPIEN_VULKAN_LIBRARY_PATH="${SCRATCH_ROOT}/graphics-lib/libvulkan.so.1"
-      ;;
-    provider_native_headless)
-      ;;
-    provider_clean_headless)
-      clear_explicit_graphics_selection
-      ;;
-    system_default_headless)
-      clear_explicit_graphics_selection
-      unset LD_LIBRARY_PATH
-      ;;
-    system_discovered_headless)
-      clear_explicit_graphics_selection
-      build_discovered_loader
-      ;;
-    system_manifest_headless)
-      clear_explicit_graphics_selection
-      build_discovered_loader
-      vk_manifest=$(first_regular_file /etc/vulkan/icd.d/nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json) || return 2
-      egl_manifest=$(first_regular_file /usr/share/glvnd/egl_vendor.d/10_nvidia.json /etc/glvnd/egl_vendor.d/10_nvidia.json) || return 2
-      export VK_ICD_FILENAMES="${vk_manifest}"
-      export VK_DRIVER_FILES="${vk_manifest}"
-      export __EGL_VENDOR_LIBRARY_FILENAMES="${egl_manifest}"
-      export __GLX_VENDOR_LIBRARY_NAME=nvidia
-      ;;
-    system_discovered_sapien_loader)
-      clear_explicit_graphics_selection
-      build_discovered_loader
-      export SAPIEN_VULKAN_LIBRARY_PATH="${VULKAN_LOADER}"
-      ;;
-    *)
-      return 2
-      ;;
-  esac
-  apply_headless_contract
-}
-
-ensure_sapien_egl_contract() {
-  if [[ -z "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" && -z "${__EGL_VENDOR_LIBRARY_DIRS:-}" ]]; then
-    export __EGL_VENDOR_LIBRARY_FILENAMES="${DRIVER_ROOT}/10_nvidia.json"
-  fi
-}
-
-validate_complete_cpfs_graphics_contract() {
+validate_r25_graphics_contract() {
   export FASTWAM_P13_GL_SHIM_ROOT="${SCRATCH_ROOT}/graphics-lib"
   export FASTWAM_P13_EGL_FRONTEND="${EGL_FRONTEND}"
   export FASTWAM_P13_GL_FRONTEND="${GL_FRONTEND}"
@@ -335,7 +229,16 @@ enumerate_version.restype = ctypes.c_int32
 version = ctypes.c_uint32()
 if enumerate_version(ctypes.byref(version)) != 0:
     raise SystemExit("vkEnumerateInstanceVersion failed")
-print("P13_METRIC_CACHE_COMPLETE_GLVND_VULKAN_ABI_PASS")
+
+from OpenGL import EGL
+if not callable(getattr(EGL, "eglQueryString", None)):
+    raise SystemExit("PyOpenGL EGL.eglQueryString is unavailable")
+import cv2
+import mani_skill
+import sapien
+import tasks.place_food
+import utils.scenes
+print("P13_METRIC_CACHE_R25_GRAPHICS_IMPORT_PREFLIGHT_PASS")
 PY
 }
 
@@ -362,40 +265,12 @@ print(json.dumps({
 PY
 
 probe_program=$'import os\nfrom pathlib import Path\nfrom build_robofactory_metric_geometry_cache import _build_environment\nroot = Path(os.environ["FASTWAM_P13_ROBOFACTORY_ROOT"])\nenvironment = _build_environment(root, "PlaceFood-rf")\nenvironment.close()\nprint("P13_METRIC_CACHE_ENVIRONMENT_CONSTRUCTION_PROBE_PASS task=PlaceFood-rf device=0")\n'
-profiles=(
-  cpfs_manifest_headless
-  provider_native_headless provider_clean_headless system_default_headless
-  system_discovered_headless system_manifest_headless
-  system_discovered_sapien_loader
-)
-for profile in "${profiles[@]}"; do
-  probe_log="${SCRATCH_ROOT}/graphics-probes/${profile}.log"
-  if ! apply_graphics_profile "${profile}"; then
-    printf 'P13_METRIC_CACHE_GRAPHICS_PROFILE_SKIPPED profile=%s reason=unavailable\n' "${profile}"
-    continue
-  fi
-  ensure_sapien_egl_contract
-  if [[ "${profile}" == cpfs_manifest_headless ]]; then
-    validate_complete_cpfs_graphics_contract
-  fi
-  set +e
-  timeout --signal=TERM --kill-after=30s 180s env CUDA_VISIBLE_DEVICES=0 \
-    "${PYTHON_BIN}" -B -c "${probe_program}" >"${probe_log}" 2>&1
-  probe_rc=$?
-  set -e
-  if [[ "${probe_rc}" == 0 ]]; then
-    selected_profile="${profile}"
-    printf 'P13_METRIC_CACHE_GRAPHICS_PROFILE_SELECTED profile=%s\n' "${profile}"
-    break
-  fi
-  printf 'P13_METRIC_CACHE_GRAPHICS_PROFILE_REJECTED profile=%s rc=%s\n' \
-    "${profile}" "${probe_rc}" >&2
-  tail -n 80 -- "${probe_log}" >&2 || true
-done
-[[ -n "${selected_profile}" ]] || die 'no GPU graphics profile could construct and close PlaceFood-rf'
-apply_graphics_profile "${selected_profile}" || die 'selected graphics profile became unavailable'
-ensure_sapien_egl_contract
-printf 'P13_METRIC_CACHE_GRAPHICS_PREFLIGHT_PASS profile=%s\n' "${selected_profile}"
+apply_r25_graphics_contract
+validate_r25_graphics_contract
+timeout --signal=TERM --kill-after=30s 240s env CUDA_VISIBLE_DEVICES=0 \
+  "${PYTHON_BIN}" -B -c "${probe_program}" || \
+  die 'R25 graphics contract could not construct and close PlaceFood-rf'
+printf 'P13_METRIC_CACHE_GRAPHICS_PREFLIGHT_PASS contract=r25-complete-glvnd\n'
 
 "${PYTHON_BIN}" "${LOCAL_REPO}/scripts/build_robofactory_metric_geometry_cache.py" \
   --dataset-root "${DATASET_ROOT}" \

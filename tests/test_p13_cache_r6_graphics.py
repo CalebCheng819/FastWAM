@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "scripts" / "run_p13_metric_cache_dlc.sh"
 
 
-class P13CacheR6GraphicsTest(unittest.TestCase):
+class P13CacheGraphicsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = WORKER.read_text(encoding="utf-8")
@@ -15,25 +15,26 @@ class P13CacheR6GraphicsTest(unittest.TestCase):
     def test_worker_has_valid_bash_syntax(self):
         subprocess.run(["bash", "-n", str(WORKER)], check=True)
 
-    def test_loader_and_all_graphics_profiles_are_frozen(self):
+    def test_r25_contract_replaces_profile_lottery(self):
         self.assertIn("FASTWAM_P13_VULKAN_LOADER", self.source)
-        for profile in (
+        self.assertIn("apply_r25_graphics_contract", self.source)
+        self.assertIn("contract=r25-complete-glvnd", self.source)
+        for retired in (
+            "profiles=(",
+            "build_discovered_loader",
             "cpfs_manifest_headless",
             "provider_native_headless",
-            "provider_clean_headless",
             "system_default_headless",
-            "system_discovered_headless",
-            "system_manifest_headless",
             "system_discovered_sapien_loader",
         ):
-            self.assertIn(profile, self.source)
+            self.assertNotIn(retired, self.source)
 
     def test_probe_constructs_and_closes_the_real_environment(self):
         self.assertIn(
             'environment = _build_environment(root, "PlaceFood-rf")', self.source
         )
         self.assertIn("environment.close()", self.source)
-        self.assertIn("timeout --signal=TERM --kill-after=30s 180s", self.source)
+        self.assertIn("timeout --signal=TERM --kill-after=30s 240s", self.source)
         self.assertIn("env CUDA_VISIBLE_DEVICES=0", self.source)
 
     def test_complete_glvnd_soname_contract_is_installed(self):
@@ -51,54 +52,68 @@ class P13CacheR6GraphicsTest(unittest.TestCase):
         self.assertIn("/usr/share/glvnd/egl_vendor.d", self.source)
         self.assertIn("/etc/glvnd/egl_vendor.d", self.source)
 
-    def test_cpfs_profile_checks_egl_vendor_and_vulkan_abi_before_sapien(self):
-        profile = self.source.index('if [[ "${profile}" == cpfs_manifest_headless ]]')
-        abi_gate = self.source.index("validate_complete_cpfs_graphics_contract", profile)
+    def test_r25_contract_checks_native_egl_vulkan_and_pyopengl_before_sapien(self):
+        contract = self.source.index("apply_r25_graphics_contract")
+        abi_gate = self.source.index("validate_r25_graphics_contract", contract)
         environment_probe = self.source.index(
-            "timeout --signal=TERM --kill-after=30s 180s", abi_gate
+            "timeout --signal=TERM --kill-after=30s 240s", abi_gate
         )
         self.assertLess(abi_gate, environment_probe)
         self.assertIn('hasattr(egl, "eglQueryString")', self.source)
         self.assertIn('hasattr(vendor, "__egl_Main")', self.source)
         self.assertIn("vkEnumerateInstanceVersion", self.source)
+        self.assertIn("from OpenGL import EGL", self.source)
+        self.assertIn('getattr(EGL, "eglQueryString", None)', self.source)
+        for module in ("cv2", "mani_skill", "sapien", "tasks.place_food", "utils.scenes"):
+            self.assertIn(f"import {module}", self.source)
 
     def test_complete_shim_precedes_driver_paths(self):
         self.assertIn(
-            'local cpfs_library_path="${SCRATCH_ROOT}/graphics-lib:'
-            '${DRIVER_ROOT}/lib:${DRIVER_ROOT}/driver-lib"',
+            'export LD_LIBRARY_PATH="${SCRATCH_ROOT}/graphics-lib:'
+            '${DRIVER_ROOT}/lib:${DRIVER_ROOT}/driver-lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"',
             self.source,
         )
+        self.assertIn('export FASTWAM_REQUIRE_PROVIDER_NATIVE_GRAPHICS=1', self.source)
+        self.assertIn('export PYOPENGL_PLATFORM=egl', self.source)
+        self.assertIn('export EGL_PLATFORM=surfaceless', self.source)
 
-    def test_graphics_sensitive_imports_wait_for_profile_contract(self):
+    def test_r25_python_extra_precedes_local_runtime_site_packages(self):
+        self.assertIn(
+            'export PYTHONPATH="${ROBOFACTORY_ROOT}:${LOCAL_REPO}/src:'
+            '${PYTHON_EXTRA_ROOT}:${LOCAL_REPO}/scripts:${RUNTIME_ROOT}/site-packages"',
+            self.source,
+        )
+        self.assertIn("FASTWAM_P13_PYTHON_EXTRA_ROOT", self.source)
+
+    def test_graphics_sensitive_imports_wait_for_contract(self):
         preflight_start = self.source.index('"${PYTHON_BIN}" - <<\'PY\'')
         preflight_end = self.source.index("\nPY\n", preflight_start)
         preflight = self.source[preflight_start:preflight_end]
         for module in ("mani_skill", "robofactory", "sapien"):
             self.assertNotIn(f'"{module}"', preflight)
 
-        loop = self.source.index('for profile in "${profiles[@]}"; do')
-        applied = self.source.index('apply_graphics_profile "${profile}"', loop)
-        egl_gate = self.source.index("ensure_sapien_egl_contract", applied)
+        applied = self.source.rindex("apply_r25_graphics_contract")
+        egl_gate = self.source.index("validate_r25_graphics_contract", applied)
         probe = self.source.index(
-            "timeout --signal=TERM --kill-after=30s 180s", egl_gate
+            "timeout --signal=TERM --kill-after=30s 240s", egl_gate
         )
         self.assertLess(applied, egl_gate)
         self.assertLess(egl_gate, probe)
 
-    def test_selected_profile_and_egl_gate_precede_builder(self):
-        selected = self.source.index('[[ -n "${selected_profile}" ]]')
-        reapplied = self.source.index('apply_graphics_profile "${selected_profile}"')
-        egl_gate = self.source.index("ensure_sapien_egl_contract", reapplied)
+    def test_contract_import_gate_and_environment_probe_precede_builder(self):
+        applied = self.source.rindex("apply_r25_graphics_contract")
+        gate = self.source.index("validate_r25_graphics_contract", applied)
+        probe = self.source.index("timeout --signal=TERM --kill-after=30s 240s", gate)
         builder = self.source.index(
             '"${PYTHON_BIN}" "${LOCAL_REPO}/scripts/build_robofactory_metric_geometry_cache.py"'
         )
-        self.assertLess(selected, reapplied)
-        self.assertLess(reapplied, egl_gate)
-        self.assertLess(egl_gate, builder)
+        self.assertLess(applied, gate)
+        self.assertLess(gate, probe)
+        self.assertLess(probe, builder)
 
-    def test_all_probe_failures_close_before_cache_mutation(self):
+    def test_probe_failure_closes_before_cache_mutation(self):
         failure = self.source.index(
-            "die 'no GPU graphics profile could construct and close PlaceFood-rf'"
+            "die 'R25 graphics contract could not construct and close PlaceFood-rf'"
         )
         builder = self.source.index(
             '"${PYTHON_BIN}" "${LOCAL_REPO}/scripts/build_robofactory_metric_geometry_cache.py"'
