@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "event_id": "d5f599f6-6b59-4350-b92c-fadeeed314bf",
+  "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-CROSSAGENT-GAUSSIAN-P12-EVAL-R7-DLC-20260817",
+  "notion_page_id": null,
+  "operation": "create_experiment",
+  "idempotency_key": "FASTWAM-MR-N2-PLACEFOOD-CROSSAGENT-GAUSSIAN-P12-EVAL-R7-DLC-20260817:create:v1",
+  "occurred_at": "2026-08-17T15:47:35.723301+00:00",
+  "patch": {
+    "data_source_id": "7456bae9-0c32-4754-9014-213b1ef8df63",
+    "project_page_id": "3ae21e77-89cc-8145-873a-c6c7057f1c52",
+    "status": "Planned",
+    "mode": "formal",
+    "title": "FastWAM P12 PlaceFood Gaussian eval R7 DLC",
+    "objective": "Repair the R6 EGL loader failure by materializing private generic and NVIDIA EGL/GLX loader names, verifying eglQueryString, then submitting a GPU0-restricted construction probe in the legal 1x8 allocation before any full evaluation.",
+    "baseline_job_id": "dlc1pv78juksleti",
+    "baseline_failure": "R6 reached the CPFS graphics profile but OpenGL.raw.EGL could not resolve eglQueryString because generic EGL loader names were missing.",
+    "planned_identity": {
+      "display_name_probe": "fastwam-p12-gaussian-eval-r7-dlc-graphics-probe-20260817",
+      "display_name_full": "fastwam-p12-gaussian-eval-r7-dlc-full-20260817",
+      "priority": 7,
+      "worker_topology": "1x8 RTX4090; graphics probe process restricted to GPU0",
+      "retry_or_recreate": false
+    },
+    "evidence_policy": "Git commit, source path, timestamps, job and run IDs, file sizes and terminal records; no hash chain."
+  },
+  "attempt": 0,
+  "next_retry_at": "2026-08-17T15:52:35.723301+00:00",
+  "last_error": "Notion connector unavailable in the current session; queued before DLC mutation."
+}
