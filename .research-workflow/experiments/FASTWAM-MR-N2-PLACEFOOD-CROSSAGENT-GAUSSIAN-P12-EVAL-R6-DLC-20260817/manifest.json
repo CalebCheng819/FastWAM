@@ -1,0 +1,16 @@
+{
+  "schema_version": "fastwam-p12-dlc-eval-manifest-v1",
+  "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-CROSSAGENT-GAUSSIAN-P12-EVAL-R6-DLC-20260817",
+  "training_job_id": "dlc19rgpvuxr56b7",
+  "training_code_commit": "1181a375c880a4a51df2ae78d533e16dde757465",
+  "checkpoint_steps": [500, 1000],
+  "task": "PlaceFood-rf",
+  "offline_states": 263,
+  "closed_loop_episodes_per_checkpoint": 8,
+  "control_adapter": "official_topp",
+  "action_horizon": 32,
+  "worker_topology": "1x8 RTX4090 for both modes; graphics_probe process is restricted to GPU0",
+  "graphics_contract": "cpfs_manifest_headless-first adaptive Vulkan/EGL runtime profile with real environment construction probe",
+  "integrity_policy": "Git revisions, paths, timestamps, job IDs, and artifact metadata; no newly computed hashes",
+  "claim_limit": "Job success is not policy success; aggregates are required"
+}

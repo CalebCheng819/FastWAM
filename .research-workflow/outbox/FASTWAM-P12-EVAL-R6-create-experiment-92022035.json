@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "event_id": "92022035-54b5-48ac-9b44-178303336c42",
+  "experiment_id": "FASTWAM-MR-N2-PLACEFOOD-CROSSAGENT-GAUSSIAN-P12-EVAL-R6-DLC-20260817",
+  "notion_page_id": null,
+  "operation": "create_experiment",
+  "idempotency_key": "FASTWAM-MR-N2-PLACEFOOD-CROSSAGENT-GAUSSIAN-P12-EVAL-R6-DLC-20260817:create:v1",
+  "occurred_at": "2026-08-17T15:00:20.535731+00:00",
+  "patch": {
+    "data_source_id": "7456bae9-0c32-4754-9014-213b1ef8df63",
+    "project_page_id": "3ae21e77-89cc-8145-873a-c6c7057f1c52",
+    "status": "Planned",
+    "mode": "formal",
+    "title": "FastWAM P12 PlaceFood Gaussian eval R6 DLC",
+    "objective": "Repair the failed P12 graphics evaluation by using the valid 1 Worker x 8 GPU DLC shape, restrict the real graphics construct probe to GPU0, and submit the full evaluator only after the probe succeeds.",
+    "baseline_job_id": "dlc71uccq95e7zw5",
+    "baseline_failure": "No GPU graphics profile could construct and close PlaceFood-rf; the subsequent R5 retry was rejected because 1 GPU was not a valid resource shape.",
+    "planned_identity": {
+      "display_name_probe": "fastwam-p12-gaussian-eval-r6-dlc-graphics-probe-20260817",
+      "display_name_full": "fastwam-p12-gaussian-eval-r6-dlc-full-20260817",
+      "priority": 7,
+      "worker_topology": "1x8 RTX4090",
+      "retry_or_recreate": false
+    },
+    "evidence_policy": "Git commit, source path, timestamps, job and run IDs, file sizes and terminal records; no hash chain."
+  },
+  "attempt": 0,
+  "next_retry_at": "2026-08-17T15:05:20.535743+00:00",
+  "last_error": "Notion connector unavailable in the current session; queued before DLC mutation."
+}
