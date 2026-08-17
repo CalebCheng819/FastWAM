@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from numbers import Real
 from typing import Any, Mapping
 
 TRAIN_SPLIT = "train_split"
@@ -74,12 +76,37 @@ def validate_normalization_stats_provenance(
         record = payload.get(kind)
         if not isinstance(record, Mapping):
             raise ValueError(f"Legacy normalization stats lack {kind!r} record")
-        if record.get("count") != expected_count or record.get("dim") != expected_dim:
+        expected_record_keys = {"count", "max", "mean", "min", "std"}
+        if set(record) != expected_record_keys:
+            raise ValueError(
+                f"Legacy normalization stats {kind} record keys mismatch: "
+                f"expected={sorted(expected_record_keys)!r} "
+                f"got={sorted(record)!r}"
+            )
+        count = record.get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count != expected_count:
             raise ValueError(
                 f"Legacy normalization stats {kind} population mismatch: "
-                f"expected_count={expected_count} expected_dim={expected_dim} "
-                f"got_count={record.get('count')!r} got_dim={record.get('dim')!r}"
+                f"expected_count={expected_count} got_count={record.get('count')!r}"
             )
+        for metric in ("max", "mean", "min", "std"):
+            values = record.get(metric)
+            if not isinstance(values, list) or len(values) != expected_dim:
+                raise ValueError(
+                    f"Legacy normalization stats {kind}.{metric} dimension mismatch: "
+                    f"expected_dim={expected_dim} "
+                    f"got_dim={len(values) if isinstance(values, list) else None!r}"
+                )
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not math.isfinite(float(value))
+                for value in values
+            ):
+                raise ValueError(
+                    f"Legacy normalization stats {kind}.{metric} must contain "
+                    "only finite real numbers"
+                )
     return mode
 
 

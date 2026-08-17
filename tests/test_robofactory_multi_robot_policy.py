@@ -40,14 +40,16 @@ def _legacy_stats_payload() -> dict:
         },
         "action": {
             "count": 2572601,
-            "dim": 8,
+            "max": [1.0] * 8,
             "mean": [0.0] * 8,
+            "min": [-1.0] * 8,
             "std": [1.0] * 8,
         },
         "state": {
             "count": 2577023,
-            "dim": 18,
+            "max": [1.0] * 18,
             "mean": [0.0] * 18,
+            "min": [-1.0] * 18,
             "std": [1.0] * 18,
         },
     }
@@ -279,6 +281,34 @@ def test_stats_provenance_modes_fail_closed_on_cross_use_and_population_drift(
             drifted,
             expected_sha256=None,
             expected_size_bytes=drifted.stat().st_size,
+            integrity_mode="metadata_no_hash",
+            provenance_mode=LEGACY_FULL_DATASET,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda payload: payload["action"]["mean"].pop(), "action.mean dimension mismatch"),
+        (lambda payload: payload["state"].pop("min"), "state record keys mismatch"),
+        (lambda payload: payload["action"]["std"].__setitem__(0, float("inf")), "finite real numbers"),
+        (lambda payload: payload["state"]["max"].__setitem__(0, True), "finite real numbers"),
+        (lambda payload: payload["action"].__setitem__("dim", 8), "record keys mismatch"),
+    ],
+)
+def test_legacy_stats_contract_rejects_schema_or_numeric_drift(
+    tmp_path: Path, mutation, message: str
+):
+    payload = _legacy_stats_payload()
+    mutation(payload)
+    path = tmp_path / "invalid-legacy-stats.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_normalization_stats(
+            path,
+            expected_sha256=None,
+            expected_size_bytes=path.stat().st_size,
             integrity_mode="metadata_no_hash",
             provenance_mode=LEGACY_FULL_DATASET,
         )
