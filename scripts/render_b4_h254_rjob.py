@@ -69,7 +69,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--task-type",
         "normal",
         "--restart-policy",
-        "Never",
+        "never",
         "--termination-grace-period-seconds",
         "60",
         "--backoff_limit",
