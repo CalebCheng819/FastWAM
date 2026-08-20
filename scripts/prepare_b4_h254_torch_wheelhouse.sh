@@ -81,8 +81,9 @@ for requirement in \
   torchvision==0.22.1+cu128 \
   torchcodec==0.5+cu128
 do
-  TMPDIR="$TMPDIR" "$BASE_PYTHON" -m pip download \
+  PIP_NO_CACHE_DIR=1 TMPDIR="$TMPDIR" "$BASE_PYTHON" -m pip download \
     --disable-pip-version-check \
+    --no-cache-dir \
     --no-deps \
     --only-binary=:all: \
     --index-url "$PYTORCH_INDEX" \

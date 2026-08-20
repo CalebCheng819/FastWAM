@@ -65,6 +65,8 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertIn("triton==3.3.1", text)
         self.assertIn("expected exactly one regular cached wheel", text)
         self.assertIn("wheelhouse contract mismatch", text)
+        self.assertIn("PIP_NO_CACHE_DIR=1", text)
+        self.assertIn("--no-cache-dir", text)
         self.assertIn('mv -- "$BUILD_DIR" "$TARGET"', text)
         self.assertNotIn("--system-site-packages", text)
 
