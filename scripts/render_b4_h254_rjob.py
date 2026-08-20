@@ -85,7 +85,6 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--positive-tags",
         NODE,
         "--store-host-nvme",
-        "True",
         "--mount",
         "gpfs://gpfs2/ailab-eailabagent-gpfs:/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs",
         "gpfs://gpfs2/gpfs2-shared-public:/mnt/shared-storage-gpfs2/gpfs2-shared-public",

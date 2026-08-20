@@ -58,7 +58,7 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--predict-only") + 1], "true")
         self.assertEqual(command[command.index("--gpu") + 1], "8")
         self.assertEqual(command[command.index("--restart-policy") + 1], "never")
-        self.assertEqual(command[command.index("--store-host-nvme") + 1], "True")
+        self.assertEqual(command[command.index("--store-host-nvme") + 1], "--mount")
         self.assertEqual(command[command.index("--priority") + 1], "9")
         self.assertEqual(
             command[command.index("--positive-tags") + 1],
