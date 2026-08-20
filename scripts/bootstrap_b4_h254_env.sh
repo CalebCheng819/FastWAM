@@ -11,8 +11,7 @@ CACHE_ROOT="${GPFS_ROOT}/data-cache-migration/h-eailabagent-20260819/fastwam_env
 BASE_PYTHON="${CACHE_ROOT}/bootstrap-py310/bin/python3.10"
 TORCH_WHEELHOUSE="${CACHE_ROOT}/wheelhouse/torch-2.7.1-cu128-cp310"
 TARGET="${GPFS_ROOT}/envs/fastwam-b4-h254-py310-20260820"
-PYPI_INDEX="http://mirrors.i.h.pjlab.org.cn/repository/pypi-proxy/simple/"
-PYPI_EXTRA_INDEX="http://pypi.i.h.pjlab.org.cn/brain/dev/+simple"
+PYPI_INDEX="https://pypi.org/simple/"
 
 [[ "$TARGET" == "${GPFS_ROOT}/envs/"* ]] || die "target is outside the approved environment root"
 [[ ! -e "$TARGET" && ! -L "$TARGET" ]] || die "refusing to overwrite target: ${TARGET}"
@@ -44,10 +43,9 @@ ENV_PYTHON="${BUILD_DIR}/bin/python3.10"
 PIP_ARGS=(
   --disable-pip-version-check
   --no-cache-dir
+  --retries 12
+  --timeout 120
   --index-url "$PYPI_INDEX"
-  --extra-index-url "$PYPI_EXTRA_INDEX"
-  --trusted-host mirrors.i.h.pjlab.org.cn
-  --trusted-host pypi.i.h.pjlab.org.cn
 )
 
 TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install \

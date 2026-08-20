@@ -45,7 +45,10 @@ and exact paths. Do not create new digest metadata.
    it is published atomically only after wheel metadata validation. The
    environment installs the Torch stack only from that local wheelhouse and
    disables pip's HTTP cache on GPFS while keeping all build temporaries on
-   GPFS, avoiding the filesystem's unsupported cache-file `mmap` path. It
+   GPFS, avoiding the filesystem's unsupported cache-file `mmap` path. The
+   remaining pinned dependencies are fetched from the single official PyPI
+   index on the login-side preparation host with bounded retries; the GPU job
+   never installs packages or requires network access. The environment
    publishes only after `pip check` and the complete pinned metadata contract
    pass, at
    `/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao/envs/fastwam-b4-h254-py310-20260820`.
