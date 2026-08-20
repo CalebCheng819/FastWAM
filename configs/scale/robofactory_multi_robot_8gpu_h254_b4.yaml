@@ -1,0 +1,21 @@
+# @package _global_
+
+# H-cluster B4 topology: one H200 node with eight local processes.  Accumulate
+# three micro-batches so the effective global batch remains 8 x 3 = 24, matching
+# the established 3-node x 8-GPU B4 treatment.
+gradient_accumulation_steps: 3
+checkpoint_state_kind: full
+save_training_state: true
+save_final_checkpoint: true
+provenance_mode: stat_cmp
+
+# Preserve the project policy: ordinary Git/run/artifact metadata only.
+seal_training_state: false
+seal_training_run: false
+terminal_rehash_weights: false
+
+process_group_timeout_seconds: 21600
+checkpoint_io_timeout_seconds: 21600
+
+eval_every: 1250
+offline_eval_num_samples: 12

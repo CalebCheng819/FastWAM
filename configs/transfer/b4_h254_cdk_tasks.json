@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "purpose": "Prepare five derived input groups for RoboFactory multi-robot B4 on H200-0254",
+  "policy": {
+    "engine": "default",
+    "dry_run_first": true,
+    "concurrency": 2,
+    "credentials": "enter only in the CDK web UI; never save them in this file",
+    "verification": "compare object counts, byte totals, paths, and transfer status; do not create new digest metadata"
+  },
+  "source": {
+    "provider": "Alibaba OSS",
+    "endpoint": "oss-cn-beijing.aliyuncs.com",
+    "bucket": "pjlab-bjpai-manip"
+  },
+  "destination": {
+    "provider": "H object storage",
+    "endpoint": "http://hdd2.h.pjlab.org.cn:8060",
+    "bucket": "eailab",
+    "base_prefix": "chengjuntao/fastwam/robofactory-multirobot/b4-h254-s42-20260820/inputs"
+  },
+  "tasks": [
+    {
+      "id": "A1-stats",
+      "kind": "file",
+      "source_key": "chengjuntao/cpfs-user-chengjuntao/datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json",
+      "destination_key": "dataset-derived/stats/fastwam_multi_robot_n234_train_s42_stats_v2.json",
+      "expected_files": 1
+    },
+    {
+      "id": "A2-text-embeddings",
+      "kind": "prefix",
+      "source_key": "chengjuntao/cpfs-user-chengjuntao/datasets/robofactory_multi_robot/text_embeds_cache_n234/",
+      "destination_key": "dataset-derived/text_embeds_cache_n234/",
+      "expected_files": 6
+    },
+    {
+      "id": "A3-gaussian-cache",
+      "kind": "prefix",
+      "source_key": "chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/compact-s42-13x28x40-fp16-meanalpha-v2/",
+      "destination_key": "gaussian/compact-s42-13x28x40-fp16-meanalpha-v2/",
+      "expected_files": 1590,
+      "expected_bytes": 4301874139
+    },
+    {
+      "id": "A4-warm-start",
+      "kind": "file",
+      "source_key": "chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt",
+      "destination_key": "weights/step_005000.pt",
+      "expected_files": 1,
+      "expected_bytes": 12047213728
+    },
+    {
+      "id": "A5-wan22-vae",
+      "kind": "file",
+      "source_key": "chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors",
+      "destination_key": "model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors",
+      "expected_files": 1
+    }
+  ]
+}
