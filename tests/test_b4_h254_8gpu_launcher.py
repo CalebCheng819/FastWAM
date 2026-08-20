@@ -62,8 +62,10 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--priority") + 1], "9")
         self.assertEqual(
             command[command.index("--positive-tags") + 1],
-            "gpu-l-lg-cmc-h-h200-0254.host.h.pjlab.org.cn",
+            "node/gpu-l-lg-cmc-h-h200-0254.host.h.pjlab.org.cn",
         )
+        self.assertNotIn("--group", command)
+        self.assertEqual(command[command.index("--charged-group") + 1], "eailabagent_gpu")
         self.assertIn("--store-host-nvme", command)
         self.assertNotIn("--private-machine", command)
         self.assertEqual(command.count("submit"), 1)

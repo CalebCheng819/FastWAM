@@ -19,6 +19,7 @@ IMAGE = (
     "sha256:59204dea15a88b9b444b4f20c2e54b6b92d41582ca718f35e9194335cc8615f7"
 )
 NODE = "gpu-l-lg-cmc-h-h200-0254.host.h.pjlab.org.cn"
+NODE_TAG = f"node/{NODE}"
 GROUP = "eailabagent_gpu"
 GPFS_ROOT = "/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao"
 PUBLISH_ROOT = f"{GPFS_ROOT}/fastwam-b4-h254-8g-20260820"
@@ -60,8 +61,6 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "true",
         "--name",
         args.run_id,
-        "--group",
-        GROUP,
         "--charged-group",
         GROUP,
         "--priority",
@@ -83,7 +82,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
         "--memory",
         "950000",
         "--positive-tags",
-        NODE,
+        NODE_TAG,
         "--store-host-nvme",
         "--mount",
         "gpfs://gpfs2/ailab-eailabagent-gpfs:/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs",
