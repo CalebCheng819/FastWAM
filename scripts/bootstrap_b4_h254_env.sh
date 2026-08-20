@@ -23,8 +23,13 @@ PYTORCH_INDEX="https://download.pytorch.org/whl/cu128"
 
 mkdir -p "$(dirname "$TARGET")"
 BUILD_DIR="$(mktemp -d "${TARGET}.build.XXXXXX")"
+mkdir -p "${CACHE_ROOT}/tmp"
+B4_PIP_TMP_DIR="$(mktemp -d "${CACHE_ROOT}/tmp/b4-h254-pip.XXXXXX")"
 cleanup() {
   local rc=$?
+  if [[ -n "${B4_PIP_TMP_DIR:-}" && "$B4_PIP_TMP_DIR" == "${CACHE_ROOT}/tmp/b4-h254-pip."* ]]; then
+    rm -rf -- "$B4_PIP_TMP_DIR"
+  fi
   if [[ $rc -ne 0 && -n "${BUILD_DIR:-}" && "$BUILD_DIR" == "${TARGET}.build."* ]]; then
     rm -rf -- "$BUILD_DIR"
   fi
@@ -46,8 +51,8 @@ PIP_ARGS=(
   --trusted-host pypi.i.h.pjlab.org.cn
 )
 
-"$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" "$TORCH_WHEEL"
-"$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
+TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" "$TORCH_WHEEL"
+TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
   accelerate==1.12.0 \
   av==16.0.1 \
   boto3==1.35.99 \

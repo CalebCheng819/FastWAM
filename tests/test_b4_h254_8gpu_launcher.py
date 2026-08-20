@@ -49,6 +49,7 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertIn("torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl", text)
         self.assertIn("torchcodec==0.5+cu128", text)
         self.assertIn("torchvision==0.22.1+cu128", text)
+        self.assertIn('TMPDIR="$B4_PIP_TMP_DIR"', text)
         self.assertIn("refusing to overwrite target", text)
         self.assertNotIn("--system-site-packages", text)
 
