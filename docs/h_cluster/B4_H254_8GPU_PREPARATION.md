@@ -37,9 +37,12 @@ and exact paths. Do not create new digest metadata.
    matches the manifest counts and known byte totals.
 2. The exact 24 raw H5 paths are readable through the approved HDD2 rclone
    config; the config remains mode 0600 and is never printed or committed.
-3. A Python 3.10 environment exactly matches the package versions enforced by
-   `scripts/launch_b4_h254_8gpu.sh`. The currently discovered FastWAM_yuner
-   environment is only a candidate and fails that exact-version gate.
+3. Build the isolated Python 3.10 environment with
+   `scripts/bootstrap_b4_h254_env.sh`. It publishes only after `pip check` and
+   the complete pinned metadata contract pass, at
+   `/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao/envs/fastwam-b4-h254-py310-20260820`.
+   TorchCodec's CUDA-linked import and the exact eight-device check remain
+   runtime gates on H200-0254; a login-node metadata check is not a GPU gate.
 4. The committed Git bundle and launcher are published on personal GPFS.
 5. `scripts/render_b4_h254_rjob.py --execute-predict` returns a successful
    scheduler prediction for H200-0254. This command always includes

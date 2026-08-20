@@ -44,6 +44,14 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertNotIn("NCCL_IB_HCA", text)
         self.assertNotIn("NCCL_SOCKET_IFNAME", text)
 
+    def test_environment_bootstrap_is_exact_and_fail_closed(self):
+        text = (ROOT / "scripts/bootstrap_b4_h254_env.sh").read_text()
+        self.assertIn("torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl", text)
+        self.assertIn("torchcodec==0.5+cu128", text)
+        self.assertIn("torchvision==0.22.1+cu128", text)
+        self.assertIn("refusing to overwrite target", text)
+        self.assertNotIn("--system-site-packages", text)
+
     def test_renderer_can_only_predict_h254_job(self):
         commit = "1" * 40
         completed = subprocess.run(
@@ -68,6 +76,10 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertEqual(command[command.index("--charged-group") + 1], "eailabagent_gpu")
         self.assertEqual(command[command.index("--private-machine") + 1], "group")
         self.assertIn("--store-host-nvme", command)
+        self.assertIn(
+            "FASTWAM_PYTHON=/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao/envs/fastwam-b4-h254-py310-20260820/bin/python3.10",
+            command,
+        )
         self.assertEqual(command.count("submit"), 1)
 
 

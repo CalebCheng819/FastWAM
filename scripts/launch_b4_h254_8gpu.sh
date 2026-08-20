@@ -120,14 +120,35 @@ import sys
 
 expected = {
     "accelerate": "1.12.0",
+    "av": "16.0.1",
+    "boto3": "1.35.99",
+    "datasets": "3.6.0",
     "deepspeed": "0.18.5",
     "einops": "0.8.1",
+    "gitpython": "3.1.45",
     "h5py": "3.14.0",
+    "huggingface-hub": "0.29.2",
     "hydra-core": "1.3.2",
+    "imageio": "2.37.0",
+    "imageio-ffmpeg": "0.6.0",
+    "jsonlines": "4.0.0",
+    "modelscope": "1.34.0",
+    "numpy": "1.26.4",
     "omegaconf": "2.3.0",
+    "packaging": "25.0",
+    "pandas": "2.2.3",
+    "pillow": "12.0.0",
+    "pyarrow": "23.0.0",
+    "regex": "2025.11.3",
+    "rich": "14.2.0",
     "safetensors": "0.5.3",
+    "termcolor": "2.5.0",
     "torch": "2.7.1+cu128",
+    "torchcodec": "0.5+cu128",
+    "torchvision": "0.22.1+cu128",
+    "tqdm": "4.66.5",
     "transformers": "4.49.0",
+    "typing-extensions": "4.15.0",
     "wandb": "0.23.1",
 }
 if sys.version_info[:2] != (3, 10):
@@ -138,6 +159,8 @@ if bad:
 import torch
 if not torch.cuda.is_available() or torch.cuda.device_count() != 8:
     raise SystemExit(f"B4 H254 requires exactly 8 visible CUDA devices, got {torch.cuda.device_count()}")
+import torchcodec
+import torchvision
 print(f"B4 H254 environment PASS python={sys.version.split()[0]} torch={torch.__version__} cuda_devices=8")
 PY
 

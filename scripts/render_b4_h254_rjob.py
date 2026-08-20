@@ -23,7 +23,7 @@ NODE_TAG = f"node/{NODE}"
 GROUP = "eailabagent_gpu"
 GPFS_ROOT = "/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao"
 PUBLISH_ROOT = f"{GPFS_ROOT}/fastwam-b4-h254-8g-20260820"
-PYTHON = f"{GPFS_ROOT}/FastWAM_yuner/.conda/fastwam/bin/python3.10"
+PYTHON = f"{GPFS_ROOT}/envs/fastwam-b4-h254-py310-20260820/bin/python3.10"
 RCLONE_CONFIG = f"{GPFS_ROOT}/.fastwam_runtime/rclone.conf"
 RAW_REMOTE = (
     "eailab-hdd2:fkp-migrate/ailab-eailabagent-gpfs/chengjuntao/"
