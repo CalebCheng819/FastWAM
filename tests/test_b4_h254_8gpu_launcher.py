@@ -66,8 +66,8 @@ class B4H254PreparationTests(unittest.TestCase):
         )
         self.assertNotIn("--group", command)
         self.assertEqual(command[command.index("--charged-group") + 1], "eailabagent_gpu")
+        self.assertEqual(command[command.index("--private-machine") + 1], "group")
         self.assertIn("--store-host-nvme", command)
-        self.assertNotIn("--private-machine", command)
         self.assertEqual(command.count("submit"), 1)
 
 

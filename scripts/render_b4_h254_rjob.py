@@ -63,6 +63,8 @@ def build_command(args: argparse.Namespace) -> list[str]:
         args.run_id,
         "--charged-group",
         GROUP,
+        "--private-machine",
+        "group",
         "--priority",
         "9",
         "--task-type",

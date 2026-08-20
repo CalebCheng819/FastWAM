@@ -14,8 +14,8 @@ produced an optimizer update.
 - initialization: weights-only from the existing step-5,000 joint checkpoint;
   optimizer and scheduler start fresh at step zero
 - target node: `gpu-l-lg-cmc-h-h200-0254.host.h.pjlab.org.cn`
-- H priority: 9; only charged quota group: `eailabagent_gpu` (no separate
-  `--group`); directed node tag:
+- H priority: 9; charged quota group: `eailabagent_gpu`; private-machine mode:
+  `group` (no separate `--group`); directed node tag:
   `node/gpu-l-lg-cmc-h-h200-0254.host.h.pjlab.org.cn`
 
 ## Data preparation
