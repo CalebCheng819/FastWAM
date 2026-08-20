@@ -43,7 +43,7 @@ ENV_PYTHON="${BUILD_DIR}/bin/python3.10"
 
 PIP_ARGS=(
   --disable-pip-version-check
-  --cache-dir "${CACHE_ROOT}/pip"
+  --no-cache-dir
   --index-url "$PYPI_INDEX"
   --extra-index-url "$PYPI_EXTRA_INDEX"
   --trusted-host mirrors.i.h.pjlab.org.cn
@@ -55,7 +55,7 @@ TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install \
   --no-index \
   --no-deps \
   "$TORCH_WHEELHOUSE"/*.whl
-TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
+PIP_NO_CACHE_DIR=1 TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
   accelerate==1.12.0 \
   av==16.0.1 \
   boto3==1.35.99 \

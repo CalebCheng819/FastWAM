@@ -44,6 +44,8 @@ and exact paths. Do not create new digest metadata.
    fetches only the exact missing Triton, TorchVision, and TorchCodec wheels;
    it is published atomically only after wheel metadata validation. The
    environment installs the Torch stack only from that local wheelhouse and
+   disables pip's HTTP cache on GPFS while keeping all build temporaries on
+   GPFS, avoiding the filesystem's unsupported cache-file `mmap` path. It
    publishes only after `pip check` and the complete pinned metadata contract
    pass, at
    `/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao/envs/fastwam-b4-h254-py310-20260820`.
