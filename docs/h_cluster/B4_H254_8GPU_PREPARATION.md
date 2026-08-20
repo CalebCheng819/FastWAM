@@ -64,3 +64,36 @@ and exact paths. Do not create new digest metadata.
    command be prepared. Runtime acceptance still requires eight CUDA devices,
    strict input loading, and a finite optimizer-step log; Queuing or Running is
    not training success.
+
+## Current preparation status (2026-08-20)
+
+- Code and publication: commit
+  `fa556712a9718336d2a9b9196b0c2b80955421e2` is pushed on
+  `exp/b4-h254-8g-20260820`. Its Git bundle and byte-identical launcher are
+  published under
+  `/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao/fastwam-b4-h254-8g-20260820/`.
+- Python environment: the isolated Python 3.10 environment is published as an
+  ordinary non-symlink directory at the path frozen above. Its package contract
+  and `pip check` pass; the exact versions include Torch 2.7.1+cu128,
+  TorchVision 0.22.1+cu128, TorchCodec 0.5+cu128, Accelerate 1.12.0, and
+  DeepSpeed 0.18.5. CUDA-linked imports remain a runtime gate on H200-0254.
+- Raw data: all 24 manifest H5 files are present exactly once in the existing H
+  object-storage prefix, totalling 35,145,463,783 bytes. They do not need CDK
+  transfer.
+- Derived inputs: the destination inventory for all five CDK groups is still
+  empty. The stats JSON, six cached text embeddings, 1,590-file Gaussian cache,
+  step-5,000 warm-start checkpoint, and Wan2.2 VAE must therefore be transferred
+  and verified before submission. The credentialed CDK Dry Run and transfer are
+  an external gate; credentials must remain in the CDK web UI.
+- Scheduler prediction: the prediction-only receipt
+  `fastwam-b4-h254-8g-s42-r1-20260820-attempt-001.predict-receipt-fa55671.json`
+  records `formal_submission_performed=false` and an rjob return code of zero,
+  but its semantic result is **not schedulable**. At 2026-08-20 21:56:41+08,
+  H200-0254 had 80 free CPU cores, about 719.971 GiB free memory, and zero free
+  GPUs. No listed node had eight free GPUs (the largest partial availability
+  was four GPUs on H200-0298), so the directed one-node/eight-GPU contract could
+  not be placed. A fresh prediction with eight free GPUs and sufficient memory
+  is still required; return code zero alone is not an admission pass.
+- Formal job: not submitted. There is no rjob ID, queue state, runtime log,
+  optimizer step, checkpoint, evaluation output, or terminal result for this H
+  run yet.
