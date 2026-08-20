@@ -37,9 +37,15 @@ and exact paths. Do not create new digest metadata.
    matches the manifest counts and known byte totals.
 2. The exact 24 raw H5 paths are readable through the approved HDD2 rclone
    config; the config remains mode 0600 and is never printed or committed.
-3. Build the isolated Python 3.10 environment with
-   `scripts/bootstrap_b4_h254_env.sh`. It publishes only after `pip check` and
-   the complete pinned metadata contract pass, at
+3. Prepare the exact local CUDA 12.8 Torch wheelhouse with
+   `scripts/prepare_b4_h254_torch_wheelhouse.sh`, then build the isolated
+   Python 3.10 environment with `scripts/bootstrap_b4_h254_env.sh`. The
+   wheelhouse reuses the already downloaded exact CUDA dependency wheels and
+   fetches only the exact missing Triton, TorchVision, and TorchCodec wheels;
+   it is published atomically only after wheel metadata validation. The
+   environment installs the Torch stack only from that local wheelhouse and
+   publishes only after `pip check` and the complete pinned metadata contract
+   pass, at
    `/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao/envs/fastwam-b4-h254-py310-20260820`.
    TorchCodec's CUDA-linked import and the exact eight-device check remain
    runtime gates on H200-0254; a login-node metadata check is not a GPU gate.

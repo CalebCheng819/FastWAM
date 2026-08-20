@@ -46,11 +46,26 @@ class B4H254PreparationTests(unittest.TestCase):
 
     def test_environment_bootstrap_is_exact_and_fail_closed(self):
         text = (ROOT / "scripts/bootstrap_b4_h254_env.sh").read_text()
+        self.assertIn("wheelhouse/torch-2.7.1-cu128-cp310", text)
+        self.assertIn("validated Torch wheelhouse must contain exactly 18 wheels", text)
+        self.assertIn('"torchcodec": "0.5+cu128"', text)
+        self.assertIn('"torchvision": "0.22.1+cu128"', text)
+        self.assertIn('"triton": "3.3.1"', text)
+        self.assertIn("--no-index", text)
+        self.assertIn("--no-deps", text)
+        self.assertIn('TMPDIR="$B4_PIP_TMP_DIR"', text)
+        self.assertIn("refusing to overwrite target", text)
+        self.assertNotIn("--system-site-packages", text)
+
+    def test_torch_wheelhouse_is_exact_and_atomically_published(self):
+        text = (ROOT / "scripts/prepare_b4_h254_torch_wheelhouse.sh").read_text()
         self.assertIn("torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl", text)
         self.assertIn("torchcodec==0.5+cu128", text)
         self.assertIn("torchvision==0.22.1+cu128", text)
-        self.assertIn('TMPDIR="$B4_PIP_TMP_DIR"', text)
-        self.assertIn("refusing to overwrite target", text)
+        self.assertIn("triton==3.3.1", text)
+        self.assertIn("expected exactly one regular cached wheel", text)
+        self.assertIn("wheelhouse contract mismatch", text)
+        self.assertIn('mv -- "$BUILD_DIR" "$TARGET"', text)
         self.assertNotIn("--system-site-packages", text)
 
     def test_renderer_can_only_predict_h254_job(self):

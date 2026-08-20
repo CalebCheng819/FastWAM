@@ -9,17 +9,17 @@ die() {
 GPFS_ROOT="/mnt/shared-storage-gpfs2/ailab-eailabagent-gpfs/chengjuntao"
 CACHE_ROOT="${GPFS_ROOT}/data-cache-migration/h-eailabagent-20260819/fastwam_env_cache"
 BASE_PYTHON="${CACHE_ROOT}/bootstrap-py310/bin/python3.10"
-TORCH_WHEEL="${CACHE_ROOT}/direct_test/torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl"
+TORCH_WHEELHOUSE="${CACHE_ROOT}/wheelhouse/torch-2.7.1-cu128-cp310"
 TARGET="${GPFS_ROOT}/envs/fastwam-b4-h254-py310-20260820"
 PYPI_INDEX="http://mirrors.i.h.pjlab.org.cn/repository/pypi-proxy/simple/"
 PYPI_EXTRA_INDEX="http://pypi.i.h.pjlab.org.cn/brain/dev/+simple"
-PYTORCH_INDEX="https://download.pytorch.org/whl/cu128"
 
 [[ "$TARGET" == "${GPFS_ROOT}/envs/"* ]] || die "target is outside the approved environment root"
 [[ ! -e "$TARGET" && ! -L "$TARGET" ]] || die "refusing to overwrite target: ${TARGET}"
 [[ -x "$BASE_PYTHON" && ! -L "$BASE_PYTHON" ]] || die "base Python is not a regular executable"
-[[ -f "$TORCH_WHEEL" && ! -L "$TORCH_WHEEL" ]] || die "exact Torch wheel is missing"
-[[ "$(stat -c %s "$TORCH_WHEEL")" -eq 1039365846 ]] || die "exact Torch wheel byte size changed"
+[[ -d "$TORCH_WHEELHOUSE" && ! -L "$TORCH_WHEELHOUSE" ]] || die "validated Torch wheelhouse is missing"
+[[ "$(find "$TORCH_WHEELHOUSE" -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 18 ]] \
+  || die "validated Torch wheelhouse must contain exactly 18 wheels"
 
 mkdir -p "$(dirname "$TARGET")"
 BUILD_DIR="$(mktemp -d "${TARGET}.build.XXXXXX")"
@@ -46,12 +46,15 @@ PIP_ARGS=(
   --cache-dir "${CACHE_ROOT}/pip"
   --index-url "$PYPI_INDEX"
   --extra-index-url "$PYPI_EXTRA_INDEX"
-  --extra-index-url "$PYTORCH_INDEX"
   --trusted-host mirrors.i.h.pjlab.org.cn
   --trusted-host pypi.i.h.pjlab.org.cn
 )
 
-TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" "$TORCH_WHEEL"
+TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install \
+  --disable-pip-version-check \
+  --no-index \
+  --no-deps \
+  "$TORCH_WHEELHOUSE"/*.whl
 TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
   accelerate==1.12.0 \
   av==16.0.1 \
@@ -59,6 +62,8 @@ TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
   datasets==3.6.0 \
   deepspeed==0.18.5 \
   einops==0.8.1 \
+  filelock==3.19.1 \
+  fsspec==2025.3.0 \
   gitpython==3.1.45 \
   h5py==3.14.0 \
   huggingface-hub==0.29.2 \
@@ -66,7 +71,9 @@ TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
   imageio==2.37.0 \
   imageio-ffmpeg==0.6.0 \
   jsonlines==4.0.0 \
+  jinja2==3.1.6 \
   modelscope==1.34.0 \
+  networkx==3.4.2 \
   numpy==1.26.4 \
   omegaconf==2.3.0 \
   packaging==25.0 \
@@ -76,10 +83,8 @@ TMPDIR="$B4_PIP_TMP_DIR" "$ENV_PYTHON" -m pip install "${PIP_ARGS[@]}" \
   regex==2025.11.3 \
   rich==14.2.0 \
   safetensors==0.5.3 \
+  sympy==1.14.0 \
   termcolor==2.5.0 \
-  torch==2.7.1+cu128 \
-  torchcodec==0.5+cu128 \
-  torchvision==0.22.1+cu128 \
   tqdm==4.66.5 \
   transformers==4.49.0 \
   typing-extensions==4.15.0 \
@@ -97,6 +102,8 @@ expected = {
     "datasets": "3.6.0",
     "deepspeed": "0.18.5",
     "einops": "0.8.1",
+    "filelock": "3.19.1",
+    "fsspec": "2025.3.0",
     "gitpython": "3.1.45",
     "h5py": "3.14.0",
     "huggingface-hub": "0.29.2",
@@ -104,7 +111,9 @@ expected = {
     "imageio": "2.37.0",
     "imageio-ffmpeg": "0.6.0",
     "jsonlines": "4.0.0",
+    "jinja2": "3.1.6",
     "modelscope": "1.34.0",
+    "networkx": "3.4.2",
     "numpy": "1.26.4",
     "omegaconf": "2.3.0",
     "packaging": "25.0",
@@ -114,10 +123,12 @@ expected = {
     "regex": "2025.11.3",
     "rich": "14.2.0",
     "safetensors": "0.5.3",
+    "sympy": "1.14.0",
     "termcolor": "2.5.0",
     "torch": "2.7.1+cu128",
     "torchcodec": "0.5+cu128",
     "torchvision": "0.22.1+cu128",
+    "triton": "3.3.1",
     "tqdm": "4.66.5",
     "transformers": "4.49.0",
     "typing-extensions": "4.15.0",
