@@ -47,7 +47,9 @@ and exact paths. Do not create new digest metadata.
    disables pip's HTTP cache on GPFS while keeping all build temporaries on
    GPFS, avoiding the filesystem's unsupported cache-file `mmap` path. The
    remaining pinned dependencies are fetched from the single official PyPI
-   index on the login-side preparation host with bounded retries; the GPU job
+   index on the login-side preparation host with bounded retries. The bootstrap
+   disables inherited pip configuration and index-related environment variables
+   so the H login host cannot silently add another package source; the GPU job
    never installs packages or requires network access. The environment
    publishes only after `pip check` and the complete pinned metadata contract
    pass, at

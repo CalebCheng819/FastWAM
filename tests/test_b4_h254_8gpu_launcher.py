@@ -56,6 +56,8 @@ class B4H254PreparationTests(unittest.TestCase):
         self.assertIn("PIP_NO_CACHE_DIR=1", text)
         self.assertIn("--no-cache-dir", text)
         self.assertIn('PYPI_INDEX="https://pypi.org/simple/"', text)
+        self.assertIn("PIP_CONFIG_FILE=/dev/null", text)
+        self.assertIn("unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL", text)
         self.assertIn("--retries 12", text)
         self.assertIn("--timeout 120", text)
         self.assertNotIn("mirrors.i.h.pjlab.org.cn", text)

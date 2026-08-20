@@ -36,6 +36,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+export PIP_CONFIG_FILE=/dev/null
+unset PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_FIND_LINKS PIP_NO_INDEX
+
 "$BASE_PYTHON" -m venv --copies "$BUILD_DIR"
 ENV_PYTHON="${BUILD_DIR}/bin/python3.10"
 [[ -x "$ENV_PYTHON" ]] || die "venv Python was not created"
