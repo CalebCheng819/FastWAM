@@ -1520,8 +1520,16 @@ class FastWAMMultiRobot(FastWAM):
             )
 
     @staticmethod
-    def _native_checkpoint_state_kind(payload: dict[str, Any], path) -> str:
-        state_kind = payload.get("state_kind")
+    def _native_checkpoint_state_kind(
+        payload: dict[str, Any],
+        path,
+        *,
+        allow_legacy_missing_state_kind: bool = False,
+    ) -> str:
+        if "state_kind" not in payload and allow_legacy_missing_state_kind:
+            state_kind = "full"
+        else:
+            state_kind = payload.get("state_kind")
         if state_kind not in {"full", "sparse_delta"}:
             raise ValueError(
                 "Native v2 checkpoint must declare state_kind='full' or "
@@ -1984,6 +1992,8 @@ class FastWAMMultiRobot(FastWAM):
         load_role: str,
         active_paths: set[Path],
         validate_trainable_scope: bool = True,
+        allow_legacy_full_source_metadata: bool = False,
+        expected_legacy_base_checkpoint: str | None = None,
     ):
         checkpoint_path = Path(path).expanduser().resolve(strict=True)
         if not checkpoint_path.is_file():
@@ -2019,13 +2029,54 @@ class FastWAMMultiRobot(FastWAM):
 
         checkpoint_format = payload.get("format")
         if checkpoint_format == "fastwam_multi_robot_v2":
+            if allow_legacy_full_source_metadata:
+                if load_role != "base_dependency":
+                    raise ValueError(
+                        "Legacy full-source metadata compatibility is restricted "
+                        "to an explicit base_dependency warm start"
+                    )
+                if "state_kind" in payload:
+                    raise ValueError(
+                        "Legacy full-source metadata compatibility requires "
+                        f"state_kind to be absent: {checkpoint_path}"
+                    )
+                if (
+                    not isinstance(expected_legacy_base_checkpoint, str)
+                    or not expected_legacy_base_checkpoint
+                    or not Path(expected_legacy_base_checkpoint).is_absolute()
+                ):
+                    raise ValueError(
+                        "Legacy full-source metadata compatibility requires an "
+                        "exact absolute expected_legacy_base_checkpoint"
+                    )
+                if payload.get("base_checkpoint") != expected_legacy_base_checkpoint:
+                    raise ValueError(
+                        "Legacy full-source base_checkpoint mismatch: "
+                        f"expected={expected_legacy_base_checkpoint!r} "
+                        f"observed={payload.get('base_checkpoint')!r} in "
+                        f"{checkpoint_path}"
+                    )
+                if not isinstance(payload.get("mot"), dict) or "mot_trainable" in payload:
+                    raise ValueError(
+                        "Legacy full-source metadata compatibility requires exactly "
+                        f"a self-contained full `mot` payload: {checkpoint_path}"
+                    )
+            elif expected_legacy_base_checkpoint is not None:
+                raise ValueError(
+                    "expected_legacy_base_checkpoint requires "
+                    "allow_legacy_full_source_metadata=true"
+                )
             self._validate_multi_robot_checkpoint_metadata(
                 payload,
                 checkpoint_path,
                 validate_treatment=load_role == "top_level",
                 validate_trainable_scope=validate_trainable_scope,
             )
-            state_kind = self._native_checkpoint_state_kind(payload, checkpoint_path)
+            state_kind = self._native_checkpoint_state_kind(
+                payload,
+                checkpoint_path,
+                allow_legacy_missing_state_kind=allow_legacy_full_source_metadata,
+            )
             if load_role == "base_dependency" and state_kind != "full":
                 raise ValueError(
                     "Nested sparse native v2 checkpoints are forbidden; a "

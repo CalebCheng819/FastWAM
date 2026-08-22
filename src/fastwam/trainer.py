@@ -161,6 +161,17 @@ class Wan22Trainer:
         self.weights_only_warm_start_expected_source_state_kind = str(
             warm_start_cfg.get("expected_source_state_kind", "full")
         ).strip().lower()
+        self.weights_only_warm_start_allow_legacy_full_source_metadata = bool(
+            warm_start_cfg.get("allow_legacy_full_source_metadata", False)
+        )
+        expected_legacy_base = warm_start_cfg.get(
+            "expected_legacy_source_base_checkpoint"
+        )
+        self.weights_only_warm_start_expected_legacy_source_base_checkpoint = (
+            None
+            if expected_legacy_base is None
+            else str(expected_legacy_base).strip()
+        )
         if self.weights_only_warm_start_enabled:
             if self.weights_only_warm_start_expected_source_training_mode not in {
                 "action_only_cache",
@@ -194,6 +205,27 @@ class Wan22Trainer:
                     "weights_only_warm_start requires checkpoint_state_kind='full' "
                     "so the new treatment never publishes a base-dependent delta"
                 )
+            if self.weights_only_warm_start_allow_legacy_full_source_metadata:
+                legacy_base = (
+                    self.weights_only_warm_start_expected_legacy_source_base_checkpoint
+                )
+                if not legacy_base or not Path(legacy_base).is_absolute():
+                    raise ValueError(
+                        "allow_legacy_full_source_metadata requires an exact absolute "
+                        "expected_legacy_source_base_checkpoint"
+                    )
+            elif (
+                self.weights_only_warm_start_expected_legacy_source_base_checkpoint
+                is not None
+            ):
+                raise ValueError(
+                    "expected_legacy_source_base_checkpoint is only valid when "
+                    "allow_legacy_full_source_metadata=true"
+                )
+        elif self.weights_only_warm_start_allow_legacy_full_source_metadata:
+            raise ValueError(
+                "allow_legacy_full_source_metadata requires weights_only_warm_start.enabled=true"
+            )
         if self.run_initial_global_step > 0:
             if not self.weights_only_warm_start_enabled:
                 raise ValueError(
@@ -1725,13 +1757,20 @@ class Wan22Trainer:
                 "weights_only_warm_start checkpoint payload must be a mapping: "
                 f"{resolved_path}"
             )
+        allow_legacy_metadata = bool(
+            getattr(
+                self,
+                "weights_only_warm_start_allow_legacy_full_source_metadata",
+                False,
+            )
+        )
+        expected_legacy_base = getattr(
+            self,
+            "weights_only_warm_start_expected_legacy_source_base_checkpoint",
+            None,
+        )
         expected = {
             "format": "fastwam_multi_robot_v2",
-            "state_kind": getattr(
-                self,
-                "weights_only_warm_start_expected_source_state_kind",
-                None,
-            ),
             "training_mode": getattr(
                 self,
                 "weights_only_warm_start_expected_source_training_mode",
@@ -1743,6 +1782,12 @@ class Wan22Trainer:
                 None,
             ),
         }
+        if not allow_legacy_metadata:
+            expected["state_kind"] = getattr(
+                self,
+                "weights_only_warm_start_expected_source_state_kind",
+                None,
+            )
         mismatches = {
             key: {"expected": value, "observed": payload.get(key)}
             for key, value in expected.items()
@@ -1758,7 +1803,19 @@ class Wan22Trainer:
                 "weights_only_warm_start requires exactly a self-contained native-v2 "
                 f"full `mot` state: {resolved_path}"
             )
-        if payload.get("base_checkpoint") is not None:
+        if allow_legacy_metadata:
+            if "state_kind" in payload:
+                raise ValueError(
+                    "Legacy weights_only_warm_start compatibility requires the "
+                    f"state_kind key to be absent, not explicit: {resolved_path}"
+                )
+            if payload.get("base_checkpoint") != expected_legacy_base:
+                raise ValueError(
+                    "Legacy weights_only_warm_start base_checkpoint mismatch: "
+                    f"expected={expected_legacy_base!r} "
+                    f"observed={payload.get('base_checkpoint')!r} in {resolved_path}"
+                )
+        elif payload.get("base_checkpoint") is not None:
             raise ValueError(
                 "weights_only_warm_start full source must declare "
                 f"base_checkpoint=null: {resolved_path}"
@@ -1777,6 +1834,8 @@ class Wan22Trainer:
             load_role="base_dependency",
             active_paths=set(),
             validate_trainable_scope=False,
+            allow_legacy_full_source_metadata=allow_legacy_metadata,
+            expected_legacy_base_checkpoint=expected_legacy_base,
         )
         logger.info(
             "Validated explicit weights-only warm start: path=%s "

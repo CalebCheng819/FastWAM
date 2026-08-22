@@ -26,6 +26,12 @@ weights_only_warm_start:
   expected_source_training_mode: joint
   expected_source_trainable_scope: dit
   expected_source_state_kind: full
+  # The audited historical step-5000 checkpoint predates the state_kind
+  # field and retains this exact provenance pointer even though its `mot`
+  # payload is complete.  Compatibility is deliberately pinned to that one
+  # legacy metadata shape; newly written checkpoints remain native-v2 full.
+  allow_legacy_full_source_metadata: true
+  expected_legacy_source_base_checkpoint: /cpfs/user/chengjuntao/checkpoints/FastWAM/yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/libero_uncond_2cam224.pt
 
 data:
   train:

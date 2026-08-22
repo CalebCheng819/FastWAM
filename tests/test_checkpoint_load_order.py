@@ -83,18 +83,19 @@ def _write_native_v2_source_checkpoint(
     *,
     training_mode: str = "joint",
     trainable_scope: str = "dit",
+    include_state_kind: bool = True,
+    base_checkpoint=None,
 ) -> None:
-    torch.save(
-        {
-            "format": "fastwam_multi_robot_v2",
-            "state_kind": "full",
-            "training_mode": training_mode,
-            "trainable_scope": trainable_scope,
-            "base_checkpoint": None,
-            "mot": {"tiny_weight": torch.ones(1)},
-        },
-        path,
-    )
+    payload = {
+        "format": "fastwam_multi_robot_v2",
+        "training_mode": training_mode,
+        "trainable_scope": trainable_scope,
+        "base_checkpoint": base_checkpoint,
+        "mot": {"tiny_weight": torch.ones(1)},
+    }
+    if include_state_kind:
+        payload["state_kind"] = "full"
+    torch.save(payload, path)
 
 
 def _explicit_warm_start_trainer(checkpoint: Path):
@@ -104,6 +105,8 @@ def _explicit_warm_start_trainer(checkpoint: Path):
     trainer.weights_only_warm_start_expected_source_training_mode = "joint"
     trainer.weights_only_warm_start_expected_source_trainable_scope = "dit"
     trainer.weights_only_warm_start_expected_source_state_kind = "full"
+    trainer.weights_only_warm_start_allow_legacy_full_source_metadata = False
+    trainer.weights_only_warm_start_expected_legacy_source_base_checkpoint = None
     return trainer
 
 
@@ -140,6 +143,8 @@ def test_explicit_cross_treatment_warm_start_uses_strict_native_loader(
                 "load_role": "base_dependency",
                 "active_paths": set(),
                 "validate_trainable_scope": False,
+                "allow_legacy_full_source_metadata": False,
+                "expected_legacy_base_checkpoint": None,
             },
         )
     ]
@@ -161,6 +166,93 @@ def test_explicit_warm_start_rejects_wrong_source_treatment_before_load(tmp_path
 
     assert trainer.model.loads == []
     assert trainer._weight_checkpoint_loaded_before_prepare is False
+
+
+def test_explicit_warm_start_accepts_only_pinned_legacy_full_metadata(tmp_path):
+    legacy_base = "/cpfs/user/example/legacy-base.pt"
+    checkpoint = tmp_path / "legacy-joint-full.pt"
+    _write_native_v2_source_checkpoint(
+        checkpoint,
+        include_state_kind=False,
+        base_checkpoint=legacy_base,
+    )
+    trainer = _explicit_warm_start_trainer(checkpoint)
+    trainer.weights_only_warm_start_allow_legacy_full_source_metadata = True
+    trainer.weights_only_warm_start_expected_legacy_source_base_checkpoint = (
+        legacy_base
+    )
+
+    trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer._weight_checkpoint_loaded_before_prepare is True
+    assert trainer.model.loads == [
+        (
+            str(checkpoint.resolve()),
+            {
+                "optimizer": None,
+                "load_role": "base_dependency",
+                "active_paths": set(),
+                "validate_trainable_scope": False,
+                "allow_legacy_full_source_metadata": True,
+                "expected_legacy_base_checkpoint": legacy_base,
+            },
+        )
+    ]
+
+
+def test_explicit_warm_start_rejects_legacy_metadata_without_opt_in(tmp_path):
+    checkpoint = tmp_path / "legacy-without-opt-in.pt"
+    _write_native_v2_source_checkpoint(
+        checkpoint,
+        include_state_kind=False,
+        base_checkpoint="/cpfs/user/example/legacy-base.pt",
+    )
+    trainer = _explicit_warm_start_trainer(checkpoint)
+
+    with pytest.raises(ValueError, match="source metadata mismatch"):
+        trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == []
+
+
+def test_explicit_warm_start_rejects_wrong_legacy_base_pointer(tmp_path):
+    checkpoint = tmp_path / "legacy-wrong-base.pt"
+    _write_native_v2_source_checkpoint(
+        checkpoint,
+        include_state_kind=False,
+        base_checkpoint="/cpfs/user/example/observed.pt",
+    )
+    trainer = _explicit_warm_start_trainer(checkpoint)
+    trainer.weights_only_warm_start_allow_legacy_full_source_metadata = True
+    trainer.weights_only_warm_start_expected_legacy_source_base_checkpoint = (
+        "/cpfs/user/example/expected.pt"
+    )
+
+    with pytest.raises(ValueError, match="base_checkpoint mismatch"):
+        trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == []
+
+
+def test_explicit_warm_start_rejects_explicit_null_legacy_state_kind(tmp_path):
+    checkpoint = tmp_path / "legacy-explicit-null-state-kind.pt"
+    _write_native_v2_source_checkpoint(
+        checkpoint,
+        base_checkpoint="/cpfs/user/example/legacy-base.pt",
+    )
+    payload = torch.load(checkpoint, weights_only=True)
+    payload["state_kind"] = None
+    torch.save(payload, checkpoint)
+    trainer = _explicit_warm_start_trainer(checkpoint)
+    trainer.weights_only_warm_start_allow_legacy_full_source_metadata = True
+    trainer.weights_only_warm_start_expected_legacy_source_base_checkpoint = (
+        "/cpfs/user/example/legacy-base.pt"
+    )
+
+    with pytest.raises(ValueError, match="state_kind key to be absent"):
+        trainer._load_weight_checkpoint_before_prepare()
+
+    assert trainer.model.loads == []
 
 
 def test_explicit_warm_start_rejects_full_state_directory(tmp_path):

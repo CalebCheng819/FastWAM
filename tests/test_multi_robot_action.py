@@ -1452,6 +1452,64 @@ def test_native_v2_checkpoint_payload_is_memory_mapped(tmp_path, monkeypatch):
     }
 
 
+def test_native_v2_legacy_missing_state_kind_requires_explicit_opt_in():
+    payload = {"mot": {}}
+
+    with pytest.raises(ValueError, match="must declare state_kind"):
+        FastWAMMultiRobot._native_checkpoint_state_kind(payload, "legacy.pt")
+
+    assert (
+        FastWAMMultiRobot._native_checkpoint_state_kind(
+            payload,
+            "legacy.pt",
+            allow_legacy_missing_state_kind=True,
+        )
+        == "full"
+    )
+    payload["state_kind"] = None
+    with pytest.raises(ValueError, match="must declare state_kind"):
+        FastWAMMultiRobot._native_checkpoint_state_kind(
+            payload,
+            "legacy.pt",
+            allow_legacy_missing_state_kind=True,
+        )
+
+
+def test_native_v2_legacy_full_source_load_requires_exact_base_pointer(tmp_path):
+    legacy_base = "/cpfs/user/example/legacy-base.pt"
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    payload = _native_full_payload(source)
+    payload.pop("state_kind")
+    payload["base_checkpoint"] = legacy_base
+    checkpoint = tmp_path / "legacy-full.pt"
+    torch.save(payload, checkpoint)
+    target = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+
+    target._load_checkpoint_with_role(
+        checkpoint,
+        load_role="base_dependency",
+        active_paths=set(),
+        validate_trainable_scope=False,
+        allow_legacy_full_source_metadata=True,
+        expected_legacy_base_checkpoint=legacy_base,
+    )
+
+    assert torch.equal(
+        next(iter(target.mot.state_dict().values())),
+        next(iter(source.mot.state_dict().values())),
+    )
+
+    with pytest.raises(ValueError, match="base_checkpoint mismatch"):
+        target._load_checkpoint_with_role(
+            checkpoint,
+            load_role="base_dependency",
+            active_paths=set(),
+            validate_trainable_scope=False,
+            allow_legacy_full_source_metadata=True,
+            expected_legacy_base_checkpoint="/cpfs/user/example/wrong.pt",
+        )
+
+
 def test_native_v2_stat_cmp_warm_start_never_hashes_and_records_receipt(
     tmp_path, monkeypatch
 ):

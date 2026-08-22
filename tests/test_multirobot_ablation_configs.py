@@ -515,6 +515,12 @@ def test_n234_vg1h1gau0_cont50k_profile_is_world32_cumulative_warm_start(monkeyp
         "expected_source_training_mode": "joint",
         "expected_source_trainable_scope": "dit",
         "expected_source_state_kind": "full",
+        "allow_legacy_full_source_metadata": True,
+        "expected_legacy_source_base_checkpoint": (
+            "/cpfs/user/chengjuntao/checkpoints/FastWAM/"
+            "yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/"
+            "libero_uncond_2cam224.pt"
+        ),
     }
     assert cfg["run_initial_global_step"] == 5000
     assert cfg["max_steps"] == 50000
