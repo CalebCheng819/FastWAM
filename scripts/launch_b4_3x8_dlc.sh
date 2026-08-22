@@ -167,8 +167,20 @@ MODEL_CACHE_ROOT="${DIFFSYNTH_MODEL_BASE_PATH:-}"
 VAE_PATH="${FASTWAM_LOCAL_VAE_PATH:-}"
 PYTHON_BIN="${FASTWAM_B4_PYTHON:-}"
 DRY_RUN="${FASTWAM_B4_DRY_RUN:-0}"
-TASK_PROFILE="robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5"
-SCALE_PROFILE="robofactory_multi_robot_24gpu_b4"
+TRAINING_TREATMENT="${FASTWAM_TRAINING_TREATMENT:-b4}"
+case "${TRAINING_TREATMENT}" in
+  b4)
+    TASK_PROFILE="robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5"
+    SCALE_PROFILE="robofactory_multi_robot_24gpu_b4"
+    ;;
+  n234_vg1h1gau1_cont50k)
+    TASK_PROFILE="robofactory_multi_robot_vg1_hub1_gau1_cont50k_224_1e-4"
+    SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
+    ;;
+  *)
+    die "unsupported FASTWAM_TRAINING_TREATMENT: ${TRAINING_TREATMENT}"
+    ;;
+esac
 
 require_env RUN_ID
 require_env FASTWAM_B4_ATTEMPT_ID
@@ -200,8 +212,8 @@ fi
   die "missing B4 stat-cmp cache helper"
 [[ -f "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" ]] || die "missing ZeRO-2 Accelerate config"
 [[ -f "${REPO_ROOT}/src/fastwam/trainer.py" ]] || die "missing trainer source"
-[[ -f "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" ]] || die "missing formal B4 task profile"
-[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal B4 24-GPU scale profile"
+[[ -f "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" ]] || die "missing formal task profile"
+[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal 24-GPU scale profile"
 if [[ "${TEST_MODE}" == "1" ]]; then
   [[ "${OUTPUT_DIR}" == /* ]] || die "test output must be an absolute path"
 else
@@ -331,7 +343,8 @@ fi
 # B4's 50/50 sampling is a scientific treatment, not an optional optimization.
 # Refuse to launch until trainer.py both consumes the Hydra value and forwards
 # it to the sampler; this is a launch-time wiring guard, not a source mutation.
-"${PYTHON_BIN}" - "${REPO_ROOT}/src/fastwam/trainer.py" <<'PY' || die "trainer does not wire B4 phase-balanced sampling; integrate it before launch"
+if [[ "${TRAINING_TREATMENT}" == "b4" ]]; then
+  "${PYTHON_BIN}" - "${REPO_ROOT}/src/fastwam/trainer.py" <<'PY' || die "trainer does not wire B4 phase-balanced sampling; integrate it before launch"
 import ast
 import pathlib
 import sys
@@ -385,11 +398,13 @@ for function in (node for node in ast.walk(tree) if isinstance(node, ast.Functio
 if not (has_assignment and has_forward):
     raise SystemExit(1)
 PY
+fi
 
 "${PYTHON_BIN}" - \
   "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" \
   "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" \
-  "${STATS_PATH}" <<'PY' || die "formal B4 task/scale contract validation failed"
+  "${STATS_PATH}" \
+  "${TRAINING_TREATMENT}" <<'PY' || die "formal task/scale contract validation failed"
 import json
 import math
 import pathlib
@@ -397,7 +412,8 @@ import sys
 
 import yaml
 
-task_path, scale_path, stats_path = map(pathlib.Path, sys.argv[1:])
+task_path, scale_path, stats_path = map(pathlib.Path, sys.argv[1:4])
+treatment = sys.argv[4]
 task = yaml.safe_load(task_path.read_text(encoding="utf-8"))
 scale = yaml.safe_load(scale_path.read_text(encoding="utf-8"))
 
@@ -407,50 +423,106 @@ def value_at(mapping, dotted):
         value = value[part]
     return value
 
-task_expected = {
-    "trainable_scope": "action",
-    "learning_rate": 1.0e-5,
-    "max_steps": 2500,
-    "save_every": 1250,
-    "eval_every": 1250,
-    "offline_eval_num_samples": 12,
-    "phase_balanced_fraction": 0.5,
-    "resume": "${oc.env:FASTWAM_B4_BASE_CHECKPOINT}",
-    "weights_only_warm_start.enabled": True,
-    "weights_only_warm_start.expected_source_training_mode": "joint",
-    "weights_only_warm_start.expected_source_trainable_scope": "dit",
-    "weights_only_warm_start.expected_source_state_kind": "full",
-    "data.train.load_future_video": False,
-    "data.val.load_future_video": False,
-    "data.train.gaussian_cache_expected_manifest_sha256": None,
-    "data.train.gaussian_cache_expected_selection_sha256": None,
-    "data.train.gaussian_cache_expected_source_identity_sha256": None,
-    "data.val.gaussian_cache_expected_manifest_sha256": None,
-    "data.val.gaussian_cache_expected_selection_sha256": None,
-    "data.val.gaussian_cache_expected_source_identity_sha256": None,
-    "model.training_mode": "action_only_cache",
-    "model.loss.lambda_video": 0.0,
-    "model.loss.lambda_action": 1.0,
-    "model.loss.b4.enabled": True,
-    "model.loss.b4.lambda_arm_huber": 1.0,
-    "model.loss.b4.lambda_gripper_event": 2.0,
-    "model.loss.b4.lambda_contact_intent_proxy": 1.0,
-    "model.loss.b4.arm_huber_beta": 0.1,
-    "model.loss.b4.first_steps": 5,
-    "model.loss.b4.first_steps_weight": 2.0,
-    "model.loss.b4.gripper_dim": 7,
-}
-scale_expected = {
-    "gradient_accumulation_steps": 1,
-    "checkpoint_state_kind": "full",
-    "save_training_state": True,
-    "save_final_checkpoint": True,
-    "seal_training_state": False,
-    "seal_training_run": False,
-    "terminal_rehash_weights": False,
-    "eval_every": 1250,
-    "offline_eval_num_samples": 12,
-}
+if treatment == "b4":
+    task_expected = {
+        "trainable_scope": "action",
+        "learning_rate": 1.0e-5,
+        "max_steps": 2500,
+        "save_every": 1250,
+        "eval_every": 1250,
+        "offline_eval_num_samples": 12,
+        "phase_balanced_fraction": 0.5,
+        "resume": "${oc.env:FASTWAM_B4_BASE_CHECKPOINT}",
+        "weights_only_warm_start.enabled": True,
+        "weights_only_warm_start.expected_source_training_mode": "joint",
+        "weights_only_warm_start.expected_source_trainable_scope": "dit",
+        "weights_only_warm_start.expected_source_state_kind": "full",
+        "data.train.load_future_video": False,
+        "data.val.load_future_video": False,
+        "data.train.gaussian_cache_expected_manifest_sha256": None,
+        "data.train.gaussian_cache_expected_selection_sha256": None,
+        "data.train.gaussian_cache_expected_source_identity_sha256": None,
+        "data.val.gaussian_cache_expected_manifest_sha256": None,
+        "data.val.gaussian_cache_expected_selection_sha256": None,
+        "data.val.gaussian_cache_expected_source_identity_sha256": None,
+        "model.training_mode": "action_only_cache",
+        "model.loss.lambda_video": 0.0,
+        "model.loss.lambda_action": 1.0,
+        "model.loss.b4.enabled": True,
+        "model.loss.b4.lambda_arm_huber": 1.0,
+        "model.loss.b4.lambda_gripper_event": 2.0,
+        "model.loss.b4.lambda_contact_intent_proxy": 1.0,
+        "model.loss.b4.arm_huber_beta": 0.1,
+        "model.loss.b4.first_steps": 5,
+        "model.loss.b4.first_steps_weight": 2.0,
+        "model.loss.b4.gripper_dim": 7,
+    }
+    scale_expected = {
+        "gradient_accumulation_steps": 1,
+        "checkpoint_state_kind": "full",
+        "save_training_state": True,
+        "save_final_checkpoint": True,
+        "seal_training_state": False,
+        "seal_training_run": False,
+        "terminal_rehash_weights": False,
+        "eval_every": 1250,
+        "offline_eval_num_samples": 12,
+    }
+    expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
+elif treatment == "n234_vg1h1gau1_cont50k":
+    task_expected = {
+        "trainable_scope": "dit",
+        "batch_size": 1,
+        "learning_rate": 1.0e-4,
+        "weight_decay": 1.0e-2,
+        "lr_scheduler_type": "cosine",
+        "max_steps": 50000,
+        "run_initial_global_step": 5000,
+        "save_every": 5000,
+        "eval_every": 5000,
+        "offline_eval_num_samples": 12,
+        "phase_balanced_fraction": 0.0,
+        "checkpoint_state_kind": "full",
+        "provenance_mode": "stat_cmp",
+        "resume": "${oc.env:FASTWAM_B4_BASE_CHECKPOINT}",
+        "weights_only_warm_start.enabled": True,
+        "weights_only_warm_start.expected_source_training_mode": "joint",
+        "weights_only_warm_start.expected_source_trainable_scope": "dit",
+        "weights_only_warm_start.expected_source_state_kind": "full",
+        "data.train.load_future_video": True,
+        "data.val.load_future_video": True,
+        "data.train.gaussian_cache_verify": "stat_cmp",
+        "data.val.gaussian_cache_verify": "stat_cmp",
+        "data.train.gaussian_cache_expected_manifest_sha256": None,
+        "data.train.gaussian_cache_expected_selection_sha256": None,
+        "data.train.gaussian_cache_expected_source_identity_sha256": None,
+        "data.val.gaussian_cache_expected_manifest_sha256": None,
+        "data.val.gaussian_cache_expected_selection_sha256": None,
+        "data.val.gaussian_cache_expected_source_identity_sha256": None,
+        "model.training_mode": "joint",
+        "model.action_dit_config.hub_enabled": True,
+        "model.action_dit_config.enable_gaussian": True,
+        "model.loss.lambda_video": 1.0,
+        "model.loss.lambda_action": 1.0,
+        "model.loss.b4.enabled": False,
+    }
+    scale_expected = {
+        "gradient_accumulation_steps": 1,
+        "checkpoint_state_kind": "full",
+        "save_training_state": True,
+        "save_final_checkpoint": True,
+        "provenance_mode": "stat_cmp",
+        "seal_training_state": False,
+        "seal_training_run": False,
+        "terminal_rehash_weights": False,
+        "process_group_timeout_seconds": 21600,
+        "checkpoint_io_timeout_seconds": 21600,
+        "eval_every": 5000,
+        "offline_eval_num_samples": 12,
+    }
+    expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
+else:
+    raise SystemExit(f"unsupported treatment: {treatment}")
 for label, mapping, expected in (
     ("task", task, task_expected),
     ("scale", scale, scale_expected),
@@ -463,23 +535,24 @@ for label, mapping, expected in (
         if actual != wanted:
             raise SystemExit(f"{label} profile drift at {key}: expected {wanted!r}, got {actual!r}")
 defaults = task.get("defaults", [])
-if "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4" not in defaults:
-    raise SystemExit("B4 task must inherit the audited VG1/HUB1/GAU1 profile")
+if expected_parent not in defaults:
+    raise SystemExit(f"task must inherit the audited {expected_parent} profile")
 
-stats = json.loads(stats_path.read_text(encoding="utf-8"))
-try:
-    mean = float(stats["action"]["mean"][7])
-    std = float(stats["action"]["std"][7])
-except (KeyError, IndexError, TypeError, ValueError) as exc:
-    raise SystemExit(f"stats must contain numeric action.mean/std index 7: {exc}")
-if not math.isfinite(mean) or not math.isfinite(std) or std <= 0.0:
-    raise SystemExit("gripper normalization must be finite with positive std")
-expected_mean = float(value_at(task, "model.loss.b4.gripper_action_mean"))
-expected_std = float(value_at(task, "model.loss.b4.gripper_action_std"))
-if not math.isclose(mean, expected_mean, rel_tol=0.0, abs_tol=1e-12):
-    raise SystemExit(f"B4 gripper mean differs from normalization stats: {expected_mean} vs {mean}")
-if not math.isclose(std, expected_std, rel_tol=0.0, abs_tol=1e-12):
-    raise SystemExit(f"B4 gripper std differs from normalization stats: {expected_std} vs {std}")
+if treatment == "b4":
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    try:
+        mean = float(stats["action"]["mean"][7])
+        std = float(stats["action"]["std"][7])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise SystemExit(f"stats must contain numeric action.mean/std index 7: {exc}")
+    if not math.isfinite(mean) or not math.isfinite(std) or std <= 0.0:
+        raise SystemExit("gripper normalization must be finite with positive std")
+    expected_mean = float(value_at(task, "model.loss.b4.gripper_action_mean"))
+    expected_std = float(value_at(task, "model.loss.b4.gripper_action_std"))
+    if not math.isclose(mean, expected_mean, rel_tol=0.0, abs_tol=1e-12):
+        raise SystemExit(f"B4 gripper mean differs from normalization stats: {expected_mean} vs {mean}")
+    if not math.isclose(std, expected_std, rel_tol=0.0, abs_tol=1e-12):
+        raise SystemExit(f"B4 gripper std differs from normalization stats: {expected_std} vs {std}")
 PY
 
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
@@ -532,8 +605,26 @@ source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
 provenance_mode=stat_cmp
-stage_steps=2500
 "
+if [[ "${TRAINING_TREATMENT}" == "b4" ]]; then
+  RESERVATION_BODY+="stage_steps=2500
+"
+else
+  RESERVATION_BODY+="training_treatment=n234_vg1h1gau1_cont50k
+initial_global_step=5000
+target_global_step=50000
+optimizer_steps_this_run=45000
+per_device_batch_size=1
+gradient_accumulation_steps=1
+source_global_batch_size=32
+global_batch_size=24
+learning_rate=0.0001
+lr_scheduler=cosine
+scheduler_warmup_steps=2250
+save_every=5000
+checkpoint_steps=10000,15000,20000,25000,30000,35000,40000,45000,50000
+"
+fi
 
 if [[ "${DRY_RUN}" == "0" ]]; then
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"

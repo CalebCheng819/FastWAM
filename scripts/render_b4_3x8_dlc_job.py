@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC CreateJob manifest for B4 3x8."""
+"""Render, but never submit, a PAI DLC CreateJob manifest for FastWAM 3x8."""
 
 from __future__ import annotations
 
@@ -44,7 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-python", required=True)
     parser.add_argument("--b4-source-bundle", type=pathlib.Path, required=True)
     parser.add_argument("--b4-code-commit", required=True)
-    parser.add_argument("--max-running-minutes", type=int, default=10080)
+    parser.add_argument(
+        "--treatment",
+        choices=("b4", "n234_vg1h1gau1_cont50k"),
+        default="b4",
+    )
+    parser.add_argument("--max-running-minutes", type=int)
     parser.add_argument(
         "--allow-local-bundle-for-tests",
         action="store_true",
@@ -102,9 +107,14 @@ def launcher_from_bundle(bundle: pathlib.Path, commit: str) -> bytes:
 
 def main() -> int:
     args = parse_args()
+    max_running_minutes = args.max_running_minutes
+    if max_running_minutes is None:
+        max_running_minutes = (
+            20160 if args.treatment == "n234_vg1h1gau1_cont50k" else 10080
+        )
     if not SAFE_ID.fullmatch(args.run_id) or not SAFE_ID.fullmatch(args.attempt_id):
         raise SystemExit("run-id and attempt-id must be safe unique identifiers")
-    if args.max_running_minutes <= 0:
+    if max_running_minutes <= 0:
         raise SystemExit("max-running-minutes must be positive")
     for name in ("bootstrap_script", "offline_env_source_root", "offline_env_manifest"):
         if not getattr(args, name).startswith("/oss-chengjuntao/"):
@@ -141,6 +151,7 @@ def main() -> int:
     output_dir = f"/oss-chengjuntao/artifacts/{args.run_id}"
     envs = {
         "RUN_ID": args.run_id,
+        "FASTWAM_TRAINING_TREATMENT": args.treatment,
         "FASTWAM_B4_ATTEMPT_ID": args.attempt_id,
         "FASTWAM_B4_OUTPUT_DIR": output_dir,
         "FASTWAM_B4_OUTPUT_RESERVATION_TIMEOUT": "300",
@@ -203,6 +214,32 @@ def main() -> int:
         "NCCL_DEBUG_SUBSYS": "INIT,NET",
         "NPROC_PER_NODE": "8",
     }
+    if args.treatment == "n234_vg1h1gau1_cont50k":
+        description = (
+            "N234 VG1H1GAU1 weights-only continuation: cumulative 5000 to "
+            "50000, 45000 fresh-optimizer updates, 3 workers x 8 GPUs"
+        )
+        tags = {
+            "experiment": "N234-VG1H1GAU1-CONT50K",
+            "initialization": "GAU1-step5000-weights-only",
+            "optimizer": "fresh",
+            "provenance": "stat-cmp-no-new-hash",
+            "topology": "3x8-world24",
+            "schedule": "cumulative-5000-to-50000-save-5000",
+        }
+    else:
+        description = (
+            "B4 weights-only continuation: 3 workers x 8 GPUs, fresh "
+            "optimizer, 2500 steps"
+        )
+        tags = {
+            "experiment": "B4",
+            "initialization": "GAU1-step5000-weights-only",
+            "optimizer": "fresh",
+            "provenance": "stat-cmp-no-new-hash",
+            "topology": "3x8-world24",
+        }
+
     request = {
         "Accessibility": "PRIVATE",
         "CustomEnvs": [],
@@ -218,10 +255,10 @@ def main() -> int:
                 "MountPath": "/oss-chengjuntao",
             },
         ],
-        "Description": "B4 weights-only continuation: 3 workers x 8 GPUs, fresh optimizer, 2500 steps",
+        "Description": description,
         "DisplayName": args.run_id,
         "Envs": envs,
-        "JobMaxRunningTimeMinutes": args.max_running_minutes,
+        "JobMaxRunningTimeMinutes": max_running_minutes,
         "JobSpecs": [
             {
                 "ElasticSpotSpecs": [],
@@ -249,13 +286,7 @@ def main() -> int:
             "EnableOssAppend": False,
             "EnableRDMA": True,
             "EnableSanityCheck": False,
-            "Tags": {
-                "experiment": "B4",
-                "initialization": "GAU1-step5000-weights-only",
-                "optimizer": "fresh",
-                "provenance": "stat-cmp-no-new-hash",
-                "topology": "3x8-world24",
-            },
+            "Tags": tags,
         },
         "SuccessPolicy": "AllWorkers",
         "UserCommand": user_command,
@@ -271,6 +302,7 @@ def main() -> int:
         ),
         "region": "cn-beijing",
         "endpoint": "pai-dlc.cn-beijing.aliyuncs.com",
+        "training_treatment": args.treatment,
         "launcher_source": {
             "bundle": bundle_text,
             "code_commit": args.b4_code_commit,

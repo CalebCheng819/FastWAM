@@ -22,6 +22,7 @@ class _WeightModel:
 def _trainer(resume: Path, model=None):
     trainer = Wan22Trainer.__new__(Wan22Trainer)
     trainer.resume = str(resume)
+    trainer.run_initial_global_step = 0
     trainer.model = _WeightModel() if model is None else model
     trainer._weight_checkpoint_loaded_before_prepare = False
     trainer.formal_n4_fullmodel_gate = False
@@ -311,6 +312,7 @@ def test_resume_at_max_steps_does_not_republish_existing_checkpoint():
     trainer.model = object()
     trainer.max_steps = 5000
     trainer.global_step = 5000
+    trainer.optimizer_steps_this_run = 0
     trainer.epoch = 3
     trainer.train_loader = []
     trainer.formal_n4_fullmodel_gate = False
@@ -498,6 +500,9 @@ def test_stat_cmp_dataset_and_run_contracts_do_not_compute_hashes(
     trainer.learning_rate = 1.0e-5
     trainer.weight_decay = 0.0
     trainer.max_steps = 2500
+    trainer.run_initial_global_step = 0
+    trainer.optimizer_steps_this_run = 2500
+    trainer.scheduler_warmup_steps = 125
     trainer.batch_size = 1
     trainer.agent_action_token_budget = 128
     trainer.phase_balanced_fraction = 0.5
@@ -521,6 +526,13 @@ def test_stat_cmp_dataset_and_run_contracts_do_not_compute_hashes(
     }
     assert "trainable_parameters_sha256" not in run_contract
     assert "resolved_config_sha256" not in run_contract
+
+
+def test_periodic_steps_after_start_uses_cumulative_schedule():
+    assert Wan22Trainer._periodic_steps_after_start(5000, 50000, 5000) == list(
+        range(10000, 50001, 5000)
+    )
+    assert Wan22Trainer._periodic_steps_after_start(1250, 2500, 0) == [1250, 2500]
 
 
 def test_checkpoint_publication_wait_uses_regular_complete_file(tmp_path):

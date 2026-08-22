@@ -112,6 +112,12 @@ class Wan22Trainer:
             )
 
         self.resume = cfg.resume
+        self.run_initial_global_step = int(cfg.get("run_initial_global_step", 0))
+        if self.run_initial_global_step < 0:
+            raise ValueError(
+                "`run_initial_global_step` must be non-negative, got "
+                f"{self.run_initial_global_step}"
+            )
         self.trainable_scope = str(cfg.get("trainable_scope", "dit")).strip().lower()
         requested_checkpoint_state_kind = str(
             cfg.get("checkpoint_state_kind", "auto")
@@ -187,6 +193,16 @@ class Wan22Trainer:
                 raise ValueError(
                     "weights_only_warm_start requires checkpoint_state_kind='full' "
                     "so the new treatment never publishes a base-dependent delta"
+                )
+        if self.run_initial_global_step > 0:
+            if not self.weights_only_warm_start_enabled:
+                raise ValueError(
+                    "run_initial_global_step>0 is only supported for an explicit "
+                    "weights_only_warm_start continuation"
+                )
+            if not self.resume:
+                raise ValueError(
+                    "run_initial_global_step>0 requires a weights-only resume checkpoint"
                 )
         self.allow_legacy_resume = bool(cfg.get("allow_legacy_resume", False))
         self.save_training_state_enabled = bool(cfg.get("save_training_state", True))
@@ -359,13 +375,21 @@ class Wan22Trainer:
         self.train_loader = self._build_loader(self.train_dataset, worker_init_fn=worker_init_fn)
         total_train_steps = self._estimate_total_train_steps()
         self.max_steps = total_train_steps
-        warmup_steps = int(total_train_steps * 0.05)
+        if self.run_initial_global_step >= total_train_steps:
+            raise ValueError(
+                "run_initial_global_step must be smaller than max_steps, got "
+                f"{self.run_initial_global_step}>={total_train_steps}"
+            )
+        self.optimizer_steps_this_run = (
+            total_train_steps - self.run_initial_global_step
+        )
+        self.scheduler_warmup_steps = int(self.optimizer_steps_this_run * 0.05)
         self.scheduler = self._build_scheduler(
             scheduler_type=cfg.lr_scheduler_type,
-            total_train_steps=total_train_steps,
-            warmup_steps=warmup_steps,
+            total_train_steps=self.optimizer_steps_this_run,
+            warmup_steps=self.scheduler_warmup_steps,
         )
-        self.global_step = 0
+        self.global_step = self.run_initial_global_step
         self.epoch = 0
         self.batch_in_epoch = 0
 
@@ -843,7 +867,13 @@ class Wan22Trainer:
         training_mode = str(getattr(unwrapped_model, "training_mode", "")).strip().lower()
         steps = []
         if self.save_every > 0:
-            steps.extend(range(self.save_every, self.max_steps + 1, self.save_every))
+            steps.extend(
+                self._periodic_steps_after_start(
+                    self.save_every,
+                    self.max_steps,
+                    self.run_initial_global_step,
+                )
+            )
         if self.save_final_checkpoint_enabled and self.max_steps not in steps:
             steps.append(self.max_steps)
         self.accelerator.wait_for_everyone()
@@ -860,14 +890,10 @@ class Wan22Trainer:
                     max_steps=self.max_steps,
                     expected_checkpoint_steps=steps,
                     expected_evaluation_steps=(
-                        []
-                        if self.eval_every <= 0
-                        else list(
-                            range(
-                                self.eval_every,
-                                self.max_steps + 1,
-                                self.eval_every,
-                            )
+                        self._periodic_steps_after_start(
+                            self.eval_every,
+                            self.max_steps,
+                            self.run_initial_global_step,
                         )
                     ),
                     world_size=int(self.accelerator.num_processes),
@@ -1068,6 +1094,20 @@ class Wan22Trainer:
             1,
         )
         return max(opt_steps_per_epoch * self.num_epochs, 1)
+
+    @staticmethod
+    def _periodic_steps_after_start(
+        period: int,
+        max_steps: int,
+        initial_step: int,
+    ) -> list[int]:
+        period = int(period)
+        max_steps = int(max_steps)
+        initial_step = int(initial_step)
+        if period <= 0 or max_steps <= initial_step:
+            return []
+        first_step = ((initial_step // period) + 1) * period
+        return list(range(first_step, max_steps + 1, period))
 
     def _set_train_data_epoch(self, epoch: int):
         """Synchronize the source sampler and Accelerate's prepared loader."""
@@ -1401,7 +1441,9 @@ class Wan22Trainer:
                 "betas": [0.9, 0.95],
                 "lr_scheduler_type": str(self.cfg.lr_scheduler_type),
                 "max_steps": int(self.max_steps),
-                "warmup_steps": int(self.max_steps * 0.05),
+                "run_initial_global_step": self.run_initial_global_step,
+                "optimizer_steps_this_run": self.optimizer_steps_this_run,
+                "warmup_steps": self.scheduler_warmup_steps,
                 "batch_size": self.batch_size,
                 "agent_action_token_budget": self.agent_action_token_budget,
                 "phase_balanced_fraction": self.phase_balanced_fraction,
@@ -1529,9 +1571,11 @@ class Wan22Trainer:
             training_mode = str(getattr(model, "training_mode", "")).strip().lower()
             saved_step = int(payload.get("global_step", -1))
             expected_steps = (
-                []
-                if self.eval_every <= 0
-                else list(range(self.eval_every, saved_step + 1, self.eval_every))
+                self._periodic_steps_after_start(
+                    self.eval_every,
+                    saved_step,
+                    self.run_initial_global_step,
+                )
             )
             evaluations = normalize_formal_evaluation_records(
                 evaluations,
@@ -1642,8 +1686,9 @@ class Wan22Trainer:
             self._weight_checkpoint_loaded_before_prepare = True
             logger.warning(
                 "Loaded explicit cross-treatment weights-only warm start before "
-                "ZeRO master construction; optimizer, scheduler, epoch, and step "
-                "start from zero."
+                "ZeRO master construction; optimizer, scheduler, and epoch start "
+                "fresh while the cumulative step starts at %d.",
+                self.run_initial_global_step,
             )
             return
         logger.info(
@@ -2979,7 +3024,13 @@ class Wan22Trainer:
         if self.max_steps is None:
             raise ValueError("`max_steps` must be set before entering the while-step training loop.")
 
-        logger.info("Starting training with max_steps=%d.", self.max_steps)
+        logger.info(
+            "Starting training at cumulative_step=%d with max_steps=%d and "
+            "optimizer_steps_this_run=%d.",
+            self.global_step,
+            self.max_steps,
+            self.optimizer_steps_this_run,
+        )
         self._set_train_data_epoch(self.epoch)
         data_iter = iter(self.train_loader)
         self.run_start_step = self.global_step
