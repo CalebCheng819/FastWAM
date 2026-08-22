@@ -62,4 +62,4 @@ model:
 
 wandb:
   group: robofactory-multirobot-vg1-hub1-gau0-cont50k
-  name: fastwam-n234-vg1h1gau0-cont50k-s42-32g-r1
+  name: fastwam-n234-vg1h1gau0-cont50k-s42-24g-r3

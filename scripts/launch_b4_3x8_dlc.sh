@@ -187,9 +187,9 @@ case "${TRAINING_TREATMENT}" in
     ;;
   n234_vg1h1gau0_cont50k)
     TASK_PROFILE="robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4"
-    SCALE_PROFILE="robofactory_multi_robot_32gpu_cont50k"
-    EXPECTED_NUM_MACHINES=4
-    EXPECTED_GLOBAL_WORLD_SIZE=32
+    SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
+    EXPECTED_NUM_MACHINES=3
+    EXPECTED_GLOBAL_WORLD_SIZE=24
     CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/step_005000/checkpoints/weights/step_005000.pt"
     CANONICAL_SOURCE_BYTES=12045923769
     USE_GAUSSIAN_CACHE=0

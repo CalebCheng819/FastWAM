@@ -133,8 +133,8 @@ def main() -> int:
             "use_gaussian": True,
         },
         "n234_vg1h1gau0_cont50k": {
-            "nodes": 4,
-            "world_size": 32,
+            "nodes": 3,
+            "world_size": 24,
             "source_weight": (
                 "/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/"
                 "FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/"
@@ -276,14 +276,14 @@ def main() -> int:
     elif args.treatment == "n234_vg1h1gau0_cont50k":
         description = (
             "N234 VG1H1GAU0 weights-only continuation: cumulative 5000 to "
-            "50000, 45000 fresh-optimizer updates, 4 workers x 8 GPUs"
+            "50000, 45000 fresh-optimizer updates, 3 workers x 8 GPUs"
         )
         tags = {
             "experiment": "N234-VG1H1GAU0-CONT50K",
             "initialization": "GAU0-step5000-weights-only",
             "optimizer": "fresh",
             "provenance": "stat-cmp-no-new-hash",
-            "topology": "4x8-world32",
+            "topology": "3x8-world24",
             "schedule": "cumulative-5000-to-50000-save-5000",
         }
     else:

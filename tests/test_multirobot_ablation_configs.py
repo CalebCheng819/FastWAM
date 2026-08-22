@@ -502,11 +502,11 @@ def test_n234_vg1h1gau1_cont50k_profile_is_cumulative_weight_warm_start(monkeypa
         )
 
 
-def test_n234_vg1h1gau0_cont50k_profile_is_world32_cumulative_warm_start(monkeypatch):
+def test_n234_vg1h1gau0_cont50k_profile_is_world24_cumulative_warm_start(monkeypatch):
     monkeypatch.setenv("FASTWAM_B4_BASE_CHECKPOINT", TEST_B4_BASE_CHECKPOINT)
     cfg = _compose_arm(
         "robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4",
-        "+scale=robofactory_multi_robot_32gpu_cont50k",
+        "+scale=robofactory_multi_robot_24gpu_cont50k",
     )
 
     assert cfg["resume"] == TEST_B4_BASE_CHECKPOINT

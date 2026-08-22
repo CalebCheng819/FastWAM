@@ -196,21 +196,20 @@ class T:
             self.assertNotIn("/checkpoints/state/", output)
             self.assertIn("B4 source import gate:", output)
 
-    def test_gau0_cont50k_contract_resolves_cumulative_world32_schedule(self) -> None:
+    def test_gau0_cont50k_contract_resolves_cumulative_world24_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env = self.fixture(Path(directory))
             env["FASTWAM_TRAINING_TREATMENT"] = "n234_vg1h1gau0_cont50k"
-            env["WORLD_SIZE"] = "4"
             result = self.run_launcher(env)
             self.assertEqual(result.returncode, 0, result.stderr)
             output = result.stdout
-            self.assertIn("--num_machines 4", output)
-            self.assertIn("--num_processes 32", output)
+            self.assertIn("--num_machines 3", output)
+            self.assertIn("--num_processes 24", output)
             self.assertIn(
                 "task=robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4",
                 output,
             )
-            self.assertIn("+scale=robofactory_multi_robot_32gpu_cont50k", output)
+            self.assertIn("+scale=robofactory_multi_robot_24gpu_cont50k", output)
             self.assertNotIn("data.train.gaussian_cache_dir=", output)
             self.assertNotIn("data.val.gaussian_cache_dir=", output)
             self.assertNotIn("/checkpoints/state/", output)
@@ -759,7 +758,7 @@ class T:
                 committed_launcher,
             )
 
-    def test_renderer_pins_gau0_cont50k_world32_cumulative_schedule(self) -> None:
+    def test_renderer_pins_gau0_cont50k_world24_cumulative_schedule(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "job.json"
@@ -789,7 +788,7 @@ class T:
             spec = request["JobSpecs"][0]
             self.assertEqual(request["Priority"], 7)
             self.assertEqual(request["JobMaxRunningTimeMinutes"], 20160)
-            self.assertEqual(spec["PodCount"], 4)
+            self.assertEqual(spec["PodCount"], 3)
             self.assertEqual(spec["ResourceConfig"]["GPU"], "8")
             self.assertEqual(
                 request["Envs"]["FASTWAM_TRAINING_TREATMENT"],
@@ -812,7 +811,7 @@ class T:
             self.assertNotIn("FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT", request["Envs"])
             self.assertIn("cumulative 5000 to 50000", request["Description"])
             self.assertEqual(request["Settings"]["Tags"]["optimizer"], "fresh")
-            self.assertEqual(request["Settings"]["Tags"]["topology"], "4x8-world32")
+            self.assertEqual(request["Settings"]["Tags"]["topology"], "3x8-world24")
             self.assertEqual(
                 request["Settings"]["Tags"]["initialization"],
                 "GAU0-step5000-weights-only",
