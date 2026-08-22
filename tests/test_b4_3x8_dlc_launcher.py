@@ -695,6 +695,11 @@ class T:
             manifest = json.loads(output.read_text(encoding="utf-8"))
             request = manifest["request"]
             spec = request["JobSpecs"][0]
+            self.assertEqual(
+                manifest["sdk_python"],
+                "/mnt/workspace/tools/pai-control-py311/"
+                "20260817-credentials1.0.10-dlc1.9.2/bin/python",
+            )
             self.assertEqual(request["Priority"], 7)
             self.assertEqual(request["JobMaxRunningTimeMinutes"], 20160)
             self.assertEqual(spec["PodCount"], 3)

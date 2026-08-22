@@ -297,8 +297,8 @@ def main() -> int:
         "submission_not_performed": True,
         "operation": "CreateJob",
         "sdk_python": (
-            "/mnt/workspace/tools/pai-control-py312/"
-            "20260717-credentials1.0.10-dlc1.9.2-aiworkspace8.2.0/bin/python"
+            "/mnt/workspace/tools/pai-control-py311/"
+            "20260817-credentials1.0.10-dlc1.9.2/bin/python"
         ),
         "region": "cn-beijing",
         "endpoint": "pai-dlc.cn-beijing.aliyuncs.com",
