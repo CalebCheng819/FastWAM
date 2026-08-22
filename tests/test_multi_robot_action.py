@@ -1481,6 +1481,9 @@ def test_native_v2_legacy_full_source_load_requires_exact_base_pointer(tmp_path)
     payload = _native_full_payload(source)
     payload.pop("state_kind")
     payload["base_checkpoint"] = legacy_base
+    payload["multi_robot_architecture"] = (
+        source._legacy_full_source_architecture_metadata_v1()
+    )
     checkpoint = tmp_path / "legacy-full.pt"
     torch.save(payload, checkpoint)
     target = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
@@ -1507,6 +1510,68 @@ def test_native_v2_legacy_full_source_load_requires_exact_base_pointer(tmp_path)
             validate_trainable_scope=False,
             allow_legacy_full_source_metadata=True,
             expected_legacy_base_checkpoint="/cpfs/user/example/wrong.pt",
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "extra", "wrong"],
+)
+def test_native_v2_legacy_full_source_rejects_metadata_drift(
+    tmp_path, mutation
+):
+    legacy_base = "/cpfs/user/example/legacy-base.pt"
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    payload = _native_full_payload(source)
+    payload.pop("state_kind")
+    payload["base_checkpoint"] = legacy_base
+    legacy_metadata = source._legacy_full_source_architecture_metadata_v1()
+    if mutation == "missing":
+        legacy_metadata.pop("hub_enabled")
+    elif mutation == "extra":
+        legacy_metadata["untracked_legacy_field"] = True
+    elif mutation == "wrong":
+        legacy_metadata["hub_token_ratio"] = 1.0
+    else:  # pragma: no cover - parameterization is exhaustive.
+        raise AssertionError(mutation)
+    payload["multi_robot_architecture"] = legacy_metadata
+    checkpoint = tmp_path / f"legacy-{mutation}.pt"
+    torch.save(payload, checkpoint)
+    target = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+
+    with pytest.raises(
+        ValueError,
+        match="Legacy full-source architecture metadata mismatch",
+    ):
+        target._load_checkpoint_with_role(
+            checkpoint,
+            load_role="base_dependency",
+            active_paths=set(),
+            validate_trainable_scope=False,
+            allow_legacy_full_source_metadata=True,
+            expected_legacy_base_checkpoint=legacy_base,
+        )
+
+
+def test_native_v2_legacy_sparse_architecture_requires_explicit_opt_in(tmp_path):
+    legacy_base = "/cpfs/user/example/legacy-base.pt"
+    source = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+    payload = _native_full_payload(source)
+    payload.pop("state_kind")
+    payload["base_checkpoint"] = legacy_base
+    payload["multi_robot_architecture"] = (
+        source._legacy_full_source_architecture_metadata_v1()
+    )
+    checkpoint = tmp_path / "legacy-without-opt-in.pt"
+    torch.save(payload, checkpoint)
+    target = _bare_checkpoint_model(training_mode="joint", trainable_scope="dit")
+
+    with pytest.raises(ValueError, match="metadata is missing"):
+        target._load_checkpoint_with_role(
+            checkpoint,
+            load_role="base_dependency",
+            active_paths=set(),
+            validate_trainable_scope=False,
         )
 
 

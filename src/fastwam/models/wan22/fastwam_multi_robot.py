@@ -1805,6 +1805,30 @@ class FastWAMMultiRobot(FastWAM):
             )
         return metadata
 
+    @staticmethod
+    def _legacy_full_source_architecture_metadata_v1() -> dict[str, Any]:
+        """Return the exact sparse metadata written by the audited 5k source.
+
+        This is not a general missing-metadata escape hatch.  The historical
+        N234-VG1H1 step-5000 checkpoint predates the current native-v2
+        architecture envelope, but carries a complete full ``mot`` state.  Its
+        seven metadata fields are pinned here so the compatibility path can
+        accept only that exact legacy envelope before the usual all-key and
+        all-shape tensor validation runs.
+        """
+
+        return {
+            "agent_encoding_mode": "geometry",
+            "agent_geometry_dim": 7,
+            "agent_geometry_schema": (
+                "robofactory_root_pose_xyz_canonical_qwqxqyqz_v1"
+            ),
+            "agent_set_representation": "native_variable_length_v1",
+            "hub_enabled": True,
+            "hub_token_policy": "ceil(hub_token_ratio*num_agents)",
+            "hub_token_ratio": 2.0,
+        }
+
     def _validate_gaussian_v2_state(
         self,
         payload: dict[str, Any],
@@ -1866,6 +1890,7 @@ class FastWAMMultiRobot(FastWAM):
         *,
         validate_treatment: bool = True,
         validate_trainable_scope: bool = True,
+        allow_legacy_full_source_metadata: bool = False,
     ) -> None:
         if payload.get("format") != "fastwam_multi_robot_v2":
             return
@@ -1894,6 +1919,31 @@ class FastWAMMultiRobot(FastWAM):
         if not isinstance(received, dict):
             raise ValueError(f"v2 checkpoint is missing multi_robot_architecture: {path}")
         expected = self._multi_robot_architecture_metadata()
+        if allow_legacy_full_source_metadata:
+            legacy_expected = self._legacy_full_source_architecture_metadata_v1()
+            if set(received) != set(expected):
+                missing = sorted(set(legacy_expected) - set(received))
+                unexpected = sorted(set(received) - set(legacy_expected))
+                mismatches = {
+                    key: (legacy_expected[key], received[key])
+                    for key in sorted(set(received) & set(legacy_expected))
+                    if received[key] != legacy_expected[key]
+                }
+                if missing or unexpected or mismatches:
+                    raise ValueError(
+                        "Legacy full-source architecture metadata mismatch: "
+                        f"missing={missing}, unexpected={unexpected}, "
+                        f"value_mismatches={mismatches} in {path}"
+                    )
+                for key, legacy_value in legacy_expected.items():
+                    current_value = expected.get(key)
+                    if current_value != legacy_value:
+                        raise ValueError(
+                            "Legacy full-source architecture is incompatible with "
+                            f"the current model for {key}: expected {current_value!r}, "
+                            f"got {legacy_value!r} in {path}"
+                        )
+                return
         for key, expected_value in expected.items():
             if key not in received:
                 raise ValueError(f"Checkpoint metadata is missing {key!r}: {path}")
@@ -2071,6 +2121,9 @@ class FastWAMMultiRobot(FastWAM):
                 checkpoint_path,
                 validate_treatment=load_role == "top_level",
                 validate_trainable_scope=validate_trainable_scope,
+                allow_legacy_full_source_metadata=(
+                    allow_legacy_full_source_metadata
+                ),
             )
             state_kind = self._native_checkpoint_state_kind(
                 payload,
