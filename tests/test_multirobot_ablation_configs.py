@@ -502,6 +502,43 @@ def test_n234_vg1h1gau1_cont50k_profile_is_cumulative_weight_warm_start(monkeypa
         )
 
 
+def test_n234_vg1h1gau0_cont50k_profile_is_world32_cumulative_warm_start(monkeypatch):
+    monkeypatch.setenv("FASTWAM_B4_BASE_CHECKPOINT", TEST_B4_BASE_CHECKPOINT)
+    cfg = _compose_arm(
+        "robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4",
+        "+scale=robofactory_multi_robot_32gpu_cont50k",
+    )
+
+    assert cfg["resume"] == TEST_B4_BASE_CHECKPOINT
+    assert cfg["weights_only_warm_start"] == {
+        "enabled": True,
+        "expected_source_training_mode": "joint",
+        "expected_source_trainable_scope": "dit",
+        "expected_source_state_kind": "full",
+    }
+    assert cfg["run_initial_global_step"] == 5000
+    assert cfg["max_steps"] == 50000
+    assert cfg["save_every"] == 5000
+    assert cfg["eval_every"] == 5000
+    assert cfg["batch_size"] == 1
+    assert cfg["gradient_accumulation_steps"] == 1
+    assert cfg["learning_rate"] == 1.0e-4
+    assert cfg["trainable_scope"] == "dit"
+    assert cfg["model"]["training_mode"] == "joint"
+    assert cfg["model"]["action_dit_config"]["hub_enabled"] is True
+    assert cfg["model"]["action_dit_config"]["enable_gaussian"] is False
+    assert cfg["checkpoint_state_kind"] == "full"
+    assert cfg["save_training_state"] is True
+    assert cfg["save_final_checkpoint"] is True
+    assert cfg["wandb"]["group"] == "robofactory-multirobot-vg1-hub1-gau0-cont50k"
+
+    for split in ("train", "val"):
+        assert cfg["data"][split]["required_agent_counts"] == [2, 3, 4]
+        assert cfg["data"][split]["load_future_video"] is True
+        assert cfg["data"][split]["gaussian_cache_dir"] is None
+        assert cfg["data"][split]["gaussian_cache_verify"] is None
+
+
 def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):
     _set_gaussian_env(monkeypatch)
     cfg = _compose_arm("robofactory_multi_robot_vg1_hub1_gau1_224_1e-4")

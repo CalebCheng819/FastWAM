@@ -41,6 +41,7 @@ class B4LauncherTests(unittest.TestCase):
         for task_name in (
             "robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5.yaml",
             "robofactory_multi_robot_vg1_hub1_gau1_cont50k_224_1e-4.yaml",
+            "robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4.yaml",
         ):
             (repo / "configs" / "task" / task_name).write_text(
                 (REPO / "configs" / "task" / task_name).read_text(encoding="utf-8"),
@@ -49,6 +50,7 @@ class B4LauncherTests(unittest.TestCase):
         for scale_name in (
             "robofactory_multi_robot_24gpu_b4.yaml",
             "robofactory_multi_robot_24gpu_cont50k.yaml",
+            "robofactory_multi_robot_32gpu_cont50k.yaml",
         ):
             (repo / "configs" / "scale" / scale_name).write_text(
                 (REPO / "configs" / "scale" / scale_name).read_text(encoding="utf-8"),
@@ -191,6 +193,26 @@ class T:
             )
             self.assertIn("+scale=robofactory_multi_robot_24gpu_cont50k", output)
             self.assertNotIn("phase_balanced_fraction=", output)
+            self.assertNotIn("/checkpoints/state/", output)
+            self.assertIn("B4 source import gate:", output)
+
+    def test_gau0_cont50k_contract_resolves_cumulative_world32_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_TRAINING_TREATMENT"] = "n234_vg1h1gau0_cont50k"
+            env["WORLD_SIZE"] = "4"
+            result = self.run_launcher(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = result.stdout
+            self.assertIn("--num_machines 4", output)
+            self.assertIn("--num_processes 32", output)
+            self.assertIn(
+                "task=robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4",
+                output,
+            )
+            self.assertIn("+scale=robofactory_multi_robot_32gpu_cont50k", output)
+            self.assertNotIn("data.train.gaussian_cache_dir=", output)
+            self.assertNotIn("data.val.gaussian_cache_dir=", output)
             self.assertNotIn("/checkpoints/state/", output)
             self.assertIn("B4 source import gate:", output)
 
@@ -585,6 +607,13 @@ class T:
             self.assertEqual(request["JobMaxRunningTimeMinutes"], 10080)
             self.assertEqual(request["SuccessPolicy"], "AllWorkers")
             self.assertEqual(request["Envs"]["FASTWAM_TRAINING_TREATMENT"], "b4")
+            self.assertEqual(
+                request["Envs"]["FASTWAM_B4_SOURCE_WEIGHT"],
+                "/oss-chengjuntao/artifacts/"
+                "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-"
+                "beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/"
+                "checkpoints/weights/step_005000.pt",
+            )
             self.assertEqual(manifest["training_treatment"], "b4")
             self.assertEqual(request["Envs"]["FASTWAM_B4_OUTPUT_DIR"], f"/oss-chengjuntao/artifacts/{run_id}")
             self.assertNotIn("FASTWAM_B4_TEST_MODE", request["Envs"])
@@ -712,8 +741,82 @@ class T:
                 manifest["training_treatment"],
                 "n234_vg1h1gau1_cont50k",
             )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_B4_SOURCE_WEIGHT"],
+                "/oss-chengjuntao/artifacts/"
+                "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-"
+                "beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/"
+                "checkpoints/weights/step_005000.pt",
+            )
             self.assertIn("cumulative 5000 to 50000", request["Description"])
             self.assertEqual(request["Settings"]["Tags"]["optimizer"], "fresh")
+            self.assertEqual(
+                request["Settings"]["Tags"]["schedule"],
+                "cumulative-5000-to-50000-save-5000",
+            )
+            self.assertEqual(
+                base64.b64decode(manifest["launcher_payload_base64"]),
+                committed_launcher,
+            )
+
+    def test_renderer_pins_gau0_cont50k_world32_cumulative_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "job.json"
+            bundle, code_commit, committed_launcher = self.committed_launcher_bundle(root)
+            run_id = "fastwam-n234-vg1h1gau0-cont50k-test"
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id", run_id,
+                "--attempt-id", "attempt-001",
+                "--treatment", "n234_vg1h1gau0_cont50k",
+                "--output", str(output),
+                "--bootstrap-script", "/oss-chengjuntao/source/scripts/bootstrap_offline_training_env.sh",
+                "--offline-env-source-root", "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest", "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit", "4" * 40,
+                "--offline-source-bundle-relative-path", "source/FastWAM.bundle",
+                "--base-python", "/usr/local/bin/python3.10",
+                "--b4-source-bundle", str(bundle),
+                "--b4-code-commit", code_commit,
+                "--allow-local-bundle-for-tests",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            request = manifest["request"]
+            spec = request["JobSpecs"][0]
+            self.assertEqual(request["Priority"], 7)
+            self.assertEqual(request["JobMaxRunningTimeMinutes"], 20160)
+            self.assertEqual(spec["PodCount"], 4)
+            self.assertEqual(spec["ResourceConfig"]["GPU"], "8")
+            self.assertEqual(
+                request["Envs"]["FASTWAM_TRAINING_TREATMENT"],
+                "n234_vg1h1gau0_cont50k",
+            )
+            self.assertEqual(manifest["training_treatment"], "n234_vg1h1gau0_cont50k")
+            self.assertEqual(
+                request["Envs"]["FASTWAM_B4_SOURCE_WEIGHT"],
+                "/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/"
+                "FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/"
+                "step_005000/checkpoints/weights/step_005000.pt",
+            )
+            self.assertEqual(
+                request["Envs"]["FASTWAM_B4_SOURCE_WEIGHT_BYTES"],
+                "12045923769",
+            )
+            self.assertEqual(request["Envs"]["NPROC_PER_NODE"], "8")
+            self.assertNotIn("FASTWAM_B4_OSS_SOURCE_ROOT", request["Envs"])
+            self.assertNotIn("FASTWAM_B4_OSS_ALLOWLIST", request["Envs"])
+            self.assertNotIn("FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT", request["Envs"])
+            self.assertIn("cumulative 5000 to 50000", request["Description"])
+            self.assertEqual(request["Settings"]["Tags"]["optimizer"], "fresh")
+            self.assertEqual(request["Settings"]["Tags"]["topology"], "4x8-world32")
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "GAU0-step5000-weights-only",
+            )
             self.assertEqual(
                 request["Settings"]["Tags"]["schedule"],
                 "cumulative-5000-to-50000-save-5000",

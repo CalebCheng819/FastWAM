@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Persistent, fail-closed launcher for the B4 3 Worker x 8 GPU treatment.
-# The outer DLC command runs once per worker. It stages the GAU1 weight before
-# spawning the eight local Accelerate ranks, so every child reads node-local
-# storage and no rank can accidentally restore the old 32-GPU optimizer state.
+# Persistent, fail-closed launcher for the formal multi-robot DLC treatments.
+# The outer DLC command runs once per worker. It stages the selected weights
+# before spawning the eight local Accelerate ranks, so every child reads
+# node-local storage and no rank can accidentally restore old optimizer state.
 
 die() {
   printf 'B4 launcher error: %s\n' "$*" >&2
@@ -45,7 +45,7 @@ require_env FASTWAM_B4_ATTEMPT_ID
 
 # PAI injects node topology through these names.  Preserve the outer worker
 # values before any helper can mutate the environment; they are deliberately
-# removed immediately before Accelerate creates its own 24-rank world.
+# removed immediately before Accelerate creates the treatment's GPU-rank world.
 NUM_MACHINES="${WORLD_SIZE:-}"
 MACHINE_RANK="${RANK:-}"
 GPUS_PER_NODE="${NPROC_PER_NODE:-}"
@@ -156,13 +156,11 @@ RUN_ID="${RUN_ID:-}"
 ATTEMPT_ID="${FASTWAM_B4_ATTEMPT_ID:-}"
 REPO_ROOT="${FASTWAM_B4_REPO_ROOT:-}"
 OUTPUT_DIR="${FASTWAM_B4_OUTPUT_DIR:-}"
-SOURCE_WEIGHT="${FASTWAM_B4_SOURCE_WEIGHT:-/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt}"
-EXPECTED_WEIGHT_BYTES="${FASTWAM_B4_SOURCE_WEIGHT_BYTES:-12047213728}"
 DATASET_ROOT="${FASTWAM_B4_DATASET_ROOT:-/cpfs/user/chengjuntao/datasets/robofactory_multi_robot}"
 STATS_SOURCE_ROOT="${DATASET_ROOT}"
 STATS_PATH="${FASTWAM_B4_STATS_PATH:-${DATASET_ROOT}/fastwam_multi_robot_n234_train_s42_stats_v2.json}"
 TEXT_CACHE_DIR="${FASTWAM_B4_TEXT_CACHE_DIR:-${DATASET_ROOT}/text_embeds_cache_n234}"
-GAUSSIAN_CACHE_DIR="${FASTWAM_B4_GAUSSIAN_CACHE_DIR:-/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/compact-s42-13x28x40-fp16-meanalpha-v2}"
+GAUSSIAN_CACHE_DIR="${FASTWAM_B4_GAUSSIAN_CACHE_DIR:-}"
 MODEL_CACHE_ROOT="${DIFFSYNTH_MODEL_BASE_PATH:-}"
 VAE_PATH="${FASTWAM_LOCAL_VAE_PATH:-}"
 PYTHON_BIN="${FASTWAM_B4_PYTHON:-}"
@@ -172,15 +170,39 @@ case "${TRAINING_TREATMENT}" in
   b4)
     TASK_PROFILE="robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5"
     SCALE_PROFILE="robofactory_multi_robot_24gpu_b4"
+    EXPECTED_NUM_MACHINES=3
+    EXPECTED_GLOBAL_WORLD_SIZE=24
+    CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
+    CANONICAL_SOURCE_BYTES=12047213728
+    USE_GAUSSIAN_CACHE=1
     ;;
   n234_vg1h1gau1_cont50k)
     TASK_PROFILE="robofactory_multi_robot_vg1_hub1_gau1_cont50k_224_1e-4"
     SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
+    EXPECTED_NUM_MACHINES=3
+    EXPECTED_GLOBAL_WORLD_SIZE=24
+    CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
+    CANONICAL_SOURCE_BYTES=12047213728
+    USE_GAUSSIAN_CACHE=1
+    ;;
+  n234_vg1h1gau0_cont50k)
+    TASK_PROFILE="robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4"
+    SCALE_PROFILE="robofactory_multi_robot_32gpu_cont50k"
+    EXPECTED_NUM_MACHINES=4
+    EXPECTED_GLOBAL_WORLD_SIZE=32
+    CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/step_005000/checkpoints/weights/step_005000.pt"
+    CANONICAL_SOURCE_BYTES=12045923769
+    USE_GAUSSIAN_CACHE=0
     ;;
   *)
     die "unsupported FASTWAM_TRAINING_TREATMENT: ${TRAINING_TREATMENT}"
     ;;
 esac
+SOURCE_WEIGHT="${FASTWAM_B4_SOURCE_WEIGHT:-${CANONICAL_SOURCE}}"
+EXPECTED_WEIGHT_BYTES="${FASTWAM_B4_SOURCE_WEIGHT_BYTES:-${CANONICAL_SOURCE_BYTES}}"
+if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+  GAUSSIAN_CACHE_DIR="${GAUSSIAN_CACHE_DIR:-/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z/compact-s42-13x28x40-fp16-meanalpha-v2}"
+fi
 
 require_env RUN_ID
 require_env FASTWAM_B4_ATTEMPT_ID
@@ -190,15 +212,15 @@ require_env FASTWAM_B4_PYTHON
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
 is_safe_id "${ATTEMPT_ID}" || die "FASTWAM_B4_ATTEMPT_ID is not a safe identifier: ${ATTEMPT_ID}"
 
-[[ "${NUM_MACHINES}" == "3" ]] || die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
+[[ "${NUM_MACHINES}" == "${EXPECTED_NUM_MACHINES}" ]] || die "WORLD_SIZE must be the DLC worker count ${EXPECTED_NUM_MACHINES}, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
-is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,2], got ${MACHINE_RANK:-unset}"
-((10#${MACHINE_RANK} < 3)) || die "RANK must be in [0,2], got ${MACHINE_RANK}"
+is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,$((EXPECTED_NUM_MACHINES - 1))], got ${MACHINE_RANK:-unset}"
+((10#${MACHINE_RANK} < EXPECTED_NUM_MACHINES)) || die "RANK must be in [0,$((EXPECTED_NUM_MACHINES - 1))], got ${MACHINE_RANK}"
 [[ -z "${LOCAL_RANK:-}" || "${LOCAL_RANK}" == "0" ]] || die "outer DLC command must run only once per node (LOCAL_RANK=0)"
 is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a non-loopback address shared by all workers"
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || die "MASTER_PORT must be in [1,65535]"
-[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 24 ]] || die "global world size must be exactly 24"
+[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq ${EXPECTED_GLOBAL_WORLD_SIZE} ]] || die "global world size must be exactly ${EXPECTED_GLOBAL_WORLD_SIZE}"
 
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || die "FASTWAM_B4_DRY_RUN must be 0 or 1"
 
@@ -213,7 +235,7 @@ fi
 [[ -f "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" ]] || die "missing ZeRO-2 Accelerate config"
 [[ -f "${REPO_ROOT}/src/fastwam/trainer.py" ]] || die "missing trainer source"
 [[ -f "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" ]] || die "missing formal task profile"
-[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal 24-GPU scale profile"
+[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal scale profile"
 if [[ "${TEST_MODE}" == "1" ]]; then
   [[ "${OUTPUT_DIR}" == /* ]] || die "test output must be an absolute path"
 else
@@ -224,13 +246,12 @@ else
     die "active B4 source checkout is dirty"
 fi
 
-CANONICAL_SOURCE="/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
 if [[ "${TEST_MODE}" != "1" ]]; then
-  [[ "${SOURCE_WEIGHT}" == "${CANONICAL_SOURCE}" ]] || die "production source must be the audited GAU1 step_005000 weight file"
-  [[ "${EXPECTED_WEIGHT_BYTES}" == "12047213728" ]] || die "production source byte count must remain 12047213728"
+  [[ "${SOURCE_WEIGHT}" == "${CANONICAL_SOURCE}" ]] || die "production source must be the audited ${TRAINING_TREATMENT} step_005000 weight file"
+  [[ "${EXPECTED_WEIGHT_BYTES}" == "${CANONICAL_SOURCE_BYTES}" ]] || die "production source byte count must remain ${CANONICAL_SOURCE_BYTES}"
 fi
 [[ "${SOURCE_WEIGHT}" == *.pt ]] || die "source must be a weight .pt file, not a training-state directory"
-[[ "${SOURCE_WEIGHT}" != */checkpoints/state/* ]] || die "32-GPU optimizer/training state is forbidden"
+[[ "${SOURCE_WEIGHT}" != */checkpoints/state/* ]] || die "optimizer/training state is forbidden for weights-only warm start"
 [[ -f "${SOURCE_WEIGHT}" && ! -L "${SOURCE_WEIGHT}" ]] || die "source weight must be an existing regular non-symlink file"
 is_uint "${EXPECTED_WEIGHT_BYTES}" || die "FASTWAM_B4_SOURCE_WEIGHT_BYTES must be a positive integer"
 ((10#${EXPECTED_WEIGHT_BYTES} > 0)) || die "FASTWAM_B4_SOURCE_WEIGHT_BYTES must be positive"
@@ -259,7 +280,7 @@ except ValueError as exc:
 print(f"B4 source import gate: origin={origin} expected_root={expected}")
 PY
 
-# Stage the completed 32-GPU job's two published file selections without
+# Stage the audited published file selections without
 # calculating a new B4 digest.  The historical manifest files are used only as
 # relative-path allowlists: their first field is ignored.  Every selected file
 # must be a regular non-symlink below the declared source root, and the helper
@@ -271,14 +292,16 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   require_exact_env FASTWAM_B4_CPFS_SOURCE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao"
   require_exact_env FASTWAM_B4_STATS_SOURCE_ROOT "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
   require_exact_env FASTWAM_B4_CPFS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/cpfs-whole-file-bundle.sha256"
-  require_exact_env FASTWAM_B4_OSS_SOURCE_ROOT "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
-  require_exact_env FASTWAM_B4_OSS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"
   require_exact_env FASTWAM_LOCAL_DATASET_RELATIVE_ROOT "datasets/robofactory_multi_robot"
   require_exact_env FASTWAM_LOCAL_STATS_RELATIVE_PATH "datasets/robofactory_multi_robot/fastwam_multi_robot_n234_train_s42_stats_v2.json"
   require_exact_env FASTWAM_LOCAL_TEXT_EMBEDS_RELATIVE_ROOT "datasets/robofactory_multi_robot/text_embeds_cache_n234"
   require_exact_env FASTWAM_LOCAL_MODEL_CACHE_RELATIVE_ROOT "checkpoints/FastWAM/model-cache"
   require_exact_env FASTWAM_LOCAL_VAE_RELATIVE_PATH "checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
-  require_exact_env FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT "compact-s42-13x28x40-fp16-meanalpha-v2"
+  if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+    require_exact_env FASTWAM_B4_OSS_SOURCE_ROOT "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
+    require_exact_env FASTWAM_B4_OSS_ALLOWLIST "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"
+    require_exact_env FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT "compact-s42-13x28x40-fp16-meanalpha-v2"
+  fi
   require_exact_env FASTWAM_LOCAL_EXPECTED_H5_FILES "24"
   # shellcheck source=/dev/null
   source "${REPO_ROOT}/scripts/dlc_preflight.sh"
@@ -300,16 +323,20 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
     --destination "${FASTWAM_LOCAL_CPFS_CACHE_DIR}" \
     --run-id "${RUN_ID}" --attempt-id "${ATTEMPT_ID}" --source-label cpfs || \
     die "CPFS stat-cmp node-local cache preparation failed"
-  "${PYTHON_BIN}" "${REPO_ROOT}/scripts/b4_stat_cmp_cache.py" \
-    --source-root "${FASTWAM_B4_OSS_SOURCE_ROOT}" \
-    --allowlist "${FASTWAM_B4_OSS_ALLOWLIST}" \
-    --destination "${FASTWAM_LOCAL_OSS_CACHE_DIR}" \
-    --run-id "${RUN_ID}" --attempt-id "${ATTEMPT_ID}" --source-label oss || \
-    die "OSS stat-cmp node-local cache preparation failed"
+  if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+    "${PYTHON_BIN}" "${REPO_ROOT}/scripts/b4_stat_cmp_cache.py" \
+      --source-root "${FASTWAM_B4_OSS_SOURCE_ROOT}" \
+      --allowlist "${FASTWAM_B4_OSS_ALLOWLIST}" \
+      --destination "${FASTWAM_LOCAL_OSS_CACHE_DIR}" \
+      --run-id "${RUN_ID}" --attempt-id "${ATTEMPT_ID}" --source-label oss || \
+      die "OSS stat-cmp node-local cache preparation failed"
+  fi
   [[ -f "${FASTWAM_LOCAL_CPFS_CACHE_DIR}/READY.stat-cmp.json" ]] || \
     die "CPFS stat-cmp READY contract is missing"
-  [[ -f "${FASTWAM_LOCAL_OSS_CACHE_DIR}/READY.stat-cmp.json" ]] || \
-    die "OSS stat-cmp READY contract is missing"
+  if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+    [[ -f "${FASTWAM_LOCAL_OSS_CACHE_DIR}/READY.stat-cmp.json" ]] || \
+      die "OSS stat-cmp READY contract is missing"
+  fi
 
   # Preserve the logical source root declared by the published stats before
   # rebinding reads to the attempt-owned node-local copy. The physical OSS
@@ -321,7 +348,9 @@ if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   TEXT_CACHE_DIR="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_TEXT_EMBEDS_RELATIVE_ROOT}"
   MODEL_CACHE_ROOT="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_MODEL_CACHE_RELATIVE_ROOT}"
   VAE_PATH="${FASTWAM_LOCAL_CPFS_CACHE_DIR}/${FASTWAM_LOCAL_VAE_RELATIVE_PATH}"
-  GAUSSIAN_CACHE_DIR="${FASTWAM_LOCAL_OSS_CACHE_DIR}/${FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT}"
+  if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+    GAUSSIAN_CACHE_DIR="${FASTWAM_LOCAL_OSS_CACHE_DIR}/${FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT}"
+  fi
   export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_CACHE_ROOT}"
   export FASTWAM_LOCAL_VAE_PATH="${VAE_PATH}"
 fi
@@ -330,7 +359,9 @@ fi
 [[ -f "${STATS_PATH}" && ! -L "${STATS_PATH}" ]] || \
   die "normalization stats must be an existing regular non-symlink file"
 [[ -d "${TEXT_CACHE_DIR}" ]] || die "text embedding cache does not exist: ${TEXT_CACHE_DIR}"
-[[ -d "${GAUSSIAN_CACHE_DIR}" ]] || die "Gaussian cache does not exist: ${GAUSSIAN_CACHE_DIR}"
+if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+  [[ -d "${GAUSSIAN_CACHE_DIR}" ]] || die "Gaussian cache does not exist: ${GAUSSIAN_CACHE_DIR}"
+fi
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
   [[ -d "${MODEL_CACHE_ROOT}" ]] || die "DiffSynth model cache is missing: ${MODEL_CACHE_ROOT}"
   [[ -f "${VAE_PATH}" && ! -L "${VAE_PATH}" ]] || \
@@ -469,7 +500,7 @@ if treatment == "b4":
         "offline_eval_num_samples": 12,
     }
     expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
-elif treatment == "n234_vg1h1gau1_cont50k":
+elif treatment in ("n234_vg1h1gau1_cont50k", "n234_vg1h1gau0_cont50k"):
     task_expected = {
         "trainable_scope": "dit",
         "batch_size": 1,
@@ -491,8 +522,6 @@ elif treatment == "n234_vg1h1gau1_cont50k":
         "weights_only_warm_start.expected_source_state_kind": "full",
         "data.train.load_future_video": True,
         "data.val.load_future_video": True,
-        "data.train.gaussian_cache_verify": "stat_cmp",
-        "data.val.gaussian_cache_verify": "stat_cmp",
         "data.train.gaussian_cache_expected_manifest_sha256": None,
         "data.train.gaussian_cache_expected_selection_sha256": None,
         "data.train.gaussian_cache_expected_source_identity_sha256": None,
@@ -501,7 +530,6 @@ elif treatment == "n234_vg1h1gau1_cont50k":
         "data.val.gaussian_cache_expected_source_identity_sha256": None,
         "model.training_mode": "joint",
         "model.action_dit_config.hub_enabled": True,
-        "model.action_dit_config.enable_gaussian": True,
         "model.loss.lambda_video": 1.0,
         "model.loss.lambda_action": 1.0,
         "model.loss.b4.enabled": False,
@@ -520,7 +548,22 @@ elif treatment == "n234_vg1h1gau1_cont50k":
         "eval_every": 5000,
         "offline_eval_num_samples": 12,
     }
-    expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
+    if treatment == "n234_vg1h1gau1_cont50k":
+        task_expected.update({
+            "data.train.gaussian_cache_verify": "stat_cmp",
+            "data.val.gaussian_cache_verify": "stat_cmp",
+            "model.action_dit_config.enable_gaussian": True,
+        })
+        expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
+    else:
+        task_expected.update({
+            "data.train.gaussian_cache_dir": None,
+            "data.val.gaussian_cache_dir": None,
+            "data.train.gaussian_cache_verify": None,
+            "data.val.gaussian_cache_verify": None,
+            "model.action_dit_config.enable_gaussian": False,
+        })
+        expected_parent = "robofactory_multi_robot_vg1_hub1_gau0_224_1e-4"
 else:
     raise SystemExit(f"unsupported treatment: {treatment}")
 for label, mapping, expected in (
@@ -598,9 +641,9 @@ if [[ "${TEST_MODE}" != "1" ]]; then
 fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
-workers=3
-gpus_per_worker=8
-global_world_size=24
+workers=${EXPECTED_NUM_MACHINES}
+gpus_per_worker=${GPUS_PER_NODE}
+global_world_size=${EXPECTED_GLOBAL_WORLD_SIZE}
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
@@ -610,14 +653,14 @@ if [[ "${TRAINING_TREATMENT}" == "b4" ]]; then
   RESERVATION_BODY+="stage_steps=2500
 "
 else
-  RESERVATION_BODY+="training_treatment=n234_vg1h1gau1_cont50k
+  RESERVATION_BODY+="training_treatment=${TRAINING_TREATMENT}
 initial_global_step=5000
 target_global_step=50000
 optimizer_steps_this_run=45000
 per_device_batch_size=1
 gradient_accumulation_steps=1
 source_global_batch_size=32
-global_batch_size=24
+global_batch_size=${EXPECTED_GLOBAL_WORLD_SIZE}
 learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
@@ -656,17 +699,17 @@ if [[ "${DRY_RUN}" == "0" ]]; then
   PARTIAL_WEIGHT="${PARTIAL_ATTEMPT}/step_005000.pt"
   SOURCE_STAT_BEFORE="$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")"
   SOURCE_MTIME="$(stat -Lc '%Y' -- "${SOURCE_WEIGHT}")"
-  cp -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || die "failed to copy GAU1 weight to node-local storage"
+  cp -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || die "failed to copy source weight to node-local storage"
   [[ -f "${PARTIAL_WEIGHT}" && ! -L "${PARTIAL_WEIGHT}" ]] || \
     die "node-local checkpoint copy is not a regular non-symlink file"
   [[ "$(stat -c '%s' -- "${PARTIAL_WEIGHT}")" == "${EXPECTED_WEIGHT_BYTES}" ]] || \
     die "node-local checkpoint copy has the wrong byte count"
   [[ "$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")" == "${SOURCE_STAT_BEFORE}" ]] || \
-    die "GAU1 source weight changed while staging"
+    die "source weight changed while staging"
   cmp -s -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || \
-    die "node-local checkpoint bytes differ from the GAU1 source"
+    die "node-local checkpoint bytes differ from the source"
   [[ "$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")" == "${SOURCE_STAT_BEFORE}" ]] || \
-    die "GAU1 source weight changed during byte comparison"
+    die "source weight changed during byte comparison"
   printf 'provenance_mode=stat_cmp\nrun_id=%s\nattempt_id=%s\nsource_path=%s\ndestination_path=%s\nbytes=%s\nsource_mtime_epoch=%s\nfile_count=1\n' \
     "${RUN_ID}" "${ATTEMPT_ID}" "${SOURCE_WEIGHT}" "${LOCAL_WEIGHT}" \
     "${EXPECTED_WEIGHT_BYTES}" "${SOURCE_MTIME}" >"${PARTIAL_ATTEMPT}/.ready"
@@ -678,19 +721,23 @@ else
   printf 'B4 dry-run: no output reservation, checkpoint copy, GPU query, or training was performed.\n'
 fi
 
-# B4 binds the existing Gaussian cache by its audited path and embedded
-# metadata.  The formal B4 task intentionally disables the old SHA env gates.
-export FASTWAM_GAUSSIAN_CACHE_DIR="${GAUSSIAN_CACHE_DIR}"
+# Gaussian-enabled treatments bind the audited cache by path and embedded
+# metadata. GAU0 must not inherit a stale cache selector from the environment.
+if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+  export FASTWAM_GAUSSIAN_CACHE_DIR="${GAUSSIAN_CACHE_DIR}"
+else
+  unset FASTWAM_GAUSSIAN_CACHE_DIR
+fi
 export FASTWAM_B4_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
 
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
   --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml"
-  --num_machines 3
+  --num_machines "${EXPECTED_NUM_MACHINES}"
   --machine_rank "${MACHINE_RANK}"
   --main_process_ip "${MASTER_HOST}"
   --main_process_port "${MASTER_TCP_PORT}"
-  --num_processes 24
+  --num_processes "${EXPECTED_GLOBAL_WORLD_SIZE}"
   --deepspeed_multinode_launcher standard
   "${REPO_ROOT}/scripts/train.py"
   "task=${TASK_PROFILE}"
@@ -703,11 +750,15 @@ COMMAND=(
   "data.val.stats_source_root=${STATS_SOURCE_ROOT}"
   "data.train.text_embedding_cache_dir=${TEXT_CACHE_DIR}"
   "data.val.text_embedding_cache_dir=${TEXT_CACHE_DIR}"
-  "data.train.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"
-  "data.val.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"
   "output_dir=${OUTPUT_DIR}"
   wandb.name="${RUN_ID}"
 )
+if [[ "${USE_GAUSSIAN_CACHE}" == "1" ]]; then
+  COMMAND+=(
+    "data.train.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"
+    "data.val.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"
+  )
+fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   printf 'B4 resolved command:'
@@ -716,10 +767,10 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-# PAI's outer-worker topology describes three node coordinators, whereas
-# Accelerate is about to construct a fresh 24-process topology.  Keeping the
-# injected rank variables would make child rank discovery ambiguous.  All
-# values needed by Accelerate are already frozen into COMMAND above.
+# PAI's outer-worker topology describes node coordinators, whereas Accelerate
+# is about to construct the treatment's GPU-process topology. Keeping injected
+# rank variables would make child rank discovery ambiguous. All values needed
+# by Accelerate are already frozen into COMMAND above.
 unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK
 
 cd -- "${REPO_ROOT}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC CreateJob manifest for FastWAM 3x8."""
+"""Render, but never submit, a PAI DLC CreateJob manifest for FastWAM."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--b4-code-commit", required=True)
     parser.add_argument(
         "--treatment",
-        choices=("b4", "n234_vg1h1gau1_cont50k"),
+        choices=("b4", "n234_vg1h1gau1_cont50k", "n234_vg1h1gau0_cont50k"),
         default="b4",
     )
     parser.add_argument("--max-running-minutes", type=int)
@@ -107,10 +107,48 @@ def launcher_from_bundle(bundle: pathlib.Path, commit: str) -> bytes:
 
 def main() -> int:
     args = parse_args()
+    contracts = {
+        "b4": {
+            "nodes": 3,
+            "world_size": 24,
+            "source_weight": (
+                "/oss-chengjuntao/artifacts/"
+                "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-"
+                "beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/"
+                "checkpoints/weights/step_005000.pt"
+            ),
+            "source_weight_bytes": "12047213728",
+            "use_gaussian": True,
+        },
+        "n234_vg1h1gau1_cont50k": {
+            "nodes": 3,
+            "world_size": 24,
+            "source_weight": (
+                "/oss-chengjuntao/artifacts/"
+                "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-"
+                "beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/"
+                "checkpoints/weights/step_005000.pt"
+            ),
+            "source_weight_bytes": "12047213728",
+            "use_gaussian": True,
+        },
+        "n234_vg1h1gau0_cont50k": {
+            "nodes": 4,
+            "world_size": 32,
+            "source_weight": (
+                "/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/"
+                "FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/"
+                "step_005000/checkpoints/weights/step_005000.pt"
+            ),
+            "source_weight_bytes": "12045923769",
+            "use_gaussian": False,
+        },
+    }
+    contract = contracts[args.treatment]
     max_running_minutes = args.max_running_minutes
     if max_running_minutes is None:
         max_running_minutes = (
-            20160 if args.treatment == "n234_vg1h1gau1_cont50k" else 10080
+            20160 if args.treatment != "b4" else 10080
         )
     if not SAFE_ID.fullmatch(args.run_id) or not SAFE_ID.fullmatch(args.attempt_id):
         raise SystemExit("run-id and attempt-id must be safe unique identifiers")
@@ -174,6 +212,8 @@ def main() -> int:
         "FASTWAM_B4_LOCAL_SOURCE_ROOT": "/tmp/fastwam-b4-source-checkouts",
         "FASTWAM_B4_PROVENANCE_MODE": "stat_cmp",
         "FASTWAM_B4_INPUT_CACHE_ROOT": "/tmp/fastwam-b4-input-cache",
+        "FASTWAM_B4_SOURCE_WEIGHT": contract["source_weight"],
+        "FASTWAM_B4_SOURCE_WEIGHT_BYTES": contract["source_weight_bytes"],
         "FASTWAM_B4_CPFS_SOURCE_ROOT": "/oss-chengjuntao/cpfs-user-chengjuntao",
         "FASTWAM_B4_STATS_SOURCE_ROOT": (
             "/cpfs/user/chengjuntao/datasets/robofactory_multi_robot"
@@ -181,14 +221,6 @@ def main() -> int:
         "FASTWAM_B4_CPFS_ALLOWLIST": (
             "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-"
             "20260802T1235Z/cpfs-whole-file-bundle.sha256"
-        ),
-        "FASTWAM_B4_OSS_SOURCE_ROOT": (
-            "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
-            "noposplat-c944b498-4a35bc8c/builds/fastwam-8a035024af96-s42-20260801T230944Z"
-        ),
-        "FASTWAM_B4_OSS_ALLOWLIST": (
-            "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-2023667-"
-            "20260802T1235Z/oss-compact-whole-file-bundle.sha256"
         ),
         "FASTWAM_LOCAL_DATASET_RELATIVE_ROOT": "datasets/robofactory_multi_robot",
         "FASTWAM_LOCAL_STATS_RELATIVE_PATH": (
@@ -202,7 +234,6 @@ def main() -> int:
             "checkpoints/FastWAM/model-cache/DiffSynth-Studio/"
             "Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
         ),
-        "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT": "compact-s42-13x28x40-fp16-meanalpha-v2",
         "FASTWAM_LOCAL_EXPECTED_H5_FILES": "24",
         "FASTWAM_ERDMA_BUNDLE_ROOT": "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3",
         "FASTWAM_ERDMA_EXPECTED_VERSION": "56.2-1.0.3",
@@ -214,6 +245,21 @@ def main() -> int:
         "NCCL_DEBUG_SUBSYS": "INIT,NET",
         "NPROC_PER_NODE": "8",
     }
+    if contract["use_gaussian"]:
+        envs.update({
+            "FASTWAM_B4_OSS_SOURCE_ROOT": (
+                "/oss-chengjuntao/fastwam-gaudp/robofactory_multi_robot/v2/"
+                "noposplat-c944b498-4a35bc8c/builds/"
+                "fastwam-8a035024af96-s42-20260801T230944Z"
+            ),
+            "FASTWAM_B4_OSS_ALLOWLIST": (
+                "/oss-chengjuntao/artifacts/fastwam-n234-input-bundles-s42-v1-"
+                "2023667-20260802T1235Z/oss-compact-whole-file-bundle.sha256"
+            ),
+            "FASTWAM_LOCAL_GAUSSIAN_RELATIVE_ROOT": (
+                "compact-s42-13x28x40-fp16-meanalpha-v2"
+            ),
+        })
     if args.treatment == "n234_vg1h1gau1_cont50k":
         description = (
             "N234 VG1H1GAU1 weights-only continuation: cumulative 5000 to "
@@ -225,6 +271,19 @@ def main() -> int:
             "optimizer": "fresh",
             "provenance": "stat-cmp-no-new-hash",
             "topology": "3x8-world24",
+            "schedule": "cumulative-5000-to-50000-save-5000",
+        }
+    elif args.treatment == "n234_vg1h1gau0_cont50k":
+        description = (
+            "N234 VG1H1GAU0 weights-only continuation: cumulative 5000 to "
+            "50000, 45000 fresh-optimizer updates, 4 workers x 8 GPUs"
+        )
+        tags = {
+            "experiment": "N234-VG1H1GAU0-CONT50K",
+            "initialization": "GAU0-step5000-weights-only",
+            "optimizer": "fresh",
+            "provenance": "stat-cmp-no-new-hash",
+            "topology": "4x8-world32",
             "schedule": "cumulative-5000-to-50000-save-5000",
         }
     else:
@@ -264,7 +323,7 @@ def main() -> int:
                 "ElasticSpotSpecs": [],
                 "Image": IMAGE,
                 "LocalMountSpecs": [],
-                "PodCount": 3,
+                "PodCount": contract["nodes"],
                 "ResourceConfig": {
                     "CPU": "126",
                     "GPU": "8",
