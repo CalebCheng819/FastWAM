@@ -9,11 +9,50 @@ from pathlib import Path
 
 import pytest
 
+import experiments.robofactory.eval_robofactory_multi_robot as eval_module
 from experiments.robofactory.eval_robofactory_multi_robot import (
     _anchor_robofactory_imports,
+    _bootstrap_sapien_native_runtime,
     _load_panel,
     _required_fastwam_arguments,
 )
+
+
+def test_sapien_native_bootstrap_is_ordered_once_and_retained(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[tuple[str, object]] = []
+
+    class FakeSapien(types.ModuleType):
+        def Device(self, name: str):  # noqa: N802 - matches SAPIEN API
+            device = object()
+            calls.append(("device", name))
+            return device
+
+    fake_sapien = FakeSapien("sapien")
+
+    def render_system(device: object):
+        renderer = object()
+        calls.append(("render_system", device))
+        return renderer
+
+    fake_sapien.render = types.SimpleNamespace(RenderSystem=render_system)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sapien", fake_sapien)
+    monkeypatch.setattr(eval_module, "_SAPIEN_NATIVE_BOOTSTRAP_RESOURCES", None)
+
+    first = _bootstrap_sapien_native_runtime()
+    retained = eval_module._SAPIEN_NATIVE_BOOTSTRAP_RESOURCES
+    second = _bootstrap_sapien_native_runtime()
+
+    assert first is fake_sapien
+    assert second is fake_sapien
+    assert retained is eval_module._SAPIEN_NATIVE_BOOTSTRAP_RESOURCES
+    assert retained is not None
+    assert calls == [
+        ("device", "cpu"),
+        ("device", "cuda"),
+        ("render_system", retained[1]),
+    ]
 
 
 def test_robofactory_import_anchor_rejects_shadowed_utils(

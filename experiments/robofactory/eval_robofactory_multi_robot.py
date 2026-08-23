@@ -60,6 +60,14 @@ TASK_CONFIGS = {
 }
 
 
+# SAPIEN, Gymnasium, and OpenCV load overlapping native graphics/runtime
+# libraries.  On the DSW evaluation image, letting Gymnasium or OpenCV load
+# first makes SAPIEN's first Device/RenderSystem construction segfault inside
+# the native extension.  Keep the bootstrap resources alive for the lifetime
+# of the evaluator process so that SAPIEN owns native initialization order.
+_SAPIEN_NATIVE_BOOTSTRAP_RESOURCES: tuple[Any, Any, Any] | None = None
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -321,12 +329,29 @@ def _anchor_robofactory_imports(robofactory_root: Path) -> Path:
     return root
 
 
+def _bootstrap_sapien_native_runtime():
+    global _SAPIEN_NATIVE_BOOTSTRAP_RESOURCES
+
+    import sapien
+
+    if _SAPIEN_NATIVE_BOOTSTRAP_RESOURCES is None:
+        cpu_device = sapien.Device("cpu")
+        render_device = sapien.Device("cuda")
+        render_system = sapien.render.RenderSystem(render_device)
+        _SAPIEN_NATIVE_BOOTSTRAP_RESOURCES = (
+            cpu_device,
+            render_device,
+            render_system,
+        )
+    return sapien
+
+
 def _preflight_environment_imports(robofactory_root: Path) -> dict[str, str]:
     root = _anchor_robofactory_imports(robofactory_root)
 
+    sapien = _bootstrap_sapien_native_runtime()
     import cv2
     import mani_skill
-    import sapien
     import tasks.place_food as place_food
     import utils.scenes as scenes
     from OpenGL import EGL
