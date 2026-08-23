@@ -1,7 +1,7 @@
 # GAU1 step-10000 PlaceFood same-panel 8-GPU DLC evaluation
 
 - Experiment: `FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823`
-- Run: `fastwam-gau1-step10k-placefood-same8-r1-20260823`
+- Current run: `fastwam-gau1-step10k-placefood-same8-r2-20260823` (`attempt-002`)
 - Checkpoint: `step_010000.pt` (12,047,213,657 bytes)
 - Topology: one DLC Worker pod with exactly 8 GPUs; one fixed-panel episode per GPU
 - Task: `PlaceFood-rf`
@@ -13,3 +13,8 @@
 - Scheduler priority: 7 in the initial CreateJob request
 
 Scientific completion requires all eight evaluator processes to complete and the strict aggregator to publish `COMPLETE.json`. A zero-success scientific result is still a completed evaluation; an incomplete shard, infrastructure error, or contract mismatch fails the DLC job.
+
+## Attempt history
+
+- `attempt-001` / `fw-gau1-s10k-placefood-same8-r1` / Job `dlcanqj2ibd02y6v`: infrastructure failure before checkpoint load. The inherited `PYTHONPATH` selected an older CPFS `fastwam.runtime` module without `create_multi_robot_fastwam`; all eight evaluator processes exited and produced no scientific result.
+- `attempt-002`: preserves the identical checkpoint, SAME8 panel, 8-GPU topology, policy seeds, and closed-loop settings. It replaces inherited Python search paths with the committed bundle `src/` and fails closed unless `fastwam.runtime.create_multi_robot_fastwam` resolves from that checkout.

@@ -23,13 +23,14 @@ from alibabacloud_tea_openapi.models import Config
 
 
 EXPERIMENT_ID = "FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823"
-RUN_ID = "fastwam-gau1-step10k-placefood-same8-r1-20260823"
-DISPLAY_NAME = "fw-gau1-s10k-placefood-same8-r1"
+RUN_ID = "fastwam-gau1-step10k-placefood-same8-r2-20260823"
+ATTEMPT_ID = "attempt-002"
+DISPLAY_NAME = "fw-gau1-s10k-placefood-same8-r2"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-OUTPUT_ROOT = "/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r1"
+OUTPUT_ROOT = "/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2"
 CHECKPOINT = "/oss-chengjuntao/artifacts/fastwam-n234-vg1h1gau1-cont50k-s42-24g-r1-20260822/checkpoints/weights/step_010000.pt"
-SOURCE_BUNDLE = "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau1-step10k-placefood-same8-eval-20260823-r1.bundle"
+SOURCE_BUNDLE = "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2.bundle"
 IMAGE = "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
 SDK_PYTHON = pathlib.Path("/usr/bin/python3")
 SDK_PYTHONPATH = pathlib.Path("/tmp/gau1-sdk-target-c8Pn5S")
@@ -264,6 +265,7 @@ def _validate(document: dict) -> dict:
     expected_envs = {
         "FASTWAM_EXPERIMENT_ID": EXPERIMENT_ID,
         "FASTWAM_RUN_ID": RUN_ID,
+        "FASTWAM_ATTEMPT_ID": ATTEMPT_ID,
         "FASTWAM_OUTPUT_ROOT": OUTPUT_ROOT,
         "FASTWAM_SOURCE_BUNDLE": SOURCE_BUNDLE,
         "FASTWAM_SOURCE_COMMIT": commit,
@@ -294,7 +296,7 @@ def _validate(document: dict) -> dict:
     launcher = base64.b64decode(encoded, validate=True)
     _require(base64.b64encode(launcher).decode("ascii") == encoded, "launcher base64 is non-canonical")
     for fragment in (
-        EXPERIMENT_ID.encode(), RUN_ID.encode(), SOURCE_BUNDLE.encode(),
+        EXPERIMENT_ID.encode(), RUN_ID.encode(), ATTEMPT_ID.encode(), SOURCE_BUNDLE.encode(),
         b'actual="$(git -C "${root}/source" rev-parse HEAD)"',
         f".research-workflow/experiments/{EXPERIMENT_ID}/runtime.sh".encode(),
     ):
@@ -306,7 +308,8 @@ def _validate(document: dict) -> dict:
 def _receipt_base(status: str, dry_request: pathlib.Path) -> dict:
     return {
         "schema_version": 1, "status": status, "experiment_id": EXPERIMENT_ID,
-        "display_name": DISPLAY_NAME, "run_id": RUN_ID, "workspace_id": WORKSPACE_ID,
+        "display_name": DISPLAY_NAME, "run_id": RUN_ID, "attempt_id": ATTEMPT_ID,
+        "workspace_id": WORKSPACE_ID,
         "resource_id": RESOURCE_ID, "dry_request": str(dry_request),
         "output_root": OUTPUT_ROOT, "source_bundle": SOURCE_BUNDLE,
     }

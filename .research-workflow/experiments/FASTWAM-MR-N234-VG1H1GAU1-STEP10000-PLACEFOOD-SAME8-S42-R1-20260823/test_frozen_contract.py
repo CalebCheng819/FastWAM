@@ -73,13 +73,20 @@ class FrozenContractTests(unittest.TestCase):
         self.assertEqual(envs["FASTWAM_CHECKPOINT"], CHECKPOINT)
         self.assertEqual(envs["FASTWAM_CHECKPOINT_SIZE_BYTES"], "12047213657")
         self.assertEqual(envs["FASTWAM_SOURCE_COMMIT"], SOURCE_COMMIT)
+        self.assertEqual(envs["FASTWAM_ATTEMPT_ID"], "attempt-002")
+        self.assertEqual(document["run_id"], "fastwam-gau1-step10k-placefood-same8-r2-20260823")
         self.assertEqual(
             envs["FASTWAM_OUTPUT_ROOT"],
-            "/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r1",
+            "/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2",
         )
         launcher = base64.b64decode(envs["FASTWAM_LAUNCHER_B64"]).decode("utf-8")
         self.assertIn("runtime.sh", launcher)
         self.assertIn("output root already exists", (HERE / "runtime.sh").read_text())
+        runtime = (HERE / "runtime.sh").read_text()
+        self.assertIn('export PYTHONPATH="${source_src}"', runtime)
+        self.assertNotIn('PYTHONPATH="${FASTWAM_SOURCE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"', runtime)
+        self.assertIn("create_multi_robot_fastwam", runtime)
+        self.assertIn("STEP10K_EVAL_SOURCE_GATE=PASS", runtime)
         self.assertEqual(document["launcher_payload_base64"], envs["FASTWAM_LAUNCHER_B64"])
         self.assertEqual(request["UserCommand"].count("FASTWAM_LAUNCHER_B64"), 1)
 

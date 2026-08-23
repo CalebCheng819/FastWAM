@@ -11,7 +11,7 @@ die() {
 
 required_env=(
   FASTWAM_SOURCE_ROOT FASTWAM_SOURCE_COMMIT FASTWAM_OUTPUT_ROOT
-  FASTWAM_EXPERIMENT_ID FASTWAM_RUN_ID FASTWAM_CHECKPOINT
+  FASTWAM_EXPERIMENT_ID FASTWAM_RUN_ID FASTWAM_ATTEMPT_ID FASTWAM_CHECKPOINT
   FASTWAM_CHECKPOINT_SIZE_BYTES FASTWAM_PANEL FASTWAM_PANEL_SIZE_BYTES
   FASTWAM_STATS FASTWAM_STATS_SIZE_BYTES FASTWAM_DATASET_ROOT
   FASTWAM_ROBOFACTORY_ROOT FASTWAM_CONTEXT_CACHE_DIR FASTWAM_CONTEXT_SIZE_BYTES
@@ -25,15 +25,19 @@ for name in "${required_env[@]}"; do
 done
 
 [[ "${FASTWAM_EXPERIMENT_ID}" == 'FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823' ]] || die 'experiment identity drift'
-[[ "${FASTWAM_RUN_ID}" == 'fastwam-gau1-step10k-placefood-same8-r1-20260823' ]] || die 'run identity drift'
+[[ "${FASTWAM_RUN_ID}" == 'fastwam-gau1-step10k-placefood-same8-r2-20260823' ]] || die 'run identity drift'
+[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-002' ]] || die 'attempt identity drift'
 [[ "${FASTWAM_CHECKPOINT}" == */step_010000.pt ]] || die 'checkpoint is not step_010000.pt'
 [[ "${FASTWAM_CHECKPOINT_SIZE_BYTES}" == '12047213657' ]] || die 'checkpoint byte-size drift'
+[[ "${FASTWAM_OUTPUT_ROOT}" == '/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2' ]] || die 'output root drift'
 [[ ! -e "${FASTWAM_OUTPUT_ROOT}" && ! -L "${FASTWAM_OUTPUT_ROOT}" ]] || die 'output root already exists'
 
 evaluator="${FASTWAM_SOURCE_ROOT}/experiments/robofactory/eval_robofactory_multi_robot.py"
 aggregator="${FASTWAM_SOURCE_ROOT}/${EXPERIMENT_REL}/aggregate_results.py"
+source_src="${FASTWAM_SOURCE_ROOT}/src"
 [[ -f "${evaluator}" && ! -L "${evaluator}" ]] || die 'evaluator is missing or unsafe'
 [[ -f "${aggregator}" && ! -L "${aggregator}" ]] || die 'aggregator is missing or unsafe'
+[[ -d "${source_src}" && ! -L "${source_src}" ]] || die 'bundle source directory is missing or unsafe'
 [[ -x "${FASTWAM_PYTHON}" ]] || die 'evaluation Python is not executable'
 
 scratch_root="$(mktemp -d /tmp/fastwam-step10k-placefood-eval.XXXXXXXX)"
@@ -43,7 +47,9 @@ mkdir -m 0700 -- "${scratch_root}/shards" "${scratch_root}/logs" \
   "${scratch_root}/xdg-cache" "${scratch_root}/xdg-runtime" \
   "${scratch_root}/torch" "${scratch_root}/matplotlib" "${scratch_root}/tmp"
 
-export PYTHONPATH="${FASTWAM_SOURCE_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONPATH="${source_src}"
 export WANDB_MODE=offline
 export MUJOCO_GL=egl
 export XDG_CACHE_HOME="${scratch_root}/xdg-cache"
@@ -56,6 +62,27 @@ export VK_DRIVER_FILES="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/nvidia_icd.json"
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export __EGL_VENDOR_LIBRARY_FILENAMES="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/10_nvidia.json"
 export LD_LIBRARY_PATH="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/lib:${LD_LIBRARY_PATH:-}"
+
+"${FASTWAM_PYTHON}" -B - <<'PY' || die 'bundle Python source identity gate failed'
+import os
+from pathlib import Path
+
+import fastwam
+import fastwam.runtime as runtime
+
+expected = (Path(os.environ["FASTWAM_SOURCE_ROOT"]) / "src").resolve(strict=True)
+package_file = Path(fastwam.__file__).resolve(strict=True)
+runtime_file = Path(runtime.__file__).resolve(strict=True)
+for label, path in (("fastwam", package_file), ("fastwam.runtime", runtime_file)):
+    try:
+        path.relative_to(expected)
+    except ValueError as error:
+        raise SystemExit(f"{label} resolved outside bundle src: {path}") from error
+factory = getattr(runtime, "create_multi_robot_fastwam", None)
+if not callable(factory):
+    raise SystemExit(f"bundle runtime lacks callable create_multi_robot_fastwam: {runtime_file}")
+print(f"STEP10K_EVAL_SOURCE_GATE=PASS package={package_file} runtime={runtime_file}", flush=True)
+PY
 
 gpu_count="$(${FASTWAM_PYTHON} -B -c 'import torch; print(torch.cuda.device_count())')"
 [[ "${gpu_count}" == '8' ]] || die "expected exactly 8 visible GPUs, observed ${gpu_count}"
@@ -98,7 +125,8 @@ declare -a pids=()
 for index in 0 1 2 3 4 5 6 7; do
   shard="${scratch_root}/shards/episode-$(printf '%02d' "${index}")"
   log="${scratch_root}/logs/episode-$(printf '%02d' "${index}").log"
-  CUDA_VISIBLE_DEVICES="${index}" "${FASTWAM_PYTHON}" -B "${common_argv[@]}" \
+  CUDA_VISIBLE_DEVICES="${index}" PYTHONPATH="${source_src}" PYTHONNOUSERSITE=1 \
+    PYTHONDONTWRITEBYTECODE=1 "${FASTWAM_PYTHON}" -B "${common_argv[@]}" \
     --episode-start "${index}" --output-dir "${shard}" >"${log}" 2>&1 &
   pids+=("$!")
 done

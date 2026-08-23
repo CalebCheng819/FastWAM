@@ -15,7 +15,7 @@ from typing import Any
 
 
 EXPERIMENT_ID = "FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823"
-RUN_ID = "fastwam-gau1-step10k-placefood-same8-r1-20260823"
+RUN_ID = "fastwam-gau1-step10k-placefood-same8-r2-20260823"
 CHECKPOINT = "/oss-chengjuntao/artifacts/fastwam-n234-vg1h1gau1-cont50k-s42-24g-r1-20260822/checkpoints/weights/step_010000.pt"
 CHECKPOINT_BYTES = 12_047_213_657
 ENVIRONMENT_SEEDS = (333183, 333327, 333225, 333180, 333251, 333130, 333167, 333234)
