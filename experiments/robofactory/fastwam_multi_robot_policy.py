@@ -660,9 +660,18 @@ def _model_asset_environment(model_cache_root: str | Path):
                 os.environ[key] = value
 
 
-def load_fastwam_checkpoint(model: Any, checkpoint_path: str | Path) -> None:
-    """Load through the current FastWAM checkpoint API without stale kwargs."""
+def load_fastwam_checkpoint(
+    model: Any,
+    checkpoint_path: str | Path,
+    *,
+    integrity_mode: str = "sha256",
+) -> None:
+    """Load through the current API with the matching model provenance mode."""
 
+    mode = _validate_integrity_mode(integrity_mode)
+    model._checkpoint_provenance_mode = (
+        "stat_cmp" if mode == "metadata_no_hash" else "sha256"
+    )
     model.load_checkpoint(checkpoint_path)
 
 
@@ -790,7 +799,11 @@ class FastWAMMultiRobotPolicy:
                 model_dtype=model_dtype,
                 device=str(self.device),
             )
-        load_fastwam_checkpoint(self.model, self.checkpoint_path)
+        load_fastwam_checkpoint(
+            self.model,
+            self.checkpoint_path,
+            integrity_mode=self.integrity_mode,
+        )
         actual_checkpoint_sha256 = getattr(
             self.model,
             "_loaded_base_checkpoint_sha256",

@@ -37,11 +37,47 @@ def test_checkpoint_loader_uses_current_positional_api(tmp_path: Path):
 
     class FakeModel:
         def load_checkpoint(self, path):
-            calls.append(path)
+            calls.append((path, self._checkpoint_provenance_mode))
 
     load_fastwam_checkpoint(FakeModel(), checkpoint)
 
-    assert calls == [checkpoint]
+    assert calls == [(checkpoint, "sha256")]
+
+
+def test_checkpoint_loader_maps_metadata_no_hash_to_model_stat_cmp(tmp_path: Path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    calls = []
+
+    class FakeModel:
+        def load_checkpoint(self, path):
+            calls.append((path, self._checkpoint_provenance_mode))
+
+    load_fastwam_checkpoint(
+        FakeModel(),
+        checkpoint,
+        integrity_mode="metadata_no_hash",
+    )
+
+    assert calls == [(checkpoint, "stat_cmp")]
+
+
+def test_checkpoint_loader_rejects_unknown_integrity_mode_before_load(
+    tmp_path: Path,
+):
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+
+    class FakeModel:
+        def load_checkpoint(self, path):
+            raise AssertionError(f"unexpected checkpoint load: {path}")
+
+    with pytest.raises(ValueError, match="integrity_mode"):
+        load_fastwam_checkpoint(
+            FakeModel(),
+            checkpoint,
+            integrity_mode="unsafe",
+        )
 
 
 def _legacy_stats_payload() -> dict:
