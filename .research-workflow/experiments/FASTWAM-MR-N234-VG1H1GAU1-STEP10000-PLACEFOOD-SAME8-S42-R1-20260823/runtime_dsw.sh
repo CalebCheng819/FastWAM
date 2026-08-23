@@ -4,7 +4,7 @@ umask 077
 
 EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823'
 EXPERIMENT_ID='FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823'
-RUN_ID='fastwam-gau1-step10k-placefood-same8-dsw4-r5-20260823'
+RUN_ID='fastwam-gau1-step10k-placefood-same8-dsw4-r6-20260823'
 
 die() {
   printf 'STEP10K_DSW_EVAL_FATAL: %s\n' "$*" >&2
@@ -20,7 +20,8 @@ required_env=(
   FASTWAM_CONTEXT_SIZE_BYTES FASTWAM_MODEL_CACHE_ROOT FASTWAM_POLICY_LIGHTNING_ROOT
   FASTWAM_POLICY_LIGHTNING_COMMIT FASTWAM_NOPOSPLAT_CHECKPOINT
   FASTWAM_NOPOSPLAT_CHECKPOINT_SIZE_BYTES FASTWAM_NVIDIA_GRAPHICS_ROOT
-  FASTWAM_PYTHON FASTWAM_PYTHON_OVERLAY FASTWAM_TRAINING_SOURCE_COMMIT
+  FASTWAM_PYTHON FASTWAM_PYTHON_OVERLAY FASTWAM_ROBOFACTORY_PYTHON_OVERLAY
+  FASTWAM_TRAINING_SOURCE_COMMIT
   FASTWAM_TRAINING_JOB_ID
 )
 for name in "${required_env[@]}"; do
@@ -30,17 +31,18 @@ done
 [[ "${FASTWAM_EVAL_SCOPE}" == 'smoke' || "${FASTWAM_EVAL_SCOPE}" == 'formal' ]] || die 'scope must be smoke or formal'
 [[ "${FASTWAM_EXPERIMENT_ID}" == "${EXPERIMENT_ID}" ]] || die 'experiment identity drift'
 [[ "${FASTWAM_RUN_ID}" == "${RUN_ID}" ]] || die 'run identity drift'
-[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-005' ]] || die 'attempt identity drift'
+[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-006' ]] || die 'attempt identity drift'
 [[ "${FASTWAM_PYTHON_OVERLAY}" == '/cpfs/user/chengjuntao/fastwam_eval_runtime/python-overlays/jaxtyping-0.3.7-wadler-0.1.7-py310-attempt005-20260823' ]] || die 'Python overlay drift'
+[[ "${FASTWAM_ROBOFACTORY_PYTHON_OVERLAY}" == '/cpfs/user/chengjuntao/venvs/fastwam-gau0-eval-r7-py310-extra-20260813' ]] || die 'RoboFactory Python overlay drift'
 [[ "${FASTWAM_CHECKPOINT}" == '/oss-chengjuntao/artifacts/fastwam-n234-vg1h1gau1-cont50k-s42-24g-r1-20260822/checkpoints/weights/step_010000.pt' ]] || die 'checkpoint path drift'
 [[ "${FASTWAM_CHECKPOINT_SIZE_BYTES}" == '12047213657' ]] || die 'checkpoint byte-size drift'
 
 if [[ "${FASTWAM_EVAL_SCOPE}" == 'smoke' ]]; then
-  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-smoke-episode0-20260823'
-  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-smoke-control-20260823'
+  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-smoke-episode0-20260823'
+  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-smoke-control-20260823'
 else
-  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-20260823'
-  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-control-20260823'
+  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-20260823'
+  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-control-20260823'
 fi
 [[ "${FASTWAM_OUTPUT_ROOT}" == "${expected_output}" ]] || die 'output root drift'
 [[ "${FASTWAM_CONTROL_ROOT}" == "${expected_control}" ]] || die 'control root drift'
@@ -60,7 +62,7 @@ done
 for directory in "${FASTWAM_DATASET_ROOT}" "${FASTWAM_ROBOFACTORY_ROOT}" \
   "${FASTWAM_CONTEXT_CACHE_DIR}" "${FASTWAM_MODEL_CACHE_ROOT}" \
   "${FASTWAM_POLICY_LIGHTNING_ROOT}" "${FASTWAM_NVIDIA_GRAPHICS_ROOT}" \
-  "${FASTWAM_PYTHON_OVERLAY}"; do
+  "${FASTWAM_PYTHON_OVERLAY}" "${FASTWAM_ROBOFACTORY_PYTHON_OVERLAY}"; do
   [[ -d "${directory}" && ! -L "${directory}" ]] || die "required directory is missing or unsafe: ${directory}"
 done
 
@@ -81,7 +83,7 @@ mkdir -m 0700 -- "${scratch_root}/xdg-cache" "${scratch_root}/xdg-runtime" \
 
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="${FASTWAM_PYTHON_OVERLAY}:${source_src}:${FASTWAM_POLICY_LIGHTNING_ROOT}"
+export PYTHONPATH="${FASTWAM_PYTHON_OVERLAY}:${FASTWAM_ROBOFACTORY_PYTHON_OVERLAY}:${source_src}:${FASTWAM_POLICY_LIGHTNING_ROOT}"
 export WANDB_MODE=offline
 export MUJOCO_GL=egl
 export XDG_CACHE_HOME="${scratch_root}/xdg-cache"
@@ -93,7 +95,7 @@ export VK_ICD_FILENAMES="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/nvidia_icd.json"
 export VK_DRIVER_FILES="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/nvidia_icd.json"
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export __EGL_VENDOR_LIBRARY_FILENAMES="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/10_nvidia.json"
-export LD_LIBRARY_PATH="${FASTWAM_NVIDIA_GRAPHICS_ROOT}/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${FASTWAM_NVIDIA_GRAPHICS_ROOT}/lib:${LD_LIBRARY_PATH:-}"
 
 "${FASTWAM_PYTHON}" -B - <<'PY' || die 'source identity gate failed'
 import os
@@ -136,6 +138,41 @@ if not callable(get_encoder):
 if ExternalPolicyLightningTeacher.__name__ != "ExternalPolicyLightningTeacher":
     raise SystemExit("FastWAM Gaussian teacher import drift")
 print("STEP10K_DSW_EVAL_DEPENDENCY_GATE=PASS jaxtyping=0.3.7 wadler_lindig=0.1.7", flush=True)
+PY
+
+"${FASTWAM_PYTHON}" -B - <<'PY' || die 'evaluation GL/RoboFactory dependency gate failed'
+import os
+import sys
+from pathlib import Path
+
+robofactory_root = Path(os.environ["FASTWAM_ROBOFACTORY_ROOT"]).resolve(strict=True)
+overlay_root = Path(os.environ["FASTWAM_ROBOFACTORY_PYTHON_OVERLAY"]).resolve(strict=True)
+sys.path.insert(0, str(robofactory_root))
+os.chdir(robofactory_root)
+
+import cv2
+import mani_skill
+import sapien
+import tasks.place_food
+import utils.scenes
+from OpenGL import EGL
+
+mani_skill_path = Path(mani_skill.__file__).resolve(strict=True)
+try:
+    mani_skill_path.relative_to(overlay_root)
+except ValueError as error:
+    raise SystemExit(f"mani_skill resolved outside pinned overlay: {mani_skill_path}") from error
+if cv2.__version__ != "4.6.0":
+    raise SystemExit(f"cv2 version drift: {cv2.__version__}")
+if not hasattr(sapien, "__version__"):
+    raise SystemExit("sapien version metadata is unavailable")
+if EGL is None:
+    raise SystemExit("OpenGL EGL import returned None")
+print(
+    "STEP10K_DSW_EVAL_GL_GATE=PASS "
+    f"cv2={cv2.__version__} mani_skill={mani_skill_path} sapien={sapien.__version__}",
+    flush=True,
+)
 PY
 
 gpu_count="$(${FASTWAM_PYTHON} -B -c 'import torch; print(torch.cuda.device_count())')"

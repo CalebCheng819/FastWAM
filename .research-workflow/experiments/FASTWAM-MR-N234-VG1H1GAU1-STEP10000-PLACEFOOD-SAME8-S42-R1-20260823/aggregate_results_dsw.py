@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish attempt-005 DSW results with the frozen SAME8 validator."""
+"""Publish attempt-006 DSW results with the frozen SAME8 validator."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 BASE_PATH = HERE / "aggregate_results.py"
 R3_RUN_ID = "fastwam-gau1-step10k-placefood-same8-r3-20260823"
-RUN_ID = "fastwam-gau1-step10k-placefood-same8-dsw4-r5-20260823"
+RUN_ID = "fastwam-gau1-step10k-placefood-same8-dsw4-r6-20260823"
 
 
 metadata = BASE_PATH.lstat()
