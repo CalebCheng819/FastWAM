@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import datetime as dt
 import json
 import os
@@ -67,6 +68,23 @@ def _path_is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _expected_sdk_roundtrip(body: dict) -> dict:
+    """Return the exact map emitted by DLC SDK 1.9.2 for this request.
+
+    The SDK materializes four omitted optional list fields as empty lists.  Keep
+    that normalization explicit and narrow so every other request field still
+    has to round-trip byte-for-byte at the JSON object level.
+    """
+    expected = copy.deepcopy(body)
+    expected["CustomEnvs"] = []
+    _require(len(expected["JobSpecs"]) == 1, "unexpected JobSpecs cardinality")
+    worker = expected["JobSpecs"][0]
+    worker["ElasticSpotSpecs"] = []
+    worker["LocalMountSpecs"] = []
+    worker["StartupDependencies"] = []
+    return expected
 
 
 def _utc_now() -> str:
@@ -322,7 +340,7 @@ def main() -> int:
     request = models.CreateJobRequest()
     request.from_map(body)
     request.validate()
-    _require(request.to_map() == body, "SDK CreateJobRequest roundtrip drift")
+    _require(request.to_map() == _expected_sdk_roundtrip(body), "SDK CreateJobRequest roundtrip drift")
     _require(not os.path.lexists(OUTPUT_ROOT), "canonical output appeared before submit")
     if args.audit_only:
         result = _receipt_base("AUDIT_ONLY_PASS_CREATE_JOB_NOT_CALLED", args.dry_request)
