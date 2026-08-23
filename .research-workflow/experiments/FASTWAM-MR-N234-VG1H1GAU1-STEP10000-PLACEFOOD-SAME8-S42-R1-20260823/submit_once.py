@@ -60,6 +60,15 @@ def _require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def _path_is_within(path: pathlib.Path, root: pathlib.Path) -> bool:
+    """Return whether path is under root without requiring Python 3.9."""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def _utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -304,7 +313,7 @@ def main() -> int:
     pythonpath_entries = [pathlib.Path(item).resolve() for item in os.environ.get("PYTHONPATH", "").split(os.pathsep) if item]
     _require(SDK_PYTHONPATH.resolve() in pythonpath_entries, f"required SDK PYTHONPATH missing: {SDK_PYTHONPATH}")
     models_path = pathlib.Path(models.__file__).resolve()
-    _require(models_path.is_relative_to(SDK_PYTHONPATH.resolve()), f"DLC SDK loaded outside frozen target: {models_path}")
+    _require(_path_is_within(models_path, SDK_PYTHONPATH.resolve()), f"DLC SDK loaded outside frozen target: {models_path}")
     _require(not os.path.lexists(args.receipt), f"receipt already exists: {args.receipt}")
     document = json.loads(_read_regular_bytes(args.dry_request).decode("utf-8"))
     body = _validate(document)
