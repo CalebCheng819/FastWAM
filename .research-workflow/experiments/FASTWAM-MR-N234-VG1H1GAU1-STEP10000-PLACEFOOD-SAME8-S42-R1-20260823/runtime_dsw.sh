@@ -4,7 +4,7 @@ umask 077
 
 EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823'
 EXPERIMENT_ID='FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823'
-RUN_ID='fastwam-gau1-step10k-placefood-same8-dsw4-r6-20260823'
+RUN_ID='fastwam-gau1-step10k-placefood-same8-dsw4-r7-20260823'
 
 die() {
   printf 'STEP10K_DSW_EVAL_FATAL: %s\n' "$*" >&2
@@ -31,18 +31,18 @@ done
 [[ "${FASTWAM_EVAL_SCOPE}" == 'smoke' || "${FASTWAM_EVAL_SCOPE}" == 'formal' ]] || die 'scope must be smoke or formal'
 [[ "${FASTWAM_EXPERIMENT_ID}" == "${EXPERIMENT_ID}" ]] || die 'experiment identity drift'
 [[ "${FASTWAM_RUN_ID}" == "${RUN_ID}" ]] || die 'run identity drift'
-[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-006' ]] || die 'attempt identity drift'
+[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-007' ]] || die 'attempt identity drift'
 [[ "${FASTWAM_PYTHON_OVERLAY}" == '/cpfs/user/chengjuntao/fastwam_eval_runtime/python-overlays/jaxtyping-0.3.7-wadler-0.1.7-py310-attempt005-20260823' ]] || die 'Python overlay drift'
 [[ "${FASTWAM_ROBOFACTORY_PYTHON_OVERLAY}" == '/cpfs/user/chengjuntao/venvs/fastwam-gau0-eval-r7-py310-extra-20260813' ]] || die 'RoboFactory Python overlay drift'
 [[ "${FASTWAM_CHECKPOINT}" == '/oss-chengjuntao/artifacts/fastwam-n234-vg1h1gau1-cont50k-s42-24g-r1-20260822/checkpoints/weights/step_010000.pt' ]] || die 'checkpoint path drift'
 [[ "${FASTWAM_CHECKPOINT_SIZE_BYTES}" == '12047213657' ]] || die 'checkpoint byte-size drift'
 
 if [[ "${FASTWAM_EVAL_SCOPE}" == 'smoke' ]]; then
-  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-smoke-episode0-20260823'
-  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-smoke-control-20260823'
+  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r7-smoke-episode0-20260823'
+  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r7-smoke-control-20260823'
 else
-  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-20260823'
-  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r6-control-20260823'
+  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r7-20260823'
+  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r7-control-20260823'
 fi
 [[ "${FASTWAM_OUTPUT_ROOT}" == "${expected_output}" ]] || die 'output root drift'
 [[ "${FASTWAM_CONTROL_ROOT}" == "${expected_control}" ]] || die 'control root drift'

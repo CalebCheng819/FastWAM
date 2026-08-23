@@ -1,9 +1,9 @@
 # GAU1 step-10000 PlaceFood same-panel 8-GPU DLC evaluation
 
 - Experiment: `FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823`
-- Current run: `fastwam-gau1-step10k-placefood-same8-r3-20260823` (`attempt-003`)
+- Current run: `fastwam-gau1-step10k-placefood-same8-dsw4-r7-20260823` (`attempt-007`)
 - Checkpoint: `step_010000.pt` (12,047,213,657 bytes)
-- Topology: one DLC Worker pod with exactly 8 GPUs; one fixed-panel episode per GPU
+- Topology: one 4-GPU DSW; episode 0 smoke first, then two four-episode SAME8 waves
 - Task: `PlaceFood-rf`
 - Panel: the frozen eight-environment-seed panel used by the earlier same8 baseline
 - Policy seeds: 10000 through 10007
@@ -22,4 +22,5 @@ Scientific completion requires all eight evaluator processes to complete and the
 - `attempt-003` terminal result: all eight policy initializations stopped before rollout because the outer `metadata_no_hash` contract was not propagated to the model loader, whose default `sha256` mode computed a digest. This is an infrastructure failure with zero valid episodes, not a 0/8 scientific result.
 - `attempt-004` / DSW 4-GPU terminal result: the strict no-hash checkpoint mapping passed and the evaluator allocated the model on GPU 0, clearing the attempt-003 checkpoint-integrity failure. It then stopped before rollout while importing Policy-Lightning because `jaxtyping` was absent. It produced zero valid episodes and is an environment failure, not a 0/1 scientific result.
 - `attempt-005` / DSW 4-GPU terminal result: the attempt-owned `jaxtyping` overlay and Policy-Lightning/FastWAM dependency gate passed. The evaluator then stopped before rollout while importing `cv2`: putting the pinned NVIDIA graphics directory before the system GLVND directory mixed incompatible GL implementations and raised `libGL.so.1: undefined symbol: _glapi_tls_Current`. It produced zero valid episodes and is an environment failure, not a 0/1 scientific result.
-- `attempt-006` / DSW 4-GPU: preserves the same checkpoint, SAME8 panel and scientific contract. It puts the system GLVND dispatcher before the pinned NVIDIA vendor libraries and adds the existing Python 3.10 RoboFactory overlay for ManiSkill. A fail-closed preflight now imports `cv2`, ManiSkill, Sapien, OpenGL EGL, RoboFactory PlaceFood and scene utilities before creating the control/output roots. It first runs panel episode 0 as a complete smoke, then evaluates the unchanged SAME8 panel in two waves (`0..3`, `4..7`).
+- `attempt-006` / DSW 4-GPU terminal result: the GLVND ordering and RoboFactory Python overlay passed, but the first SAPIEN device construction segfaulted after CV2/Gym imports. No episode reached rollout, so this is an environment failure with zero valid episodes, not a 0/1 scientific result.
+- `attempt-007` / DSW 4-GPU: preserves the same checkpoint, SAME8 panel and scientific contract. The evaluator now primes and retains SAPIEN CPU, CUDA and render resources before CV2/Gym imports. The exact DSW environment successfully built and closed a real PlaceFood environment with this ordering. The runner first requires a complete panel episode 0 smoke, then evaluates the unchanged SAME8 panel in two waves (`0..3`, `4..7`).

@@ -13,7 +13,7 @@ RUNTIME = HERE / "runtime_dsw.sh"
 AGGREGATOR = HERE / "aggregate_results_dsw.py"
 
 
-class DswAttempt006ContractTests(unittest.TestCase):
+class DswAttempt007ContractTests(unittest.TestCase):
     def test_runtime_pins_four_gpu_two_wave_same8_contract(self) -> None:
         runtime = RUNTIME.read_text(encoding="utf-8")
         self.assertIn("expected exactly 4 visible GPUs", runtime)
@@ -28,7 +28,7 @@ class DswAttempt006ContractTests(unittest.TestCase):
         self.assertIn("control root already exists", runtime)
         self.assertIn("status --porcelain=v1 --untracked-files=all", runtime)
         self.assertIn("source checkout is not clean", runtime)
-        self.assertIn("[[ \"${FASTWAM_ATTEMPT_ID}\" == 'attempt-006' ]]", runtime)
+        self.assertIn("[[ \"${FASTWAM_ATTEMPT_ID}\" == 'attempt-007' ]]", runtime)
         self.assertIn("jaxtyping-0.3.7-wadler-0.1.7-py310-attempt005-20260823", runtime)
         self.assertIn("fastwam-gau0-eval-r7-py310-extra-20260813", runtime)
         self.assertIn('"jaxtyping": "0.3.7"', runtime)
@@ -54,7 +54,7 @@ class DswAttempt006ContractTests(unittest.TestCase):
         self.assertIsNotNone(spec.loader)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        self.assertEqual(module.base.RUN_ID, "fastwam-gau1-step10k-placefood-same8-dsw4-r6-20260823")
+        self.assertEqual(module.base.RUN_ID, "fastwam-gau1-step10k-placefood-same8-dsw4-r7-20260823")
         self.assertEqual(module.base.EXPERIMENT_ID, "FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823")
         self.assertEqual(module.base.ENVIRONMENT_SEEDS, (333183, 333327, 333225, 333180, 333251, 333130, 333167, 333234))
         self.assertEqual(module.base.POLICY_SEEDS, tuple(range(10000, 10008)))
