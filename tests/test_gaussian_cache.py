@@ -33,6 +33,7 @@ from fastwam.datasets.gaussian_cache.plan import build_work_plan
 from fastwam.datasets.gaussian_cache.teacher import (
     ExternalPolicyLightningTeacher,
     _compose_encoder_config,
+    _validate_checkpoint_identity,
 )
 from fastwam.datasets.gaussian_cache.validate import validate_cache
 
@@ -155,6 +156,43 @@ def test_external_teacher_rejects_fp16_overflow_without_clamping():
     teacher._encoder = lambda _: raw
     with pytest.raises(OverflowError, match="max_abs_float32=70000.0"):
         teacher.encode(torch.zeros(1, 2, 3, 2, 2))
+
+
+def test_teacher_checkpoint_metadata_binding_uses_no_digest(tmp_path: Path):
+    checkpoint = tmp_path / "teacher.ckpt"
+    checkpoint.write_bytes(b"teacher-weights")
+
+    resolved, digest, size_bytes = _validate_checkpoint_identity(
+        checkpoint,
+        integrity_mode="metadata_no_hash",
+        expected_size_bytes=checkpoint.stat().st_size,
+    )
+
+    assert resolved == checkpoint.resolve()
+    assert digest is None
+    assert size_bytes == checkpoint.stat().st_size
+
+
+def test_teacher_checkpoint_metadata_binding_rejects_wrong_size_and_symlink(
+    tmp_path: Path,
+):
+    checkpoint = tmp_path / "teacher.ckpt"
+    checkpoint.write_bytes(b"teacher-weights")
+    with pytest.raises(ValueError, match="byte-size mismatch"):
+        _validate_checkpoint_identity(
+            checkpoint,
+            integrity_mode="metadata_no_hash",
+            expected_size_bytes=checkpoint.stat().st_size + 1,
+        )
+
+    link = tmp_path / "teacher-link.ckpt"
+    link.symlink_to(checkpoint)
+    with pytest.raises(ValueError, match="direct regular file"):
+        _validate_checkpoint_identity(
+            link,
+            integrity_mode="metadata_no_hash",
+            expected_size_bytes=checkpoint.stat().st_size,
+        )
 
 
 def test_external_teacher_hydra_composes_encoder_backbone_defaults(tmp_path):

@@ -2,13 +2,15 @@
 
 No Policy-Lightning/NoPoSplat source is vendored here.  The provider imports an
 explicit external checkout only after verifying its exact Git commit and a
-caller-supplied checkpoint SHA-256.
+caller-supplied checkpoint identity contract.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -37,6 +39,70 @@ def _git(repo: Path, *arguments: str) -> str:
         text=True,
     )
     return completed.stdout.strip()
+
+
+def _validate_checkpoint_identity(
+    checkpoint_path: str | Path,
+    *,
+    integrity_mode: str,
+    expected_sha256: str | None = None,
+    expected_size_bytes: int | None = None,
+) -> tuple[Path, str | None, int]:
+    """Bind a teacher checkpoint by digest or strict regular-file metadata."""
+
+    path = Path(checkpoint_path).expanduser()
+    if integrity_mode == "sha256":
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file():
+            raise FileNotFoundError(
+                f"External teacher checkpoint is not a regular file: {resolved}"
+            )
+        if not expected_sha256:
+            raise ValueError("External teacher checkpoint SHA-256 is required")
+        normalized = str(expected_sha256).lower()
+        actual_sha256 = sha256_file(resolved)
+        if actual_sha256 != normalized:
+            raise ValueError(
+                "External teacher checkpoint SHA-256 mismatch: "
+                f"expected={normalized} actual={actual_sha256}"
+            )
+        return resolved, actual_sha256, resolved.stat().st_size
+
+    if integrity_mode != "metadata_no_hash":
+        raise ValueError(f"Unsupported teacher checkpoint integrity mode: {integrity_mode!r}")
+    if expected_size_bytes is None or int(expected_size_bytes) <= 0:
+        raise ValueError(
+            "External teacher checkpoint byte size is required in metadata_no_hash mode"
+        )
+
+    before = os.lstat(path)
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise ValueError(
+            f"External teacher checkpoint must be a direct regular file: {path}"
+        )
+    if before.st_nlink != 1:
+        raise ValueError(
+            "External teacher checkpoint must have exactly one hard link: "
+            f"path={path} nlink={before.st_nlink}"
+        )
+    if before.st_size != int(expected_size_bytes):
+        raise ValueError(
+            "External teacher checkpoint byte-size mismatch: "
+            f"expected={int(expected_size_bytes)} actual={before.st_size} path={path}"
+        )
+    resolved = path.resolve(strict=True)
+    after = os.stat(resolved, follow_symlinks=False)
+    if not stat.S_ISREG(after.st_mode):
+        raise ValueError(f"External teacher checkpoint is not regular: {resolved}")
+    if (before.st_dev, before.st_ino, before.st_size) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+    ):
+        raise RuntimeError(
+            f"External teacher checkpoint changed during metadata binding: {path}"
+        )
+    return resolved, None, before.st_size
 
 
 def _resolved_config_sha256(config) -> str:
@@ -116,15 +182,27 @@ class ExternalPolicyLightningTeacher:
         repo_path: str | Path,
         expected_commit: str,
         checkpoint_path: str | Path,
-        checkpoint_sha256: str,
+        checkpoint_sha256: str | None,
+        checkpoint_size_bytes: int | None = None,
+        integrity_mode: str = "sha256",
         config_path: str | Path = "config/encoder/noposplat.yaml",
         device: str | torch.device = "cuda",
         require_clean_repo: bool = True,
     ) -> None:
         self.repo_path = Path(repo_path).expanduser().resolve()
         self.expected_commit = str(expected_commit).lower()
-        self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-        self.expected_checkpoint_sha256 = str(checkpoint_sha256).lower()
+        self._integrity_mode = str(integrity_mode)
+        self.checkpoint_path, actual_checkpoint_sha256, checkpoint_size = (
+            _validate_checkpoint_identity(
+                checkpoint_path,
+                integrity_mode=self._integrity_mode,
+                expected_sha256=checkpoint_sha256,
+                expected_size_bytes=checkpoint_size_bytes,
+            )
+        )
+        self.expected_checkpoint_sha256 = (
+            None if checkpoint_sha256 is None else str(checkpoint_sha256).lower()
+        )
         config = Path(config_path)
         self.config_path = (self.repo_path / config).resolve() if not config.is_absolute() else config
         self.device = torch.device(device)
@@ -140,14 +218,6 @@ class ExternalPolicyLightningTeacher:
         )
         if require_clean_repo and repository_dirty:
             raise ValueError(f"External teacher checkout is dirty: {self.repo_path}")
-        if not self.checkpoint_path.is_file():
-            raise FileNotFoundError(f"External teacher checkpoint is missing: {self.checkpoint_path}")
-        actual_checkpoint_sha256 = sha256_file(self.checkpoint_path)
-        if actual_checkpoint_sha256 != self.expected_checkpoint_sha256:
-            raise ValueError(
-                "External teacher checkpoint SHA-256 mismatch: "
-                f"expected={self.expected_checkpoint_sha256} actual={actual_checkpoint_sha256}"
-            )
         if not self.config_path.is_file():
             raise FileNotFoundError(f"External teacher config is missing: {self.config_path}")
         try:
@@ -160,6 +230,7 @@ class ExternalPolicyLightningTeacher:
         self._actual_commit = actual_commit
         self._repository_clean = not repository_dirty
         self._checkpoint_sha256 = actual_checkpoint_sha256
+        self._checkpoint_size_bytes = checkpoint_size
         self._config_sha256 = sha256_file(self.config_path)
         self._remote_url = _git(self.repo_path, "remote", "get-url", "origin")
         self._encoder = self._load_encoder()
@@ -290,6 +361,8 @@ class ExternalPolicyLightningTeacher:
                 "coor_type_paths": self._config_overrides,
             },
             "checkpoint_filename": self.checkpoint_path.name,
+            "checkpoint_integrity_mode": self._integrity_mode,
+            "checkpoint_size_bytes": self._checkpoint_size_bytes,
             "checkpoint_sha256": self._checkpoint_sha256,
             "legacy_covariance_layout_corrected": True,
             "missing_weight_keys": self._missing_keys,
