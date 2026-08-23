@@ -19,6 +19,7 @@ from experiments.robofactory.fastwam_multi_robot_policy import (
     canonicalize_root_pose,
     compose_step5000_model_config,
     denormalize_and_flatten_actions,
+    load_fastwam_checkpoint,
     load_normalization_stats,
     load_text_context,
     model_input_image,
@@ -27,6 +28,20 @@ from experiments.robofactory.fastwam_multi_robot_policy import (
     sha256_file,
     teacher_image_pairs,
 )
+
+
+def test_checkpoint_loader_uses_current_positional_api(tmp_path: Path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    calls = []
+
+    class FakeModel:
+        def load_checkpoint(self, path):
+            calls.append(path)
+
+    load_fastwam_checkpoint(FakeModel(), checkpoint)
+
+    assert calls == [checkpoint]
 
 
 def _legacy_stats_payload() -> dict:

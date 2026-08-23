@@ -25,11 +25,11 @@ for name in "${required_env[@]}"; do
 done
 
 [[ "${FASTWAM_EXPERIMENT_ID}" == 'FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823' ]] || die 'experiment identity drift'
-[[ "${FASTWAM_RUN_ID}" == 'fastwam-gau1-step10k-placefood-same8-r2-20260823' ]] || die 'run identity drift'
-[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-002' ]] || die 'attempt identity drift'
+[[ "${FASTWAM_RUN_ID}" == 'fastwam-gau1-step10k-placefood-same8-r3-20260823' ]] || die 'run identity drift'
+[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-003' ]] || die 'attempt identity drift'
 [[ "${FASTWAM_CHECKPOINT}" == */step_010000.pt ]] || die 'checkpoint is not step_010000.pt'
 [[ "${FASTWAM_CHECKPOINT_SIZE_BYTES}" == '12047213657' ]] || die 'checkpoint byte-size drift'
-[[ "${FASTWAM_OUTPUT_ROOT}" == '/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2' ]] || die 'output root drift'
+[[ "${FASTWAM_OUTPUT_ROOT}" == '/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r3' ]] || die 'output root drift'
 [[ ! -e "${FASTWAM_OUTPUT_ROOT}" && ! -L "${FASTWAM_OUTPUT_ROOT}" ]] || die 'output root already exists'
 
 evaluator="${FASTWAM_SOURCE_ROOT}/experiments/robofactory/eval_robofactory_multi_robot.py"

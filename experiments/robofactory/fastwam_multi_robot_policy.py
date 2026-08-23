@@ -660,6 +660,12 @@ def _model_asset_environment(model_cache_root: str | Path):
                 os.environ[key] = value
 
 
+def load_fastwam_checkpoint(model: Any, checkpoint_path: str | Path) -> None:
+    """Load through the current FastWAM checkpoint API without stale kwargs."""
+
+    model.load_checkpoint(checkpoint_path)
+
+
 class FastWAMMultiRobotPolicy:
     """Native-N RoboFactory policy backed by ``fastwam_multi_robot_v2`` weights."""
 
@@ -784,10 +790,7 @@ class FastWAMMultiRobotPolicy:
                 model_dtype=model_dtype,
                 device=str(self.device),
             )
-        self.model.load_checkpoint(
-            self.checkpoint_path,
-            record_checkpoint_sha256=self.integrity_mode == "sha256",
-        )
+        load_fastwam_checkpoint(self.model, self.checkpoint_path)
         actual_checkpoint_sha256 = getattr(
             self.model,
             "_loaded_base_checkpoint_sha256",

@@ -23,14 +23,14 @@ from alibabacloud_tea_openapi.models import Config
 
 
 EXPERIMENT_ID = "FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823"
-RUN_ID = "fastwam-gau1-step10k-placefood-same8-r2-20260823"
-ATTEMPT_ID = "attempt-002"
-DISPLAY_NAME = "fw-gau1-s10k-placefood-same8-r2"
+RUN_ID = "fastwam-gau1-step10k-placefood-same8-r3-20260823"
+ATTEMPT_ID = "attempt-003"
+DISPLAY_NAME = "fw-gau1-s10k-placefood-same8-r3"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-OUTPUT_ROOT = "/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2"
+OUTPUT_ROOT = "/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-20260823-r3"
 CHECKPOINT = "/oss-chengjuntao/artifacts/fastwam-n234-vg1h1gau1-cont50k-s42-24g-r1-20260822/checkpoints/weights/step_010000.pt"
-SOURCE_BUNDLE = "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau1-step10k-placefood-same8-eval-20260823-r2.bundle"
+SOURCE_BUNDLE = "/oss-chengjuntao/artifacts/fastwam-nohash-source-snapshots/fastwam-gau1-step10k-placefood-same8-eval-20260823-r3.bundle"
 IMAGE = "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
 SDK_PYTHON = pathlib.Path("/usr/bin/python3")
 SDK_PYTHONPATH = pathlib.Path("/tmp/gau1-sdk-target-c8Pn5S")
