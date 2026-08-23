@@ -4,7 +4,7 @@ umask 077
 
 EXPERIMENT_REL='.research-workflow/experiments/FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823'
 EXPERIMENT_ID='FASTWAM-MR-N234-VG1H1GAU1-STEP10000-PLACEFOOD-SAME8-S42-R1-20260823'
-RUN_ID='fastwam-gau1-step10k-placefood-same8-dsw4-r4-20260823'
+RUN_ID='fastwam-gau1-step10k-placefood-same8-dsw4-r5-20260823'
 
 die() {
   printf 'STEP10K_DSW_EVAL_FATAL: %s\n' "$*" >&2
@@ -20,7 +20,8 @@ required_env=(
   FASTWAM_CONTEXT_SIZE_BYTES FASTWAM_MODEL_CACHE_ROOT FASTWAM_POLICY_LIGHTNING_ROOT
   FASTWAM_POLICY_LIGHTNING_COMMIT FASTWAM_NOPOSPLAT_CHECKPOINT
   FASTWAM_NOPOSPLAT_CHECKPOINT_SIZE_BYTES FASTWAM_NVIDIA_GRAPHICS_ROOT
-  FASTWAM_PYTHON FASTWAM_TRAINING_SOURCE_COMMIT FASTWAM_TRAINING_JOB_ID
+  FASTWAM_PYTHON FASTWAM_PYTHON_OVERLAY FASTWAM_TRAINING_SOURCE_COMMIT
+  FASTWAM_TRAINING_JOB_ID
 )
 for name in "${required_env[@]}"; do
   [[ -n "${!name:-}" ]] || die "missing environment variable ${name}"
@@ -29,16 +30,17 @@ done
 [[ "${FASTWAM_EVAL_SCOPE}" == 'smoke' || "${FASTWAM_EVAL_SCOPE}" == 'formal' ]] || die 'scope must be smoke or formal'
 [[ "${FASTWAM_EXPERIMENT_ID}" == "${EXPERIMENT_ID}" ]] || die 'experiment identity drift'
 [[ "${FASTWAM_RUN_ID}" == "${RUN_ID}" ]] || die 'run identity drift'
-[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-004' ]] || die 'attempt identity drift'
+[[ "${FASTWAM_ATTEMPT_ID}" == 'attempt-005' ]] || die 'attempt identity drift'
+[[ "${FASTWAM_PYTHON_OVERLAY}" == '/cpfs/user/chengjuntao/fastwam_eval_runtime/python-overlays/jaxtyping-0.3.7-wadler-0.1.7-py310-attempt005-20260823' ]] || die 'Python overlay drift'
 [[ "${FASTWAM_CHECKPOINT}" == '/oss-chengjuntao/artifacts/fastwam-n234-vg1h1gau1-cont50k-s42-24g-r1-20260822/checkpoints/weights/step_010000.pt' ]] || die 'checkpoint path drift'
 [[ "${FASTWAM_CHECKPOINT_SIZE_BYTES}" == '12047213657' ]] || die 'checkpoint byte-size drift'
 
 if [[ "${FASTWAM_EVAL_SCOPE}" == 'smoke' ]]; then
-  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r4-smoke-episode0-20260823'
-  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r4-smoke-control-20260823'
+  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-smoke-episode0-20260823'
+  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-smoke-control-20260823'
 else
-  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r4-20260823'
-  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r4-control-20260823'
+  expected_output='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-20260823'
+  expected_control='/oss-chengjuntao/artifacts/fastwam-gau1-step10k-placefood-same8-eval-dsw4-r5-control-20260823'
 fi
 [[ "${FASTWAM_OUTPUT_ROOT}" == "${expected_output}" ]] || die 'output root drift'
 [[ "${FASTWAM_CONTROL_ROOT}" == "${expected_control}" ]] || die 'control root drift'
@@ -57,7 +59,8 @@ for file in "${FASTWAM_CHECKPOINT}" "${FASTWAM_PANEL}" "${FASTWAM_STATS}" "${FAS
 done
 for directory in "${FASTWAM_DATASET_ROOT}" "${FASTWAM_ROBOFACTORY_ROOT}" \
   "${FASTWAM_CONTEXT_CACHE_DIR}" "${FASTWAM_MODEL_CACHE_ROOT}" \
-  "${FASTWAM_POLICY_LIGHTNING_ROOT}" "${FASTWAM_NVIDIA_GRAPHICS_ROOT}"; do
+  "${FASTWAM_POLICY_LIGHTNING_ROOT}" "${FASTWAM_NVIDIA_GRAPHICS_ROOT}" \
+  "${FASTWAM_PYTHON_OVERLAY}"; do
   [[ -d "${directory}" && ! -L "${directory}" ]] || die "required directory is missing or unsafe: ${directory}"
 done
 
@@ -65,8 +68,6 @@ observed_commit="$(git -C "${FASTWAM_SOURCE_ROOT}" rev-parse HEAD)"
 [[ "${observed_commit}" == "${FASTWAM_SOURCE_COMMIT}" ]] || die 'source commit drift'
 [[ -z "$(git -C "${FASTWAM_SOURCE_ROOT}" status --porcelain=v1 --untracked-files=all)" ]] || die 'source checkout is not clean'
 
-mkdir -m 0700 -- "${FASTWAM_CONTROL_ROOT}"
-mkdir -m 0700 -- "${FASTWAM_CONTROL_ROOT}/logs" "${FASTWAM_CONTROL_ROOT}/shards"
 scratch_root="$(mktemp -d /tmp/fastwam-step10k-placefood-dsw.XXXXXXXX)"
 cleanup() {
   case "${scratch_root}" in
@@ -80,7 +81,7 @@ mkdir -m 0700 -- "${scratch_root}/xdg-cache" "${scratch_root}/xdg-runtime" \
 
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
-export PYTHONPATH="${source_src}"
+export PYTHONPATH="${FASTWAM_PYTHON_OVERLAY}:${source_src}:${FASTWAM_POLICY_LIGHTNING_ROOT}"
 export WANDB_MODE=offline
 export MUJOCO_GL=egl
 export XDG_CACHE_HOME="${scratch_root}/xdg-cache"
@@ -113,8 +114,35 @@ if not callable(getattr(runtime, "create_multi_robot_fastwam", None)):
 print("STEP10K_DSW_EVAL_SOURCE_GATE=PASS", flush=True)
 PY
 
+"${FASTWAM_PYTHON}" -B - <<'PY' || die 'evaluation dependency gate failed'
+import importlib.metadata
+
+expected = {
+    "jaxtyping": "0.3.7",
+    "wadler-lindig": "0.1.7",
+}
+for distribution, version in expected.items():
+    observed = importlib.metadata.version(distribution)
+    if observed != version:
+        raise SystemExit(
+            f"distribution version drift: {distribution} expected={version} observed={observed}"
+        )
+
+from model.noposplat.encoder import get_encoder
+from fastwam.datasets.gaussian_cache.teacher import ExternalPolicyLightningTeacher
+
+if not callable(get_encoder):
+    raise SystemExit("Policy-Lightning get_encoder is not callable")
+if ExternalPolicyLightningTeacher.__name__ != "ExternalPolicyLightningTeacher":
+    raise SystemExit("FastWAM Gaussian teacher import drift")
+print("STEP10K_DSW_EVAL_DEPENDENCY_GATE=PASS jaxtyping=0.3.7 wadler_lindig=0.1.7", flush=True)
+PY
+
 gpu_count="$(${FASTWAM_PYTHON} -B -c 'import torch; print(torch.cuda.device_count())')"
 [[ "${gpu_count}" == '4' ]] || die "expected exactly 4 visible GPUs, observed ${gpu_count}"
+
+mkdir -m 0700 -- "${FASTWAM_CONTROL_ROOT}"
+mkdir -m 0700 -- "${FASTWAM_CONTROL_ROOT}/logs" "${FASTWAM_CONTROL_ROOT}/shards"
 
 common_argv=(
   "${evaluator}"
@@ -160,7 +188,7 @@ run_wave() {
     gpu=$((index - first))
     shard="${FASTWAM_CONTROL_ROOT}/shards/episode-$(printf '%02d' "${index}")"
     log="${FASTWAM_CONTROL_ROOT}/logs/episode-$(printf '%02d' "${index}").log"
-    CUDA_VISIBLE_DEVICES="${gpu}" PYTHONPATH="${source_src}" PYTHONNOUSERSITE=1 \
+    CUDA_VISIBLE_DEVICES="${gpu}" PYTHONPATH="${PYTHONPATH}" PYTHONNOUSERSITE=1 \
       PYTHONDONTWRITEBYTECODE=1 "${FASTWAM_PYTHON}" -B "${common_argv[@]}" \
       --episode-start "${index}" --output-dir "${shard}" >"${log}" 2>&1 &
     pids+=("$!")
