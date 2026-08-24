@@ -173,6 +173,8 @@ def create_multi_robot_fastwam(
     action_scheduler=None,
     loss=None,
     training_mode: str = "action_only_cache",
+    model_variant: str = "standard",
+    video_cond_noise_prob: float = 0.5,
     mot_checkpoint_mixed_attn: bool = True,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
@@ -180,7 +182,21 @@ def create_multi_robot_fastwam(
 ):
     """Hydra factory for the synchronized multi-robot FastWAM variant."""
 
-    from .models.wan22.fastwam_multi_robot import FastWAMMultiRobot
+    if model_variant == "standard":
+        from .models.wan22.fastwam_multi_robot import FastWAMMultiRobot
+
+        model_class = FastWAMMultiRobot
+        model_kwargs = {}
+    elif model_variant == "idm":
+        from .models.wan22.fastwam_multi_robot_idm import FastWAMMultiRobotIDM
+
+        model_class = FastWAMMultiRobotIDM
+        model_kwargs = {"video_cond_noise_prob": float(video_cond_noise_prob)}
+    else:
+        raise ValueError(
+            "`model_variant` must be one of {'standard', 'idm'}, "
+            f"got {model_variant!r}"
+        )
 
     def _as_dict(value, *, name: str, default=None):
         if isinstance(value, DictConfig):
@@ -202,7 +218,7 @@ def create_multi_robot_fastwam(
     if missing_keys:
         raise ValueError(f"`action_scheduler` missing required keys: {sorted(missing_keys)}")
 
-    return FastWAMMultiRobot.from_wan22_pretrained(
+    return model_class.from_wan22_pretrained(
         device=device,
         torch_dtype=model_dtype,
         model_id=model_id,
@@ -261,6 +277,7 @@ def create_multi_robot_fastwam(
         b4_event_temperature=float(b4_loss.get("event_temperature", 0.05)),
         b4_closed_temperature=float(b4_loss.get("closed_temperature", 0.1)),
         b4_background_weight=float(b4_loss.get("background_weight", 0.25)),
+        **model_kwargs,
     )
 
 

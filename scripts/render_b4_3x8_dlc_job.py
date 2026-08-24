@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, a PAI DLC CreateJob manifest for FastWAM 3x8."""
+"""Render, but never submit, a PAI DLC CreateJob manifest for FastWAM."""
 
 from __future__ import annotations
 
@@ -46,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--b4-code-commit", required=True)
     parser.add_argument(
         "--treatment",
-        choices=("b4", "n234_vg1h1gau1_cont50k"),
+        choices=(
+            "b4",
+            "n234_vg1h1gau1_cont50k",
+            "n234_vg0h1gau1_cont50k",
+            "n234_idm_h1gau1_cont50k",
+        ),
         default="b4",
     )
     parser.add_argument("--max-running-minutes", type=int)
@@ -109,9 +114,7 @@ def main() -> int:
     args = parse_args()
     max_running_minutes = args.max_running_minutes
     if max_running_minutes is None:
-        max_running_minutes = (
-            20160 if args.treatment == "n234_vg1h1gau1_cont50k" else 10080
-        )
+        max_running_minutes = 20160 if args.treatment != "b4" else 10080
     if not SAFE_ID.fullmatch(args.run_id) or not SAFE_ID.fullmatch(args.attempt_id):
         raise SystemExit("run-id and attempt-id must be safe unique identifiers")
     if max_running_minutes <= 0:
@@ -227,6 +230,39 @@ def main() -> int:
             "topology": "3x8-world24",
             "schedule": "cumulative-5000-to-50000-save-5000",
         }
+        pod_count = 3
+    elif args.treatment == "n234_vg0h1gau1_cont50k":
+        description = (
+            "N234 VG0H1GAU1 action-only continuation without video "
+            "co-training: cumulative 5000 to 50000, 45000 fresh-optimizer "
+            "updates, 2 workers x 8 GPUs"
+        )
+        tags = {
+            "experiment": "N234-VG0H1GAU1-CONT50K",
+            "initialization": "GAU1-step5000-weights-only",
+            "optimizer": "fresh",
+            "provenance": "stat-cmp-no-new-hash",
+            "topology": "2x8-world16",
+            "schedule": "cumulative-5000-to-50000-save-5000",
+            "treatment": "action-only-no-video-cotraining",
+        }
+        pod_count = 2
+    elif args.treatment == "n234_idm_h1gau1_cont50k":
+        description = (
+            "N234 IDM H1GAU1 joint continuation with independent "
+            "teacher-forcing video conditioning: cumulative 5000 to 50000, "
+            "45000 fresh-optimizer updates, 3 workers x 8 GPUs"
+        )
+        tags = {
+            "experiment": "N234-IDM-H1GAU1-CONT50K",
+            "initialization": "GAU1-step5000-weights-only",
+            "optimizer": "fresh",
+            "provenance": "stat-cmp-no-new-hash",
+            "topology": "3x8-world24",
+            "schedule": "cumulative-5000-to-50000-save-5000",
+            "treatment": "idm-independent-video-conditioning",
+        }
+        pod_count = 3
     else:
         description = (
             "B4 weights-only continuation: 3 workers x 8 GPUs, fresh "
@@ -239,6 +275,7 @@ def main() -> int:
             "provenance": "stat-cmp-no-new-hash",
             "topology": "3x8-world24",
         }
+        pod_count = 3
 
     request = {
         "Accessibility": "PRIVATE",
@@ -264,7 +301,7 @@ def main() -> int:
                 "ElasticSpotSpecs": [],
                 "Image": IMAGE,
                 "LocalMountSpecs": [],
-                "PodCount": 3,
+                "PodCount": pod_count,
                 "ResourceConfig": {
                     "CPU": "126",
                     "GPU": "8",

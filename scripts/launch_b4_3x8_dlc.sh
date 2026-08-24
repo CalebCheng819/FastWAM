@@ -172,10 +172,26 @@ case "${TRAINING_TREATMENT}" in
   b4)
     TASK_PROFILE="robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5"
     SCALE_PROFILE="robofactory_multi_robot_24gpu_b4"
+    EXPECTED_WORKERS=3
+    EXPECTED_GLOBAL_WORLD_SIZE=24
     ;;
   n234_vg1h1gau1_cont50k)
     TASK_PROFILE="robofactory_multi_robot_vg1_hub1_gau1_cont50k_224_1e-4"
     SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
+    EXPECTED_WORKERS=3
+    EXPECTED_GLOBAL_WORLD_SIZE=24
+    ;;
+  n234_vg0h1gau1_cont50k)
+    TASK_PROFILE="robofactory_multi_robot_vg0_hub1_gau1_cont50k_224_1e-4"
+    SCALE_PROFILE="robofactory_multi_robot_16gpu_cont50k"
+    EXPECTED_WORKERS=2
+    EXPECTED_GLOBAL_WORLD_SIZE=16
+    ;;
+  n234_idm_h1gau1_cont50k)
+    TASK_PROFILE="robofactory_multi_robot_idm_hub1_gau1_cont50k_224_1e-4"
+    SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
+    EXPECTED_WORKERS=3
+    EXPECTED_GLOBAL_WORLD_SIZE=24
     ;;
   *)
     die "unsupported FASTWAM_TRAINING_TREATMENT: ${TRAINING_TREATMENT}"
@@ -190,15 +206,19 @@ require_env FASTWAM_B4_PYTHON
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
 is_safe_id "${ATTEMPT_ID}" || die "FASTWAM_B4_ATTEMPT_ID is not a safe identifier: ${ATTEMPT_ID}"
 
-[[ "${NUM_MACHINES}" == "3" ]] || die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
+[[ "${NUM_MACHINES}" == "${EXPECTED_WORKERS}" ]] || \
+  die "WORLD_SIZE must be the DLC worker count ${EXPECTED_WORKERS}, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
-is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,2], got ${MACHINE_RANK:-unset}"
-((10#${MACHINE_RANK} < 3)) || die "RANK must be in [0,2], got ${MACHINE_RANK}"
+is_uint "${MACHINE_RANK:-x}" || \
+  die "RANK must be an integer in [0,$((EXPECTED_WORKERS - 1))], got ${MACHINE_RANK:-unset}"
+((10#${MACHINE_RANK} < EXPECTED_WORKERS)) || \
+  die "RANK must be in [0,$((EXPECTED_WORKERS - 1))], got ${MACHINE_RANK}"
 [[ -z "${LOCAL_RANK:-}" || "${LOCAL_RANK}" == "0" ]] || die "outer DLC command must run only once per node (LOCAL_RANK=0)"
 is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a non-loopback address shared by all workers"
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || die "MASTER_PORT must be in [1,65535]"
-[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 24 ]] || die "global world size must be exactly 24"
+[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq ${EXPECTED_GLOBAL_WORLD_SIZE} ]] || \
+  die "global world size must be exactly ${EXPECTED_GLOBAL_WORLD_SIZE}"
 
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || die "FASTWAM_B4_DRY_RUN must be 0 or 1"
 
@@ -213,7 +233,7 @@ fi
 [[ -f "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml" ]] || die "missing ZeRO-2 Accelerate config"
 [[ -f "${REPO_ROOT}/src/fastwam/trainer.py" ]] || die "missing trainer source"
 [[ -f "${REPO_ROOT}/configs/task/${TASK_PROFILE}.yaml" ]] || die "missing formal task profile"
-[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal 24-GPU scale profile"
+[[ -f "${REPO_ROOT}/configs/scale/${SCALE_PROFILE}.yaml" ]] || die "missing formal scale profile"
 if [[ "${TEST_MODE}" == "1" ]]; then
   [[ "${OUTPUT_DIR}" == /* ]] || die "test output must be an absolute path"
 else
@@ -521,6 +541,113 @@ elif treatment == "n234_vg1h1gau1_cont50k":
         "offline_eval_num_samples": 12,
     }
     expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
+elif treatment == "n234_vg0h1gau1_cont50k":
+    task_expected = {
+        "trainable_scope": "action",
+        "batch_size": 1,
+        "learning_rate": 1.0e-4,
+        "weight_decay": 1.0e-2,
+        "lr_scheduler_type": "cosine",
+        "max_steps": 50000,
+        "run_initial_global_step": 5000,
+        "save_every": 5000,
+        "eval_every": 5000,
+        "offline_eval_num_samples": 12,
+        "phase_balanced_fraction": 0.0,
+        "checkpoint_state_kind": "full",
+        "provenance_mode": "stat_cmp",
+        "resume": "${oc.env:FASTWAM_B4_BASE_CHECKPOINT}",
+        "weights_only_warm_start.enabled": True,
+        "weights_only_warm_start.expected_source_training_mode": "joint",
+        "weights_only_warm_start.expected_source_trainable_scope": "dit",
+        "weights_only_warm_start.expected_source_state_kind": "full",
+        "data.train.load_future_video": False,
+        "data.val.load_future_video": False,
+        "data.train.gaussian_cache_verify": "stat_cmp",
+        "data.val.gaussian_cache_verify": "stat_cmp",
+        "data.train.gaussian_cache_expected_manifest_sha256": None,
+        "data.train.gaussian_cache_expected_selection_sha256": None,
+        "data.train.gaussian_cache_expected_source_identity_sha256": None,
+        "data.val.gaussian_cache_expected_manifest_sha256": None,
+        "data.val.gaussian_cache_expected_selection_sha256": None,
+        "data.val.gaussian_cache_expected_source_identity_sha256": None,
+        "model.model_variant": "standard",
+        "model.training_mode": "action_only_cache",
+        "model.action_dit_config.hub_enabled": True,
+        "model.action_dit_config.enable_gaussian": True,
+        "model.loss.lambda_video": 0.0,
+        "model.loss.lambda_action": 1.0,
+        "model.loss.b4.enabled": False,
+    }
+    scale_expected = {
+        "gradient_accumulation_steps": 1,
+        "checkpoint_state_kind": "full",
+        "save_training_state": True,
+        "save_final_checkpoint": True,
+        "provenance_mode": "stat_cmp",
+        "seal_training_state": False,
+        "seal_training_run": False,
+        "terminal_rehash_weights": False,
+        "process_group_timeout_seconds": 21600,
+        "checkpoint_io_timeout_seconds": 21600,
+        "eval_every": 5000,
+        "offline_eval_num_samples": 12,
+    }
+    expected_parent = "robofactory_multi_robot_vg0_hub1_gau1_224_1e-4"
+elif treatment == "n234_idm_h1gau1_cont50k":
+    task_expected = {
+        "trainable_scope": "dit",
+        "batch_size": 1,
+        "learning_rate": 1.0e-4,
+        "weight_decay": 1.0e-2,
+        "lr_scheduler_type": "cosine",
+        "max_steps": 50000,
+        "run_initial_global_step": 5000,
+        "save_every": 5000,
+        "eval_every": 5000,
+        "offline_eval_num_samples": 12,
+        "phase_balanced_fraction": 0.0,
+        "checkpoint_state_kind": "full",
+        "provenance_mode": "stat_cmp",
+        "resume": "${oc.env:FASTWAM_B4_BASE_CHECKPOINT}",
+        "weights_only_warm_start.enabled": True,
+        "weights_only_warm_start.expected_source_training_mode": "joint",
+        "weights_only_warm_start.expected_source_trainable_scope": "dit",
+        "weights_only_warm_start.expected_source_state_kind": "full",
+        "data.train.load_future_video": True,
+        "data.val.load_future_video": True,
+        "data.train.gaussian_cache_verify": "stat_cmp",
+        "data.val.gaussian_cache_verify": "stat_cmp",
+        "data.train.gaussian_cache_expected_manifest_sha256": None,
+        "data.train.gaussian_cache_expected_selection_sha256": None,
+        "data.train.gaussian_cache_expected_source_identity_sha256": None,
+        "data.val.gaussian_cache_expected_manifest_sha256": None,
+        "data.val.gaussian_cache_expected_selection_sha256": None,
+        "data.val.gaussian_cache_expected_source_identity_sha256": None,
+        "model.model_variant": "idm",
+        "model.video_cond_noise_prob": 0.5,
+        "model.training_mode": "joint",
+        "model.action_dit_config.hub_enabled": True,
+        "model.action_dit_config.enable_gaussian": True,
+        "model.loss.lambda_video": 1.0,
+        "model.loss.lambda_action": 1.0,
+        "model.loss.b4.enabled": False,
+    }
+    scale_expected = {
+        "gradient_accumulation_steps": 1,
+        "checkpoint_state_kind": "full",
+        "save_training_state": True,
+        "save_final_checkpoint": True,
+        "provenance_mode": "stat_cmp",
+        "seal_training_state": False,
+        "seal_training_run": False,
+        "terminal_rehash_weights": False,
+        "process_group_timeout_seconds": 21600,
+        "checkpoint_io_timeout_seconds": 21600,
+        "eval_every": 5000,
+        "offline_eval_num_samples": 12,
+    }
+    expected_parent = "robofactory_multi_robot_vg1_hub1_gau1_224_1e-4"
 else:
     raise SystemExit(f"unsupported treatment: {treatment}")
 for label, mapping, expected in (
@@ -598,9 +725,9 @@ if [[ "${TEST_MODE}" != "1" ]]; then
 fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
-workers=3
+workers=${EXPECTED_WORKERS}
 gpus_per_worker=8
-global_world_size=24
+global_world_size=${EXPECTED_GLOBAL_WORLD_SIZE}
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
@@ -610,14 +737,14 @@ if [[ "${TRAINING_TREATMENT}" == "b4" ]]; then
   RESERVATION_BODY+="stage_steps=2500
 "
 else
-  RESERVATION_BODY+="training_treatment=n234_vg1h1gau1_cont50k
+  RESERVATION_BODY+="training_treatment=${TRAINING_TREATMENT}
 initial_global_step=5000
 target_global_step=50000
 optimizer_steps_this_run=45000
 per_device_batch_size=1
 gradient_accumulation_steps=1
 source_global_batch_size=32
-global_batch_size=24
+global_batch_size=${EXPECTED_GLOBAL_WORLD_SIZE}
 learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
@@ -686,11 +813,11 @@ export FASTWAM_B4_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
   --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml"
-  --num_machines 3
+  --num_machines "${NUM_MACHINES}"
   --machine_rank "${MACHINE_RANK}"
   --main_process_ip "${MASTER_HOST}"
   --main_process_port "${MASTER_TCP_PORT}"
-  --num_processes 24
+  --num_processes "${EXPECTED_GLOBAL_WORLD_SIZE}"
   --deepspeed_multinode_launcher standard
   "${REPO_ROOT}/scripts/train.py"
   "task=${TASK_PROFILE}"
@@ -716,8 +843,8 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
-# PAI's outer-worker topology describes three node coordinators, whereas
-# Accelerate is about to construct a fresh 24-process topology.  Keeping the
+# PAI's outer-worker topology describes node coordinators, whereas Accelerate
+# is about to construct a fresh 16- or 24-process topology. Keeping the
 # injected rank variables would make child rank discovery ambiguous.  All
 # values needed by Accelerate are already frozen into COMMAND above.
 unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK

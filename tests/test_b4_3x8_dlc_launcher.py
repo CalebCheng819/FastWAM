@@ -41,6 +41,8 @@ class B4LauncherTests(unittest.TestCase):
         for task_name in (
             "robofactory_multi_robot_b4_phase_gripcontact_actft_224_1e-5.yaml",
             "robofactory_multi_robot_vg1_hub1_gau1_cont50k_224_1e-4.yaml",
+            "robofactory_multi_robot_vg0_hub1_gau1_cont50k_224_1e-4.yaml",
+            "robofactory_multi_robot_idm_hub1_gau1_cont50k_224_1e-4.yaml",
         ):
             (repo / "configs" / "task" / task_name).write_text(
                 (REPO / "configs" / "task" / task_name).read_text(encoding="utf-8"),
@@ -49,6 +51,7 @@ class B4LauncherTests(unittest.TestCase):
         for scale_name in (
             "robofactory_multi_robot_24gpu_b4.yaml",
             "robofactory_multi_robot_24gpu_cont50k.yaml",
+            "robofactory_multi_robot_16gpu_cont50k.yaml",
         ):
             (repo / "configs" / "scale" / scale_name).write_text(
                 (REPO / "configs" / "scale" / scale_name).read_text(encoding="utf-8"),
@@ -193,6 +196,37 @@ class T:
             self.assertNotIn("phase_balanced_fraction=", output)
             self.assertNotIn("/checkpoints/state/", output)
             self.assertIn("B4 source import gate:", output)
+
+    def test_no_video_cont50k_contract_resolves_world16_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_TRAINING_TREATMENT"] = "n234_vg0h1gau1_cont50k"
+            env["WORLD_SIZE"] = "2"
+            result = self.run_launcher(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = result.stdout
+            self.assertIn("--num_machines 2", output)
+            self.assertIn("--num_processes 16", output)
+            self.assertIn(
+                "task=robofactory_multi_robot_vg0_hub1_gau1_cont50k_224_1e-4",
+                output,
+            )
+            self.assertIn("+scale=robofactory_multi_robot_16gpu_cont50k", output)
+
+    def test_idm_cont50k_contract_resolves_world24_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_TRAINING_TREATMENT"] = "n234_idm_h1gau1_cont50k"
+            result = self.run_launcher(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = result.stdout
+            self.assertIn("--num_machines 3", output)
+            self.assertIn("--num_processes 24", output)
+            self.assertIn(
+                "task=robofactory_multi_robot_idm_hub1_gau1_cont50k_224_1e-4",
+                output,
+            )
+            self.assertIn("+scale=robofactory_multi_robot_24gpu_cont50k", output)
 
     def test_topology_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -722,6 +756,65 @@ class T:
                 base64.b64decode(manifest["launcher_payload_base64"]),
                 committed_launcher,
             )
+
+    def test_renderer_pins_new_cont50k_topologies_and_priority(self) -> None:
+        cases = (
+            (
+                "n234_vg0h1gau1_cont50k",
+                "fastwam-n234-vg0h1gau1-cont50k-test",
+                2,
+                "2x8-world16",
+                "action-only-no-video-cotraining",
+            ),
+            (
+                "n234_idm_h1gau1_cont50k",
+                "fastwam-n234-idm-h1gau1-cont50k-test",
+                3,
+                "3x8-world24",
+                "idm-independent-video-conditioning",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle, code_commit, committed_launcher = self.committed_launcher_bundle(root)
+            for treatment, run_id, pod_count, topology, tag in cases:
+                with self.subTest(treatment=treatment):
+                    output = root / f"{treatment}.json"
+                    command = [
+                        sys.executable,
+                        str(RENDERER),
+                        "--run-id", run_id,
+                        "--attempt-id", "attempt-001",
+                        "--treatment", treatment,
+                        "--output", str(output),
+                        "--bootstrap-script", "/oss-chengjuntao/source/scripts/bootstrap_offline_training_env.sh",
+                        "--offline-env-source-root", "/oss-chengjuntao/offline-env",
+                        "--offline-env-manifest", "/oss-chengjuntao/offline-env/manifest.json",
+                        "--offline-code-commit", "4" * 40,
+                        "--offline-source-bundle-relative-path", "source/FastWAM.bundle",
+                        "--base-python", "/usr/local/bin/python3.10",
+                        "--b4-source-bundle", str(bundle),
+                        "--b4-code-commit", code_commit,
+                        "--allow-local-bundle-for-tests",
+                    ]
+                    result = subprocess.run(command, text=True, capture_output=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    manifest = json.loads(output.read_text(encoding="utf-8"))
+                    request = manifest["request"]
+                    spec = request["JobSpecs"][0]
+                    self.assertEqual(request["Priority"], 7)
+                    self.assertEqual(spec["PodCount"], pod_count)
+                    self.assertEqual(spec["ResourceConfig"]["GPU"], "8")
+                    self.assertEqual(
+                        request["Envs"]["FASTWAM_TRAINING_TREATMENT"],
+                        treatment,
+                    )
+                    self.assertEqual(request["Settings"]["Tags"]["topology"], topology)
+                    self.assertEqual(request["Settings"]["Tags"]["treatment"], tag)
+                    self.assertEqual(
+                        base64.b64decode(manifest["launcher_payload_base64"]),
+                        committed_launcher,
+                    )
 
     def test_renderer_rejects_a_commit_absent_from_the_explicit_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

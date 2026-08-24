@@ -210,6 +210,7 @@ class FastWAMMultiRobot(FastWAM):
         b4_event_temperature: float = 0.05,
         b4_closed_temperature: float = 0.1,
         b4_background_weight: float = 0.25,
+        **model_kwargs: Any,
     ) -> "FastWAMMultiRobot":
         if video_dit_config is None or "text_dim" not in video_dit_config:
             raise ValueError("`video_dit_config` with `text_dim` is required.")
@@ -283,6 +284,7 @@ class FastWAMMultiRobot(FastWAM):
             b4_event_temperature=b4_event_temperature,
             b4_closed_temperature=b4_closed_temperature,
             b4_background_weight=b4_background_weight,
+            **model_kwargs,
         )
         model.model_paths = {
             "video_dit": components.dit_path,

@@ -1,0 +1,61 @@
+# @package _global_
+
+# Continue the completed N234 VG1/HUB1/GAU1 joint model from cumulative step
+# 5,000 to cumulative step 50,000 with the multi-robot IDM path.  The action
+# branch consumes K/V from an independently sampled clean-or-noised video
+# conditioning pass instead of reusing the world-model denoising pass.
+defaults:
+  - robofactory_multi_robot_vg1_hub1_gau1_224_1e-4
+  - _self_
+
+trainable_scope: dit
+batch_size: 1
+learning_rate: 1.0e-4
+weight_decay: 1.0e-2
+lr_scheduler_type: cosine
+max_steps: 50000
+run_initial_global_step: 5000
+save_every: 5000
+eval_every: 5000
+offline_eval_num_samples: 12
+phase_balanced_fraction: 0.0
+checkpoint_state_kind: full
+provenance_mode: stat_cmp
+
+resume: ${oc.env:FASTWAM_B4_BASE_CHECKPOINT}
+weights_only_warm_start:
+  enabled: true
+  expected_source_training_mode: joint
+  expected_source_trainable_scope: dit
+  expected_source_state_kind: full
+
+data:
+  train:
+    load_future_video: true
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+  val:
+    load_future_video: true
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+
+model:
+  model_variant: idm
+  video_cond_noise_prob: 0.5
+  training_mode: joint
+  action_dit_config:
+    hub_enabled: true
+    enable_gaussian: true
+  loss:
+    lambda_video: 1.0
+    lambda_action: 1.0
+    b4:
+      enabled: false
+
+wandb:
+  group: robofactory-multirobot-idm-hub1-gau1-cont50k
+  name: fastwam-n234-idm-h1gau1-cont50k-s42-24g-r1

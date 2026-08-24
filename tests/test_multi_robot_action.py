@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from fastwam.models.wan22.fastwam_multi_robot import FastWAMMultiRobot
+from fastwam.models.wan22.fastwam_multi_robot_idm import FastWAMMultiRobotIDM
 from fastwam.models.wan22.mot import MoT
 from fastwam.models.wan22.multi_agent_action_dit import (
     GaussianAgentAdapter,
@@ -706,6 +707,43 @@ def test_multi_robot_runtime_forwards_b4_loss_contract(monkeypatch):
     assert captured["b4_gripper_dim"] == 7
     assert captured["b4_gripper_action_mean"] == 0.24164481092854787
     assert captured["b4_gripper_action_std"] == 0.9469631616807775
+
+
+def test_multi_robot_runtime_selects_idm_variant(monkeypatch):
+    from fastwam import runtime
+
+    captured = {}
+    sentinel = object()
+
+    def fake_from_pretrained(**kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(
+        FastWAMMultiRobotIDM,
+        "from_wan22_pretrained",
+        staticmethod(fake_from_pretrained),
+    )
+    result = runtime.create_multi_robot_fastwam(
+        model_id="unused",
+        tokenizer_model_id="unused",
+        video_dit_config={"text_dim": 16},
+        action_dit_config={},
+        video_scheduler={},
+        action_scheduler={
+            "train_shift": 5.0,
+            "infer_shift": 5.0,
+            "num_train_timesteps": 1000,
+        },
+        training_mode="joint",
+        model_variant="idm",
+        video_cond_noise_prob=0.5,
+        device="cpu",
+    )
+
+    assert result is sentinel
+    assert captured["training_mode"] == "joint"
+    assert captured["video_cond_noise_prob"] == 0.5
 
 
 def test_geometry_action_preprocessing_is_permutation_equivariant():

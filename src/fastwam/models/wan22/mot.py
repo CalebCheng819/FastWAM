@@ -388,15 +388,15 @@ class MoT(nn.Module):
             gate_mlp,
         )
 
-    def prefill_video_cache(
+    def forward_video_with_cache(
         self,
         video_tokens: torch.Tensor,
         video_freqs: torch.Tensor,
         video_t_mod: torch.Tensor,
         video_context_payload: Optional[dict],
         video_attention_mask: torch.Tensor,
-    ) -> list[dict[str, torch.Tensor]]:
-        """Prefill video branch once and cache per-layer K/V for action denoising.
+    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
+        """Run the video branch and return its output plus per-layer K/V.
 
         Args:
             video_tokens: Video tokens before layer 0, shape [B, Sv, D].
@@ -408,13 +408,14 @@ class MoT(nn.Module):
             video_attention_mask: Video self-attention mask, shape [Sv, Sv].
 
         Returns:
+            Final video tokens after all MoT layers.
             Layer-wise cache list with length `num_layers`.
             Each entry contains:
                 - `k`: video key tensor [B, Sv, H*Dh]
                 - `v`: video value tensor [B, Sv, H*Dh]
         """
         if "video" not in self.mixtures:
-            raise ValueError("MoT requires `video` expert for `prefill_video_cache`.")
+            raise ValueError("MoT requires `video` expert for `forward_video_with_cache`.")
         if video_attention_mask.ndim != 2:
             raise ValueError(
                 f"`video_attention_mask` must be 2D [S,S], got shape {tuple(video_attention_mask.shape)}"
@@ -472,6 +473,25 @@ class MoT(nn.Module):
                 context_payload=video_context_payload,
             )
             kv_cache.append({"k": k, "v": v})
+        return x, kv_cache
+
+    def prefill_video_cache(
+        self,
+        video_tokens: torch.Tensor,
+        video_freqs: torch.Tensor,
+        video_t_mod: torch.Tensor,
+        video_context_payload: Optional[dict],
+        video_attention_mask: torch.Tensor,
+    ) -> list[dict[str, torch.Tensor]]:
+        """Prefill video K/V while preserving the established cache-only API."""
+
+        _, kv_cache = self.forward_video_with_cache(
+            video_tokens=video_tokens,
+            video_freqs=video_freqs,
+            video_t_mod=video_t_mod,
+            video_context_payload=video_context_payload,
+            video_attention_mask=video_attention_mask,
+        )
         return kv_cache
 
     def forward_action_with_video_cache(

@@ -502,6 +502,101 @@ def test_n234_vg1h1gau1_cont50k_profile_is_cumulative_weight_warm_start(monkeypa
         )
 
 
+def test_n234_vg0h1gau1_cont50k_profile_disables_video_cotraining(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    for name in (
+        "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FASTWAM_B4_BASE_CHECKPOINT", TEST_B4_BASE_CHECKPOINT)
+    cfg = _compose_arm(
+        "robofactory_multi_robot_vg0_hub1_gau1_cont50k_224_1e-4",
+        "+scale=robofactory_multi_robot_16gpu_cont50k",
+    )
+
+    assert cfg["resume"] == TEST_B4_BASE_CHECKPOINT
+    assert cfg["weights_only_warm_start"] == {
+        "enabled": True,
+        "expected_source_training_mode": "joint",
+        "expected_source_trainable_scope": "dit",
+        "expected_source_state_kind": "full",
+    }
+    assert cfg["run_initial_global_step"] == 5000
+    assert cfg["max_steps"] == 50000
+    assert cfg["save_every"] == 5000
+    assert cfg["eval_every"] == 5000
+    assert cfg["offline_eval_num_samples"] == 12
+    assert cfg["batch_size"] == 1
+    assert cfg["gradient_accumulation_steps"] == 1
+    assert cfg["learning_rate"] == 1.0e-4
+    assert cfg["trainable_scope"] == "action"
+    assert cfg["model"]["model_variant"] == "standard"
+    assert cfg["model"]["training_mode"] == "action_only_cache"
+    assert cfg["model"]["action_dit_config"]["hub_enabled"] is True
+    assert cfg["model"]["action_dit_config"]["enable_gaussian"] is True
+    assert cfg["model"]["loss"]["lambda_video"] == 0.0
+    assert cfg["model"]["loss"]["lambda_action"] == 1.0
+    assert cfg["model"]["loss"]["b4"]["enabled"] is False
+    assert cfg["checkpoint_state_kind"] == "full"
+    assert cfg["provenance_mode"] == "stat_cmp"
+    assert cfg["save_training_state"] is True
+
+    for split in ("train", "val"):
+        assert cfg["data"][split]["required_agent_counts"] == [2, 3, 4]
+        assert cfg["data"][split]["load_future_video"] is False
+        assert cfg["data"][split]["gaussian_cache_verify"] == "stat_cmp"
+
+
+def test_n234_idm_h1gau1_cont50k_profile_selects_idm_joint_path(monkeypatch):
+    monkeypatch.setenv("FASTWAM_GAUSSIAN_CACHE_DIR", TEST_GAUSSIAN_CACHE_DIR)
+    for name in (
+        "FASTWAM_GAUSSIAN_CACHE_MANIFEST_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SELECTION_SHA256",
+        "FASTWAM_GAUSSIAN_CACHE_SOURCE_IDENTITY_SHA256",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FASTWAM_B4_BASE_CHECKPOINT", TEST_B4_BASE_CHECKPOINT)
+    cfg = _compose_arm(
+        "robofactory_multi_robot_idm_hub1_gau1_cont50k_224_1e-4",
+        "+scale=robofactory_multi_robot_24gpu_cont50k",
+    )
+
+    assert cfg["resume"] == TEST_B4_BASE_CHECKPOINT
+    assert cfg["weights_only_warm_start"] == {
+        "enabled": True,
+        "expected_source_training_mode": "joint",
+        "expected_source_trainable_scope": "dit",
+        "expected_source_state_kind": "full",
+    }
+    assert cfg["run_initial_global_step"] == 5000
+    assert cfg["max_steps"] == 50000
+    assert cfg["save_every"] == 5000
+    assert cfg["eval_every"] == 5000
+    assert cfg["offline_eval_num_samples"] == 12
+    assert cfg["batch_size"] == 1
+    assert cfg["gradient_accumulation_steps"] == 1
+    assert cfg["learning_rate"] == 1.0e-4
+    assert cfg["trainable_scope"] == "dit"
+    assert cfg["model"]["model_variant"] == "idm"
+    assert cfg["model"]["video_cond_noise_prob"] == 0.5
+    assert cfg["model"]["training_mode"] == "joint"
+    assert cfg["model"]["action_dit_config"]["hub_enabled"] is True
+    assert cfg["model"]["action_dit_config"]["enable_gaussian"] is True
+    assert cfg["model"]["loss"]["lambda_video"] == 1.0
+    assert cfg["model"]["loss"]["lambda_action"] == 1.0
+    assert cfg["model"]["loss"]["b4"]["enabled"] is False
+    assert cfg["checkpoint_state_kind"] == "full"
+    assert cfg["provenance_mode"] == "stat_cmp"
+    assert cfg["save_training_state"] is True
+
+    for split in ("train", "val"):
+        assert cfg["data"][split]["required_agent_counts"] == [2, 3, 4]
+        assert cfg["data"][split]["load_future_video"] is True
+        assert cfg["data"][split]["gaussian_cache_verify"] == "stat_cmp"
+
+
 def test_default_sampler_does_not_enable_b4_phase_treatment(monkeypatch):
     _set_gaussian_env(monkeypatch)
     cfg = _compose_arm("robofactory_multi_robot_vg1_hub1_gau1_224_1e-4")
