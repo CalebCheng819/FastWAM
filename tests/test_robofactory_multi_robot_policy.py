@@ -18,6 +18,8 @@ from experiments.robofactory.fastwam_multi_robot_policy import (
     camera_rgb_uint8,
     canonicalize_root_pose,
     compose_step5000_model_config,
+    action_scaling_contract,
+    denormalize_actions,
     denormalize_and_flatten_actions,
     load_fastwam_checkpoint,
     load_normalization_stats,
@@ -215,6 +217,21 @@ def test_denormalize_and_flatten_actions_preserves_agent_blocks():
         )
     ).numpy()
     np.testing.assert_array_equal(flattened[0], expected_first_step)
+
+
+def test_action_denormalization_contract_does_not_clip_out_of_range_values():
+    normalized = torch.full((2, 1, 8), 3.0, dtype=torch.float32)
+
+    denormalized = denormalize_actions(normalized, _stats())
+    contract = action_scaling_contract(_stats())
+
+    expected = normalized * 2.0 + torch.arange(8, dtype=torch.float32)
+    assert torch.equal(denormalized, expected)
+    assert float(denormalized.max()) > 1.0
+    assert contract["clipping_applied"] is False
+    assert contract["formula"] == "normalized_action * action_std + action_mean"
+    assert contract["action_mean"] == [float(value) for value in range(8)]
+    assert contract["action_std"] == [2.0] * 8
 
 
 def test_stats_loader_is_hash_pinned_and_clamps_std(tmp_path: Path):

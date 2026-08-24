@@ -601,18 +601,39 @@ def encode_compact_agent_gaussian(
     return compact.contiguous()
 
 
-def denormalize_and_flatten_actions(
+def denormalize_actions(
     normalized_action: torch.Tensor,
     stats: NormalizationStats,
-) -> np.ndarray:
+) -> torch.Tensor:
+    """Apply the training action statistics without implicit clipping."""
+
     action = _as_cpu_tensor(normalized_action).to(torch.float32)
     if action.ndim != 3 or action.shape[2] != _ACTION_DIMENSION:
         raise ValueError(f"FastWAM action must be [N,H,8], got {tuple(action.shape)}")
     denormalized = action * stats.action_std + stats.action_mean
     if not bool(torch.isfinite(denormalized).all().item()):
         raise FloatingPointError("FastWAM produced non-finite de-normalized actions")
+    return denormalized.contiguous()
+
+
+def action_scaling_contract(stats: NormalizationStats) -> dict[str, Any]:
+    """Return the exact normalization contract used by policy inference."""
+
+    return {
+        "formula": "normalized_action * action_std + action_mean",
+        "clipping_applied": False,
+        "action_mean": stats.action_mean.detach().cpu().tolist(),
+        "action_std": stats.action_std.detach().cpu().tolist(),
+    }
+
+
+def denormalize_and_flatten_actions(
+    normalized_action: torch.Tensor,
+    stats: NormalizationStats,
+) -> np.ndarray:
+    denormalized = denormalize_actions(normalized_action, stats)
     # RoboFactory consumes one flat [agent0(8), agent1(8), ...] vector per step.
-    flattened = denormalized.permute(1, 0, 2).reshape(action.shape[1], -1)
+    flattened = denormalized.permute(1, 0, 2).reshape(denormalized.shape[1], -1)
     return np.ascontiguousarray(flattened.numpy(), dtype=np.float32)
 
 
@@ -902,6 +923,12 @@ class FastWAMMultiRobotPolicy:
 
     @torch.inference_mode()
     def get_action(self) -> np.ndarray:
+        return np.ascontiguousarray(self.get_action_trace()["flat_action"])
+
+    @torch.inference_mode()
+    def get_action_trace(self) -> dict[str, Any]:
+        """Return normalized and de-normalized actions for rollout diagnostics."""
+
         if self._prepared is None:
             raise RuntimeError("No observation is recorded; call update_obs first")
         agent_gaussian = (
@@ -943,8 +970,22 @@ class FastWAMMultiRobotPolicy:
             raise ValueError(
                 f"infer_action_multi action must be {expected_shape}, got {tuple(normalized_action.shape)}"
             )
+        normalized_cpu = _as_cpu_tensor(normalized_action).to(torch.float32).contiguous()
+        denormalized_cpu = denormalize_actions(normalized_cpu, self.stats)
+        flattened = denormalized_cpu.permute(1, 0, 2).reshape(
+            denormalized_cpu.shape[1], -1
+        )
+        flat_action = np.ascontiguousarray(flattened.numpy(), dtype=np.float32)
+        query_index = int(self._query_index)
         self._query_index += 1
-        return denormalize_and_flatten_actions(normalized_action, self.stats)
+        return {
+            "query_index": query_index,
+            "inference_seed": inference_seed,
+            "agent_names": list(self._prepared.agent_names),
+            "normalized_action": normalized_cpu.numpy(),
+            "denormalized_action": denormalized_cpu.numpy(),
+            "flat_action": flat_action,
+        }
 
     def provenance(self) -> dict[str, Any]:
         return {
@@ -964,6 +1005,7 @@ class FastWAMMultiRobotPolicy:
             "context_size_bytes": self.text_context.size_bytes,
             "task_name": self.text_context.task_name,
             "allowed_agent_counts": list(self.allowed_agent_counts),
+            "action_scaling": action_scaling_contract(self.stats),
             "action_horizon": self.action_horizon,
             "num_inference_steps": self.num_inference_steps,
             "sigma_shift": self.sigma_shift,
@@ -998,8 +1040,10 @@ __all__ = [
     "canonical_task_name",
     "canonicalize_root_pose",
     "camera_rgb_uint8",
+    "action_scaling_contract",
     "compose_step5000_model_config",
     "denormalize_and_flatten_actions",
+    "denormalize_actions",
     "encode_compact_agent_gaussian",
     "extract_agent_state_and_geometry",
     "load_normalization_stats",
