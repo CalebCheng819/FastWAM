@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from experiments.robofactory.run_same8_diagnostic_matrix import (
     CONDITIONS,
     aggregate_results,
     condition_command,
+    configured_python_executable,
     load_base_arguments,
 )
 
@@ -67,6 +70,34 @@ def test_condition_command_pins_video_and_condition_managed_contract(tmp_path: P
     assert command[command.index("--oracle-intervention") + 1] == "robot0_pose"
     assert command[command.index("--device") + 1] == "cuda:0"
     assert command[command.index("--condition-name") + 1] == CONDITIONS[1].name
+
+
+def test_configured_python_preserves_virtualenv_symlink(tmp_path: Path):
+    virtualenv_python = tmp_path / "venv" / "bin" / "python"
+    virtualenv_python.parent.mkdir(parents=True)
+    virtualenv_python.symlink_to(Path(sys.executable).resolve())
+
+    configured = configured_python_executable(virtualenv_python)
+    command = condition_command(
+        CONDITIONS[0],
+        python=configured,
+        evaluator=Path("/repo/eval.py"),
+        output_root=tmp_path / "output",
+        base_arguments=["--mode", "fastwam"],
+    )
+
+    assert configured == virtualenv_python
+    assert os.path.islink(configured)
+    assert command[0] == str(virtualenv_python)
+
+
+def test_configured_python_rejects_non_executable(tmp_path: Path):
+    candidate = tmp_path / "python"
+    candidate.write_text("#!/bin/sh\n", encoding="utf-8")
+    candidate.chmod(0o644)
+
+    with pytest.raises(ValueError, match="executable file"):
+        configured_python_executable(candidate)
 
 
 def test_matrix_aggregate_exposes_closed_loop_and_diagnostic_metrics():

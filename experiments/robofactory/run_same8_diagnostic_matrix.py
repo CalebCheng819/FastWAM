@@ -88,6 +88,15 @@ def load_base_arguments(path: Path) -> list[str]:
     return list(arguments)
 
 
+def configured_python_executable(path: Path) -> Path:
+    """Validate a configured Python without resolving a virtualenv symlink."""
+
+    configured = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    if not configured.is_file() or not os.access(configured, os.X_OK):
+        raise ValueError(f"Python must be an executable file: {configured}")
+    return configured
+
+
 def condition_command(
     condition: Condition,
     *,
@@ -225,7 +234,7 @@ def main() -> int:
     if output_root.exists() or output_root.is_symlink():
         raise FileExistsError(f"Matrix output must not already exist: {output_root}")
     output_root = output_root.resolve()
-    python = args.python.expanduser().resolve(strict=True)
+    python = configured_python_executable(args.python)
     evaluator = args.evaluator.expanduser().resolve(strict=True)
     if evaluator.is_symlink() or not evaluator.is_file():
         raise ValueError(f"Evaluator must be a regular file: {evaluator}")
