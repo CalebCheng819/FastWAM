@@ -260,3 +260,68 @@ def test_action_space_contract_records_exact_bounds_without_evaluator_clipping()
     assert contract["environment_action_space"]["panda-0"]["shape"] == [8]
     assert contract["environment_action_space"]["panda-0"]["low"] == [-1.0] * 8
     assert contract["environment_action_space"]["panda-0"]["high"] == [1.0] * 8
+
+
+def test_publish_directory_requires_two_consecutive_full_readbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "source"
+    destination = tmp_path / "published"
+    source.mkdir()
+    (source / "episode_result.json").write_text('{"success": true}\n')
+    calls = 0
+    original = eval_module._files_equal
+
+    def initially_stale(left: Path, right: Path) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return False
+        return original(left, right)
+
+    monkeypatch.setattr(eval_module, "_files_equal", initially_stale)
+    monkeypatch.setattr(eval_module.time, "sleep", lambda _seconds: None)
+
+    receipt = eval_module._publish_directory(source, destination)
+
+    assert calls == 3
+    assert receipt == {
+        "path": str(destination),
+        "files": 1,
+        "bytes": (source / "episode_result.json").stat().st_size,
+    }
+    assert (destination / "episode_result.json").read_bytes() == (
+        source / "episode_result.json"
+    ).read_bytes()
+
+
+def test_publish_directory_persistent_mismatch_fails_without_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    source = tmp_path / "source"
+    destination = tmp_path / "published"
+    source.mkdir()
+    expected = b'{"success": false}\n'
+    (source / "episode_result.json").write_bytes(expected)
+    monkeypatch.setattr(eval_module, "_files_equal", lambda _left, _right: False)
+    monkeypatch.setattr(eval_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="did not stabilize after 6 attempts"):
+        eval_module._publish_directory(source, destination)
+
+    assert destination.is_dir()
+    assert (destination / "episode_result.json").read_bytes() == expected
+
+
+def test_publish_directory_refuses_existing_destination(tmp_path: Path):
+    source = tmp_path / "source"
+    destination = tmp_path / "published"
+    source.mkdir()
+    destination.mkdir()
+    (source / "episode_result.json").write_text("source\n")
+    (destination / "episode_result.json").write_text("existing\n")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        eval_module._publish_directory(source, destination)
+
+    assert (destination / "episode_result.json").read_text() == "existing\n"

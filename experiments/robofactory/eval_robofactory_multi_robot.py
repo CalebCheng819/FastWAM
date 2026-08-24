@@ -75,6 +75,9 @@ ORACLE_INTERVENTIONS = (
     "robot0_gripper",
     "robot1_action",
 )
+PUBLISH_VERIFY_ATTEMPTS = 6
+PUBLISH_VERIFY_CONSECUTIVE_PASSES = 2
+PUBLISH_VERIFY_RETRY_SECONDS = 1.0
 
 
 # SAPIEN, Gymnasium, and OpenCV load overlapping native graphics/runtime
@@ -632,16 +635,44 @@ def _publish_directory(source: Path, destination: Path) -> dict[str, Any]:
     inventory = _regular_file_inventory(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination, symlinks=False)
-    published = _regular_file_inventory(destination)
-    if published != inventory:
-        raise RuntimeError("Published episode inventory differs from local staging")
-    for relative in inventory:
-        if not _files_equal(source / relative, destination / relative):
-            raise RuntimeError(f"Published episode file differs: {relative}")
+    consecutive_passes = 0
+    last_error = "verification did not run"
+    for attempt in range(1, PUBLISH_VERIFY_ATTEMPTS + 1):
+        try:
+            published = _regular_file_inventory(destination)
+            if published != inventory:
+                last_error = "published inventory differs from local staging"
+                consecutive_passes = 0
+            else:
+                differing = next(
+                    (
+                        relative
+                        for relative in inventory
+                        if not _files_equal(source / relative, destination / relative)
+                    ),
+                    None,
+                )
+                if differing is not None:
+                    last_error = f"published file differs: {differing}"
+                    consecutive_passes = 0
+                else:
+                    consecutive_passes += 1
+                    if consecutive_passes >= PUBLISH_VERIFY_CONSECUTIVE_PASSES:
+                        break
+        except OSError as error:
+            last_error = f"transient read failed: {error}"
+            consecutive_passes = 0
+        if attempt < PUBLISH_VERIFY_ATTEMPTS:
+            time.sleep(PUBLISH_VERIFY_RETRY_SECONDS)
+    else:
+        raise RuntimeError(
+            "Published episode verification did not stabilize after "
+            f"{PUBLISH_VERIFY_ATTEMPTS} attempts: {last_error}"
+        )
     return {
         "path": str(destination),
         "files": len(inventory),
-        "bytes": sum((destination / relative).stat().st_size for relative in inventory),
+        "bytes": sum((source / relative).stat().st_size for relative in inventory),
     }
 
 
