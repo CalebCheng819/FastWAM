@@ -97,6 +97,7 @@ class MicroPartContext:
     compact_root: Path | None
     need_canonical: bool
     need_compact: bool
+    primary_cache_kind: str = "canonical"
 
     @property
     def partition_metadata(self) -> dict[str, Any]:
@@ -117,7 +118,7 @@ class MicroPartContext:
                 self.bootstrap.plan["producer"]["source_snapshot_sha256"]
             ),
         }
-        if self.compact_root is not None:
+        if self.compact_root is not None or self.primary_cache_kind == "compact":
             identity["compact_selection"] = compact_selection_part_identity(
                 self.bootstrap.plan,
                 self.micro_part,
@@ -829,8 +830,12 @@ def make_official_teacher_factory(settings: OfficialBuildSettings) -> TeacherFac
     return factory
 
 
-def make_official_processor(settings: OfficialBuildSettings) -> MicroPartProcessor:
-    """Build canonical+compact parts from the sealed plan with no external callbacks."""
+def make_official_processor(
+    settings: OfficialBuildSettings,
+    *,
+    direct_compact: bool = False,
+) -> MicroPartProcessor:
+    """Build paired caches or direct compact parts from the sealed plan."""
 
     def compact_keys(context: MicroPartContext) -> tuple[FrameKey, ...]:
         key = (
@@ -841,6 +846,49 @@ def make_official_processor(settings: OfficialBuildSettings) -> MicroPartProcess
             return context.bootstrap.compact_selection[key]
         except KeyError as exc:
             raise KeyError(f"No preloaded compact selection for {key}") from exc
+
+    if direct_compact:
+
+        @plan_aware_processor
+        def build_direct_compact(context: MicroPartContext, teacher: Any) -> None:
+            if teacher is None or context.primary_cache_kind != "compact":
+                raise RuntimeError("Official direct compact build requires a teacher")
+            if context.compact_root is not None:
+                raise RuntimeError("Direct compact build must have exactly one output root")
+            source_path = str(context.micro_part["source_path"])
+            preverified_state = context.bootstrap.verified_sources[source_path][1]
+            from .extract import extract_canonical_cache
+            from .transaction import run_single_micro_part
+
+            run_single_micro_part(
+                context.canonical_root,
+                task_id=str(context.micro_part["micro_part_id"]),
+                work_plan_sha256=context.bootstrap.plan["partition"][
+                    "work_plan_sha256"
+                ],
+                role="compact",
+                micro_part_index=int(context.micro_part["part_index"]),
+                work_identity=context.work_identity,
+                build=lambda: extract_canonical_cache(
+                    context.bootstrap.dataset_root,
+                    context.canonical_root,
+                    teacher=teacher,
+                    selection="index",
+                    selection_keys=compact_keys(context),
+                    batch_size=int(settings.batch_size),
+                    target_shard_bytes=int(settings.compact_target_shard_bytes),
+                    staging_dir=context.bootstrap.staging_dir,
+                    verify_uploaded_checksum=bool(settings.verify_uploaded_checksum),
+                    work_plan=context.bootstrap.plan,
+                    micro_part_index=int(context.micro_part["part_index"]),
+                    preverified_source_state=preverified_state,
+                    direct_compact=True,
+                ),
+                verify_existing_shard_checksums=True,
+                verify_new_shard_checksums=False,
+            )
+
+        return build_direct_compact
 
     @plan_aware_processor
     def build_both(context: MicroPartContext, teacher: Any) -> None:
@@ -964,6 +1012,7 @@ def run_worker(
     failure_log_root: str | Path | None = None,
     cuda_binder: Callable[[WorkerIdentity], Any] = bind_cuda_device,
     part_verifier: PartVerifier = verify_micro_part,
+    direct_compact: bool = False,
 ) -> dict[str, Any]:
     """Run rank-strided micro-parts with one teacher instance on one GPU."""
 
@@ -971,10 +1020,17 @@ def run_worker(
     plan = load_work_plan(resolved_plan_root)
     plan_sha256 = work_plan_payload_sha256(plan)
     _require_plan_aware(process_micro_part, "process_micro_part")
-    if (compact_output_root is None) != (compact_selection_jsonl is None):
+    direct_compact = bool(direct_compact)
+    if direct_compact:
+        if compact_output_root is not None:
+            raise ValueError("direct_compact accepts only the primary output root")
+        if compact_selection_jsonl is None:
+            raise ValueError("direct_compact requires compact_selection_jsonl")
+    elif (compact_output_root is None) != (compact_selection_jsonl is None):
         raise ValueError(
             "compact_output_root and compact_selection_jsonl must be supplied together"
         )
+    primary_cache_kind = "compact" if direct_compact else "canonical"
     assigned = assigned_micro_parts(
         plan,
         worker,
@@ -1006,7 +1062,7 @@ def run_worker(
                 canonical_root,
                 plan=plan,
                 micro_part=current,
-                cache_kind="canonical",
+                cache_kind=primary_cache_kind,
                 verify_shard_checksums=verify_shard_checksums,
                 part_verifier=part_verifier,
             )
@@ -1077,6 +1133,7 @@ def run_worker(
                 compact_root=compact_root,
                 need_canonical=need_canonical,
                 need_compact=need_compact,
+                primary_cache_kind=primary_cache_kind,
             )
             process_micro_part(context, teacher)
             if need_canonical:
@@ -1084,7 +1141,7 @@ def run_worker(
                     canonical_root,
                     plan=plan,
                     micro_part=current,
-                    cache_kind="canonical",
+                    cache_kind=primary_cache_kind,
                     verify_shard_checksums=False,
                 )
             if need_compact:
@@ -1108,6 +1165,7 @@ def run_worker(
             "plan_sha256": plan_sha256,
             "staging_dir": str(worker_staging),
             "device": str(device),
+            "primary_cache_kind": primary_cache_kind,
         }
     except Exception as error:
         append_failure_log(
@@ -1206,6 +1264,7 @@ def merge_and_validate(
     verify_part_checksums: bool = True,
     verify_source_checksums: bool = True,
     failure_log_root: str | Path | None = None,
+    direct_compact: bool = False,
 ) -> dict[str, Any]:
     """Coordinator-only zero-copy merge followed by fail-closed validation."""
 
@@ -1217,6 +1276,9 @@ def merge_and_validate(
         if compact_output_root is None
         else Path(compact_output_root).expanduser().resolve()
     )
+    direct_compact = bool(direct_compact)
+    if direct_compact and compact_root is not None:
+        raise ValueError("direct_compact accepts only the primary output root")
     if compact_root is not None and compact_root == canonical_root:
         raise ValueError("Canonical and compact output roots must be distinct")
     log_root = (
@@ -1225,6 +1287,7 @@ def merge_and_validate(
         else canonical_root / "failures"
     )
     try:
+        primary_kind = "compact" if direct_compact else "canonical"
         canonical_parts: list[Path] = []
         compact_parts: list[Path] = []
         for micro_part in plan["micro_parts"]:
@@ -1237,7 +1300,7 @@ def merge_and_validate(
                 canonical_part,
                 plan=plan,
                 micro_part=micro_part,
-                cache_kind="canonical",
+                cache_kind=primary_kind,
                 verify_shard_checksums=False,
             )
             canonical_parts.append(canonical_part)
@@ -1257,7 +1320,7 @@ def merge_and_validate(
             verify_merged_cache(
                 canonical_root,
                 plan=plan,
-                cache_kind="canonical",
+                cache_kind=primary_kind,
                 verify_shard_checksums=False,
             )
         else:
@@ -1276,7 +1339,7 @@ def merge_and_validate(
         result: dict[str, Any] = {
             "plan_sha256": plan_sha256,
             "micro_part_count": len(plan["micro_parts"]),
-            "canonical": canonical_validation,
+            primary_kind: canonical_validation,
         }
         if compact_root is not None:
             if (compact_root / "COMPLETE").exists() and not (
@@ -1402,9 +1465,10 @@ def _build_parser() -> argparse.ArgumentParser:
     worker = commands.add_parser("worker", help="worker: process rank-strided trajectory parts")
     worker.add_argument("--plan-root", required=True)
     worker.add_argument("--dataset-root", required=True)
-    worker.add_argument("--canonical-output-root", required=True)
+    worker.add_argument("--canonical-output-root", "--output-root", dest="canonical_output_root", required=True)
     worker.add_argument("--compact-output-root")
     worker.add_argument("--compact-selection-jsonl")
+    worker.add_argument("--direct-compact", action="store_true")
     worker.add_argument("--staging-dir", required=True)
     worker.add_argument("--checkpoint")
     worker.add_argument("--platform", choices=("auto", "dsw", "dlc", "torchrun"), default="auto")
@@ -1441,8 +1505,9 @@ def _build_parser() -> argparse.ArgumentParser:
     merge = commands.add_parser("merge-validate", help="coordinator: merge and validate all parts")
     merge.add_argument("--plan-root", required=True)
     merge.add_argument("--dataset-root", required=True)
-    merge.add_argument("--canonical-output-root", required=True)
+    merge.add_argument("--canonical-output-root", "--output-root", dest="canonical_output_root", required=True)
     merge.add_argument("--compact-output-root")
+    merge.add_argument("--direct-compact", action="store_true")
     merge.add_argument("--failure-log-root")
     merge.add_argument("--no-shard-checksums", action="store_true")
     merge.add_argument("--no-source-checksums", action="store_true")
@@ -1525,10 +1590,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError("Incomplete diagnostic callback override")
             if not args.teacher_repo:
                 raise ValueError("Formal worker path requires --teacher-repo")
-            if not args.compact_output_root or not args.compact_selection_jsonl:
+            if not args.compact_selection_jsonl:
                 raise ValueError(
-                    "Formal worker requires compact output and preloaded selection JSONL"
+                    "Formal worker requires a preloaded selection JSONL"
                 )
+            if args.direct_compact and args.compact_output_root:
+                raise ValueError("--direct-compact cannot use --compact-output-root")
+            if not args.direct_compact and not args.compact_output_root:
+                raise ValueError("Paired formal worker requires --compact-output-root")
             settings = OfficialBuildSettings(
                 teacher_repo=Path(args.teacher_repo).expanduser().resolve(),
                 teacher_config=args.teacher_config,
@@ -1540,7 +1609,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verify_uploaded_checksum=True,
             )
             teacher_factory = make_official_teacher_factory(settings)
-            process = make_official_processor(settings)
+            process = make_official_processor(
+                settings,
+                direct_compact=args.direct_compact,
+            )
         trajectories = [parse_trajectory_selector(value) for value in args.trajectory or ()]
         result = run_worker(
             args.plan_root,
@@ -1559,6 +1631,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_shard_checksums=verify_checksums,
             min_staging_free_bytes=int(float(args.min_staging_free_gib) * (1 << 30)),
             failure_log_root=args.failure_log_root,
+            direct_compact=args.direct_compact,
         )
     else:
         result = merge_and_validate(
@@ -1569,6 +1642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_part_checksums=not args.no_shard_checksums,
             verify_source_checksums=not args.no_source_checksums,
             failure_log_root=args.failure_log_root,
+            direct_compact=args.direct_compact,
         )
     print(json.dumps(result, sort_keys=True))
     return 0

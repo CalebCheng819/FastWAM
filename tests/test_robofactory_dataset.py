@@ -24,6 +24,7 @@ from fastwam.datasets.robofactory_multi_robot import (
     derive_b4_target_action_proxies,
     gaussian_source_identity_sha256,
 )
+from scripts.build_robofactory_gaussian_selection import iter_selection_records
 
 
 def _write_compact_gaussian_cache(
@@ -973,3 +974,91 @@ def test_all_indexed_prompt_caches_are_preflighted_at_init(tmp_path):
             },
         )
     assert second_task in str(exc_info.value)
+
+
+def test_flat_single_robot_table_layout_uses_fixed_geometry_and_self_camera(tmp_path):
+    task_name = "PickMeat-rf"
+    instruction = "pick up the meat"
+    task_dir = tmp_path / task_name / task_name / "motionplanning"
+    task_dir.mkdir(parents=True)
+    h5_path = task_dir / "table-200-pick-meat.h5"
+    length = 40
+    with h5py.File(h5_path, "w") as handle:
+        trajectory = handle.create_group("traj_0")
+        trajectory.create_dataset(
+            "actions",
+            data=np.tile(np.arange(8, dtype=np.float32), (length, 1)),
+        )
+        obs = trajectory.create_group("obs")
+        agent = obs.create_group("agent")
+        agent.create_dataset(
+            "qpos", data=np.ones((length + 1, 9), dtype=np.float32)
+        )
+        agent.create_dataset(
+            "qvel", data=np.zeros((length + 1, 9), dtype=np.float32)
+        )
+        camera = obs.create_group("sensor_data").create_group("head_camera")
+        camera.create_dataset(
+            "rgb",
+            data=np.full((length + 1, 24, 32, 3), 64, dtype=np.uint8),
+        )
+
+    stats_path = tmp_path / "stats.json"
+    stats_path.write_text(
+        json.dumps(compute_robofactory_stats(str(tmp_path))),
+        encoding="utf-8",
+    )
+    cache_dir = tmp_path / "text-cache"
+    cache_dir.mkdir()
+    prompt = DEFAULT_PROMPT.format(task=instruction)
+    torch.save(
+        {"context": torch.zeros(128, 16), "mask": torch.ones(128, dtype=torch.bool)},
+        cache_dir
+        / (hashlib.sha256(prompt.encode()).hexdigest() + ".t5_len128.wan22ti2v5b.pt"),
+    )
+
+    dataset = RoboFactoryMultiRobotDataset(
+        str(tmp_path),
+        video_size=(32, 32),
+        window_stride=16,
+        val_set_proportion=0.0,
+        is_training_set=True,
+        randomize_agent_order=False,
+        required_agent_counts=[1],
+        pretrained_norm_stats=str(stats_path),
+        text_embedding_cache_dir=str(cache_dir),
+        instruction_map={task_name: instruction},
+        agent_geometry_map={
+            task_name: {"panda-0": [-0.615, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
+        },
+    )
+
+    sample = dataset[0]
+    assert sample["video"].shape == (3, 9, 32, 32)
+    assert torch.allclose(sample["video"], torch.full_like(sample["video"], -63.5 / 127.5))
+    assert sample["action"].shape == (1, 32, 8)
+    assert sample["agent_state"].shape == (1, 18)
+    assert torch.allclose(
+        sample["agent_geometry"],
+        torch.tensor([[-0.615, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]]),
+    )
+
+    records = list(
+        iter_selection_records(
+            tmp_path,
+            action_horizon=32,
+            train_window_stride=16,
+            val_window_stride=32,
+            val_set_proportion=0.0,
+            split_seed=42,
+            required_agent_counts={1},
+        )
+    )
+    assert [record["timestep"] for record in records] == [0]
+    assert records[0]["agent_names"] == ["panda-0"]
+    assert records[0]["agent_count"] == 1
+
+    stats = compute_robofactory_stats(str(tmp_path))
+    assert stats["cardinality"]["agent_counts"] == [1]
+    assert stats["action"]["count"] == length
+    assert stats["state"]["count"] == length + 1

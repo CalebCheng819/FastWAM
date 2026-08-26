@@ -1,0 +1,20 @@
+# @package _global_
+
+# Two DLC workers x eight RTX 4090 GPUs. With micro-batch 1 and accumulation 1,
+# the global batch is 16. The treatment preserves 45,000 optimizer updates and
+# the source run's LR/scheduler, so its sample exposure differs from world-24.
+gradient_accumulation_steps: 1
+checkpoint_state_kind: full
+save_training_state: true
+save_final_checkpoint: true
+provenance_mode: stat_cmp
+
+seal_training_state: false
+seal_training_run: false
+terminal_rehash_weights: false
+
+process_group_timeout_seconds: 21600
+checkpoint_io_timeout_seconds: 21600
+
+eval_every: 5000
+offline_eval_num_samples: 12
