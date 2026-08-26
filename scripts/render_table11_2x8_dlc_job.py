@@ -23,7 +23,7 @@ LAUNCHER_PATH = "scripts/launch_table11_2x8_dlc.sh"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
-# The completed 24-GPU run used this archived dependency environment. These
+# The 24-GPU reference task used this archived dependency environment. These
 # values are existing infrastructure gates owned by its bootstrap helper; this
 # renderer deliberately introduces no new data/checkpoint hash-chain gates.
 LEGACY_DEPENDENCY_MANIFEST_ID = "b740e7224ad38628c12347ff0d36cb85dea45095f335ec032a52f07fcade7ee5"
