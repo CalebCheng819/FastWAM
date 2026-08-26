@@ -537,6 +537,26 @@ def test_teacher_pairs_are_global_agent_only_and_preserve_agent_order(
         assert torch.all(restored[:, position, 1] == 10 + index)
 
 
+def test_teacher_pair_uses_single_robot_head_camera_as_deterministic_self_pair(tmp_path):
+    path = tmp_path / "single-table.h5"
+    with h5py.File(path, "w") as handle:
+        trajectory = handle.create_group("traj_0")
+        trajectory.create_dataset("actions", data=np.zeros((1, 8), dtype=np.float32))
+        camera = (
+            trajectory.create_group("obs")
+            .create_group("sensor_data")
+            .create_group("head_camera")
+        )
+        camera.create_dataset(
+            "rgb", data=np.full((2, 240, 320, 3), 73, dtype=np.uint8)
+        )
+        pairs = _read_global_agent_pairs(trajectory, ["panda-0"], [0, 1])
+
+    restored = ((pairs + 1.0) * 127.5).round().to(torch.uint8)
+    assert restored.shape == (2, 2, 3, 240, 320)
+    assert torch.all(restored == 73)
+
+
 def test_canonical_extraction_keeps_every_agent_observation_timestep(tmp_path):
     dataset_root = tmp_path / "dataset"
     task = dataset_root / "SyntheticTwoRobot-rf" / "motionplanning"
@@ -568,7 +588,10 @@ def test_canonical_extraction_keeps_every_agent_observation_timestep(tmp_path):
         batch_size=2,
     )
     assert manifest["total_frames"] == 6
-    assert manifest["teacher"]["pairing"] == "global_agent_unify_v1"
+    assert (
+        manifest["teacher"]["pairing"]
+        == "robofactory_reference_agent_or_self_unify_v1"
+    )
     assert manifest["teacher"]["config_overrides"]["coor_type"] == "unify"
     assert {record["stored_count"] for record in manifest["streams"]} == {3}
     assert {record["observation_count"] for record in manifest["streams"]} == {3}
@@ -837,6 +860,86 @@ def test_two_part_trajectory_merge_and_same_forward_compact_are_zero_copy(tmp_pa
             FrameKey(source_path, trajectory_name, 0, "panda-0")
         )
     validate_cache(compact_root, semantic_sample_frames=2)
+
+
+def test_direct_compact_parts_merge_without_canonical_cache(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    source_path = "Task-rf/motionplanning/demo.h5"
+    trajectory_names = ("traj_0", "traj_1")
+    _write_single_agent_hdf5(
+        dataset_root / source_path,
+        trajectory_names=trajectory_names,
+    )
+    selection = tmp_path / "selection.jsonl"
+    selection.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "source_path": source_path,
+                    "trajectory": trajectory_name,
+                    "timestep": 1,
+                    "agent_name": "panda-0",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+            for trajectory_name in trajectory_names
+        ),
+        encoding="utf-8",
+    )
+
+    merged_root = tmp_path / "direct-compact"
+    parts_root = merged_root / "parts"
+    parts_root.mkdir(parents=True)
+    part_roots = []
+    for index in range(2):
+        part_root = parts_root / f"part-{index:05d}"
+        manifest = extract_canonical_cache(
+            dataset_root,
+            part_root,
+            teacher=_SyntheticTeacher(),
+            selection="index",
+            selection_jsonl=selection,
+            direct_compact=True,
+            batch_size=1,
+            partition_index=index,
+            partition_count=2,
+            partition_unit="trajectory",
+        )
+        assert manifest["schema"]["cache_kind"] == "compact"
+        assert manifest["schema"]["height"] == 28
+        assert manifest["schema"]["width"] == 40
+        assert manifest["derivation"]["source"] == "direct-teacher-forward-index-v1"
+        assert manifest["total_frames"] == 1
+        part_roots.append(part_root)
+
+    manifest = merge_part_manifests(
+        part_roots,
+        merged_root,
+        verify_part_checksums=True,
+    )
+    assert manifest["total_frames"] == 2
+    assert manifest["selection"]["mode"] == "index"
+    assert manifest["derivation"] == {
+        "method": "opacity-aware-moment-matching-cell-mean-alpha-v2",
+        "output_size": [28, 40],
+        "source": "direct-teacher-forward-index-v1",
+    }
+    assert "parent_manifest_sha256" not in manifest["derivation"]
+
+    cache = GaussianCache.open(merged_root, verify="checksums")
+    for trajectory_name in trajectory_names:
+        key = FrameKey(source_path, trajectory_name, 1, "panda-0")
+        assert cache.get_frame(key).shape == (13, 28, 40)
+        assert not cache.contains_frame(
+            FrameKey(source_path, trajectory_name, 0, "panda-0")
+        )
+    validate_cache(
+        merged_root,
+        source_root=dataset_root,
+        verify_source_checksums=True,
+        semantic_mode="coverage",
+    )
 
 
 def test_merge_rejects_sealed_part_missing_one_assigned_agent(tmp_path):

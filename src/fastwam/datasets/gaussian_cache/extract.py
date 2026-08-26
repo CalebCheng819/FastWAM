@@ -28,20 +28,7 @@ from .manifest import (
 from .schema import FrameKey, GaussianCacheSchema
 from .selection import load_selection_jsonl, write_normalized_selection_index
 from .teacher import ExternalPolicyLightningTeacher, GaussianTeacher
-
-
-def _agent_sort_key(name: str):
-    try:
-        return int(name.rsplit("-", 1)[-1])
-    except ValueError:
-        return name
-
-
-def _camera_name(agent_name: str) -> str:
-    _, separator, suffix = str(agent_name).rpartition("-")
-    if not separator or not suffix.isdigit():
-        raise ValueError(f"Expected RoboFactory agent name ending in an integer, got {agent_name!r}")
-    return f"head_camera_agent{int(suffix)}"
+from fastwam.datasets.robofactory_layout import agent_names, camera_pair_paths
 
 
 def _selected_by_frame(
@@ -71,13 +58,11 @@ def _discover_trajectory_work_units(
                 trajectory = handle[trajectory_name]
                 if "actions" not in trajectory:
                     continue
-                agent_names = sorted(trajectory["actions"].keys(), key=_agent_sort_key)
-                if not agent_names:
+                names = list(agent_names(trajectory))
+                if not names:
                     continue
-                camera_paths = ["obs/sensor_data/head_camera_global/rgb"] + [
-                    f"obs/sensor_data/{_camera_name(agent_name)}/rgb"
-                    for agent_name in agent_names
-                ]
+                pairs = camera_pair_paths(trajectory, names)
+                camera_paths = sorted({path for pair in pairs for path in pair})
                 missing = [path for path in camera_paths if path not in trajectory]
                 if missing:
                     raise KeyError(
@@ -96,8 +81,8 @@ def _discover_trajectory_work_units(
                         "source_path": source_path,
                         "trajectory": trajectory_name,
                         "observation_count": observation_count,
-                        "agent_names": list(agent_names),
-                        "weight": observation_count * len(agent_names),
+                        "agent_names": names,
+                        "weight": observation_count * len(names),
                     }
                 )
     return units
@@ -110,24 +95,26 @@ def _read_global_agent_pairs(
 ) -> torch.Tensor:
     """Return ``[B*N,2,3,H,W]`` pairs in exact requested agent order."""
 
-    global_path = "obs/sensor_data/head_camera_global/rgb"
-    global_rgb = np.asarray(trajectory[global_path][list(timesteps)], dtype=np.uint8)
-    agent_views = []
-    for agent_name in agent_names:
-        path = f"obs/sensor_data/{_camera_name(agent_name)}/rgb"
-        rgb = np.asarray(trajectory[path][list(timesteps)], dtype=np.uint8)
-        agent_views.append(rgb)
-    agents = torch.from_numpy(np.stack(agent_views, axis=1)).permute(0, 1, 4, 2, 3)
-    global_view = torch.from_numpy(global_rgb).permute(0, 3, 1, 2)
-    batch, agent_count = agents.shape[:2]
-    pairs = torch.stack(
-        (
-            global_view[:, None].expand(-1, agent_count, -1, -1, -1),
-            agents,
-        ),
-        dim=2,
-    ).reshape(batch * agent_count, 2, *agents.shape[2:])
-    return pairs.float().div(127.5).sub(1.0).contiguous()
+    pair_paths = camera_pair_paths(trajectory, agent_names)
+    pair_batches = []
+    for reference_path, agent_path in pair_paths:
+        reference_rgb = np.asarray(
+            trajectory[reference_path][list(timesteps)], dtype=np.uint8
+        )
+        agent_rgb = np.asarray(
+            trajectory[agent_path][list(timesteps)], dtype=np.uint8
+        )
+        pair_batches.append(np.stack((reference_rgb, agent_rgb), axis=1))
+    # Stack as [B,N,2,H,W,3] before preserving the historic B-major flattening.
+    stacked = np.stack(pair_batches, axis=1)
+    pairs = torch.from_numpy(stacked).permute(0, 1, 2, 5, 3, 4)
+    return (
+        pairs.reshape(-1, 2, *pairs.shape[3:])
+        .float()
+        .div(127.5)
+        .sub(1.0)
+        .contiguous()
+    )
 
 
 def extract_canonical_cache(
@@ -152,6 +139,7 @@ def extract_canonical_cache(
     work_plan: Mapping[str, Any] | None = None,
     micro_part_index: int | None = None,
     preverified_source_state: tuple[int, int] | None = None,
+    direct_compact: bool = False,
 ) -> dict[str, Any]:
     """Extract corrected FP16 ``[means3,cov9,opacity1]`` for every selected view."""
 
@@ -174,6 +162,11 @@ def extract_canonical_cache(
         compact_selection_jsonl is not None or compact_selection_keys is not None
     )
     dual_compact = compact_output_root is not None or compact_selector_supplied
+    direct_compact = bool(direct_compact)
+    if direct_compact and dual_compact:
+        raise ValueError("direct_compact cannot be combined with dual compact output")
+    if direct_compact and selection != "index":
+        raise ValueError("direct_compact requires selection='index'")
     if dual_compact and (compact_output_root is None or not compact_selector_supplied):
         raise ValueError(
             "compact_output_root and exactly one compact selection input must be supplied together"
@@ -470,15 +463,29 @@ def extract_canonical_cache(
     config_overrides["coor_type"] = "unify"
     teacher_provenance.update(
         {
-            "pairing": "global_agent_unify_v1",
+            "pairing": "robofactory_reference_agent_or_self_unify_v1",
             "input_views_per_pair": 2,
             "cached_pair_view": "agent",
             "config_overrides": config_overrides,
         }
     )
+    output_schema = GaussianCacheSchema(
+        height=COMPACT_HEIGHT if direct_compact else 240,
+        width=COMPACT_WIDTH if direct_compact else 320,
+        cache_kind="compact" if direct_compact else "canonical",
+    )
+    builder_derivation = (
+        {
+            "method": MOMENT_MATCH_METHOD,
+            "output_size": [COMPACT_HEIGHT, COMPACT_WIDTH],
+            "source": "direct-teacher-forward-index-v1",
+        }
+        if direct_compact
+        else None
+    )
     builder = GaussianCacheBuilder(
         output_root,
-        GaussianCacheSchema(height=240, width=320, cache_kind="canonical"),
+        output_schema,
         sources=source_records,
         teacher=teacher_provenance,
         producer=(None if work_plan is None else work_plan["producer"]),
@@ -486,6 +493,7 @@ def extract_canonical_cache(
             "mode": selection,
             "selected_key_count": None if selection == "all" else len(selected_keys),
         },
+        derivation=builder_derivation,
         partition=partition,
         target_shard_bytes=target_shard_bytes,
         staging_dir=staging_dir,
@@ -493,6 +501,12 @@ def extract_canonical_cache(
     )
     if selection == "index":
         builder.selection = write_normalized_selection_index(output_root, selected_keys)
+        if direct_compact and work_plan is not None:
+            assert plan_micro_part is not None
+            builder.selection["plan_identity"] = compact_selection_part_identity(
+                work_plan,
+                plan_micro_part,
+            )
 
     compact_builder: GaussianCacheBuilder | None = None
     if dual_compact:
@@ -549,13 +563,16 @@ def extract_canonical_cache(
                     trajectory = handle[trajectory_name]
                     if "actions" not in trajectory:
                         continue
-                    agent_names = sorted(trajectory["actions"].keys(), key=_agent_sort_key)
-                    if not agent_names:
+                    names = list(agent_names(trajectory))
+                    if not names:
                         continue
-                    camera_paths = ["obs/sensor_data/head_camera_global/rgb"] + [
-                        f"obs/sensor_data/{_camera_name(agent_name)}/rgb"
-                        for agent_name in agent_names
-                    ]
+                    camera_paths = sorted(
+                        {
+                            path
+                            for pair in camera_pair_paths(trajectory, names)
+                            for path in pair
+                        }
+                    )
                     camera_datasets = []
                     for camera_path in camera_paths:
                         if camera_path not in trajectory:
@@ -595,12 +612,12 @@ def extract_canonical_cache(
                         batch_timesteps = timesteps[start : start + int(batch_size)]
                         images = _read_global_agent_pairs(
                             trajectory,
-                            agent_names,
+                            names,
                             batch_timesteps,
                         )
                         pair_gaussian = teacher.encode(images)
                         expected_pair_shape = (
-                            len(batch_timesteps) * len(agent_names),
+                            len(batch_timesteps) * len(names),
                             2,
                             13,
                             240,
@@ -619,12 +636,22 @@ def extract_canonical_cache(
                         # stored as an agent cache frame.
                         gaussian = pair_gaussian[:, 1].reshape(
                             len(batch_timesteps),
-                            len(agent_names),
+                            len(names),
                             13,
                             240,
                             320,
                         )
-                        for agent_index, agent_name in enumerate(agent_names):
+                        if direct_compact:
+                            gaussian = opacity_aware_moment_match(
+                                gaussian.reshape(-1, 13, 240, 320)
+                            ).reshape(
+                                len(batch_timesteps),
+                                len(names),
+                                13,
+                                COMPACT_HEIGHT,
+                                COMPACT_WIDTH,
+                            )
+                        for agent_index, agent_name in enumerate(names):
                             if selection == "all":
                                 positions = list(range(len(batch_timesteps)))
                             else:
@@ -711,7 +738,7 @@ def extract_canonical_cache(
         builder.selection["selected_key_count"] = written_count
         manifest = builder.finish()
         if int(manifest["total_frames"]) != written_count:
-            raise RuntimeError("Canonical extraction frame accounting mismatch")
+            raise RuntimeError("Teacher extraction frame accounting mismatch")
         if compact_builder is not None:
             compact_builder.selection["selected_key_count"] = compact_written_count
             compact_manifest = compact_builder.finish()
@@ -781,6 +808,11 @@ def _build_parser() -> argparse.ArgumentParser:
     canonical.add_argument("--compact-target-shard-gib", type=float, default=2.0)
     canonical.add_argument("--selection", choices=("all", "index"), default="all")
     canonical.add_argument("--selection-jsonl")
+    canonical.add_argument(
+        "--direct-compact",
+        action="store_true",
+        help="write only selected teacher outputs as direct 28x40 compact cache",
+    )
 
     compact = subparsers.add_parser("compact", help="derive opacity-aware 28x40 cache")
     compact.add_argument("--canonical-root", required=True)
@@ -854,6 +886,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             compact_target_shard_bytes=_target_bytes(args.compact_target_shard_gib),
             work_plan=work_plan,
             micro_part_index=args.micro_part_index,
+            direct_compact=args.direct_compact,
         )
     elif args.command == "compact":
         manifest = project_compact_cache(

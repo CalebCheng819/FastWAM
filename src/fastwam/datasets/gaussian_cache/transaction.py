@@ -229,6 +229,70 @@ def _finish_cache_build(
     return manifest
 
 
+def run_single_micro_part(
+    root: str | Path,
+    *,
+    task_id: str,
+    work_plan_sha256: str,
+    role: str,
+    micro_part_index: int,
+    work_identity: Mapping[str, Any],
+    build: Callable[[], None],
+    verify_existing_shard_checksums: bool = True,
+    verify_new_shard_checksums: bool = False,
+) -> dict[str, Any]:
+    """Build one restart-managed cache part without a paired sibling cache."""
+
+    path = Path(root).expanduser()
+    identity = _identity_payload(
+        path,
+        task_id=task_id,
+        work_plan_sha256=work_plan_sha256,
+        role=role,
+        micro_part_index=int(micro_part_index),
+        work_identity=work_identity,
+    )
+    complete = verify_complete_cache(
+        path,
+        verify_shard_checksums=verify_existing_shard_checksums,
+    )
+    if complete is not None:
+        complete = _finish_cache_build(
+            path,
+            identity,
+            verify_shard_checksums=verify_existing_shard_checksums,
+        )
+        return {"status": "already-complete", role: complete}
+
+    prepare_cache_build(
+        path,
+        task_id=task_id,
+        work_plan_sha256=work_plan_sha256,
+        role=role,
+        micro_part_index=int(micro_part_index),
+        work_identity=work_identity,
+        verify_shard_checksums=verify_existing_shard_checksums,
+    )
+    _append_journal(path, identity, "single-build-start")
+    try:
+        build()
+        manifest = _finish_cache_build(
+            path,
+            identity,
+            verify_shard_checksums=verify_new_shard_checksums,
+        )
+    except Exception as exc:
+        _append_journal(
+            path,
+            identity,
+            "single-build-failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        raise
+    return {"status": "built", role: manifest}
+
+
 def run_paired_micro_part(
     canonical_root: str | Path,
     compact_root: str | Path,

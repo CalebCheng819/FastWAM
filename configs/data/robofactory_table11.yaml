@@ -1,0 +1,111 @@
+train:
+  _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
+  root_dir: /oss-chengjuntao/robofactory/table/robofactory-table-11task-200each-h299-2g-r1-20260825/tasks
+  num_frames: 33
+  action_video_freq_ratio: 4
+  video_size: [224, 320]
+  required_agent_counts: [1, 2, 3, 4]
+  agent_geometry_dim: 7
+  load_future_video: true
+  action_dim: 8
+  state_dim: 18
+  window_stride: 16
+  val_set_proportion: 0.1
+  is_training_set: true
+  split_seed: 42
+  randomize_agent_order: true
+  pretrained_norm_stats: /oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h299-r1-s42/stats/train-stats.json
+  stats_source_root: null
+  require_train_only_stats: true
+  text_embedding_cache_dir: /oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h299-r1-s42/text-embeds
+  gaussian_cache_dir: null
+  gaussian_cache_verify: manifest
+  gaussian_cache_expected_manifest_sha256: null
+  gaussian_cache_expected_selection_sha256: null
+  gaussian_cache_expected_source_identity_sha256: null
+  gaussian_channels: 13
+  gaussian_size: [28, 40]
+  context_len: 128
+  instruction_map:
+    CameraAlignment-rf: three robots collaboratively align the camera with the target
+    LiftBarrier-rf: two robots collaboratively lift the barrier
+    LongPipelineDelivery-rf: four robots collaboratively deliver the object along the pipeline
+    PassShoe-rf: two robots collaboratively pass the shoe
+    PickMeat-rf: pick up the meat
+    PlaceFood-rf: two robots collaboratively place the food in the target location
+    StackCube-rf: stack the cubes
+    StrikeCube-rf: strike the cube to the target
+    TakePhoto-rf: four robots collaboratively position the camera and take a photo
+    ThreeRobotsStackCube-rf: three robots collaboratively stack the cubes
+    TwoRobotsStackCube-rf: two robots collaboratively stack the cubes
+  # This state-free collection cannot recover robot bases from env_states.
+  # These fixed task poses are copied from the collection task configs and use
+  # [x, y, z, qw, qx, qy, qz].
+  agent_geometry_map:
+    CameraAlignment-rf:
+      panda-0: [0.0, -0.85, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.85, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+      panda-2: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    LiftBarrier-rf:
+      panda-0: [0.0, -0.75, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.75, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+    LongPipelineDelivery-rf:
+      panda-0: [-0.8, -0.9, 0.0, 1.0, 0.0, 0.0, 0.0]
+      panda-1: [-0.8, -0.3, 0.0, 1.0, 0.0, 0.0, 0.0]
+      panda-2: [-0.8, 0.3, 0.0, 1.0, 0.0, 0.0, 0.0]
+      panda-3: [-0.8, 0.9, 0.0, 1.0, 0.0, 0.0, 0.0]
+    PassShoe-rf:
+      panda-0: [0.0, -0.75, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.75, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+    PickMeat-rf:
+      panda-0: [-0.615, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    PlaceFood-rf:
+      panda-0: [0.0, -0.75, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.75, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+    StackCube-rf:
+      panda-0: [-0.615, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    StrikeCube-rf:
+      panda-0: [-0.615, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    TakePhoto-rf:
+      panda-0: [0.0, -0.85, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.85, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+      panda-2: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      panda-3: [-0.6, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    ThreeRobotsStackCube-rf:
+      panda-0: [0.0, -0.8, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.8, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+      panda-2: [0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    TwoRobotsStackCube-rf:
+      panda-0: [0.0, -0.75, 0.0, 0.70710678, 0.0, 0.0, 0.70710678]
+      panda-1: [0.0, 0.75, 0.0, 0.70710678, 0.0, 0.0, -0.70710678]
+
+val:
+  _target_: fastwam.datasets.robofactory_multi_robot.RoboFactoryMultiRobotDataset
+  root_dir: ${data.train.root_dir}
+  num_frames: 33
+  action_video_freq_ratio: 4
+  video_size: [224, 320]
+  required_agent_counts: [1, 2, 3, 4]
+  agent_geometry_dim: 7
+  load_future_video: true
+  action_dim: 8
+  state_dim: 18
+  window_stride: 32
+  val_set_proportion: 0.1
+  is_training_set: false
+  split_seed: 42
+  randomize_agent_order: false
+  pretrained_norm_stats: ${data.train.pretrained_norm_stats}
+  stats_source_root: null
+  require_train_only_stats: true
+  text_embedding_cache_dir: ${data.train.text_embedding_cache_dir}
+  gaussian_cache_dir: null
+  gaussian_cache_verify: manifest
+  gaussian_cache_expected_manifest_sha256: null
+  gaussian_cache_expected_selection_sha256: null
+  gaussian_cache_expected_source_identity_sha256: null
+  gaussian_channels: 13
+  gaussian_size: [28, 40]
+  context_len: 128
+  instruction_map: ${data.train.instruction_map}
+  agent_geometry_map: ${data.train.agent_geometry_map}
