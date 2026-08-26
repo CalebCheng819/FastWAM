@@ -19,12 +19,7 @@ from typing import Iterator
 
 import h5py
 
-
-def _agent_sort_key(name: str):
-    try:
-        return int(name.rsplit("-", 1)[-1])
-    except ValueError:
-        return name
+from fastwam.datasets.robofactory_layout import action_dataset, agent_names
 
 
 def _task_name_from_path(path: Path) -> str:
@@ -59,16 +54,16 @@ def iter_selection_records(
                 group = handle[trajectory_name]
                 if "actions" not in group:
                     continue
-                agent_names = sorted(group["actions"].keys(), key=_agent_sort_key)
-                if not agent_names:
+                names = list(agent_names(group))
+                if not names:
                     continue
-                agent_count = len(agent_names)
+                agent_count = len(names)
                 if (
                     required_agent_counts is not None
                     and agent_count not in required_agent_counts
                 ):
                     continue
-                length = int(group["actions"][agent_names[0]].shape[0])
+                length = int(action_dataset(group, names[0]).shape[0])
                 if length < action_horizon:
                     continue
                 split_key = f"{source_path}:{trajectory_name}"
@@ -82,7 +77,7 @@ def iter_selection_records(
                         "source_path": source_path,
                         "trajectory": trajectory_name,
                         "timestep": timestep,
-                        "agent_names": agent_names,
+                        "agent_names": names,
                         "agent_count": agent_count,
                         "task_name": task_name,
                         "split": split,

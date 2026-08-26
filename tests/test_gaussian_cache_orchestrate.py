@@ -464,6 +464,105 @@ def test_repository_owned_exact_plan_worker_and_coverage_merge(tmp_path):
         )
 
 
+def test_repository_owned_direct_compact_worker_and_merge(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    source = "N2-rf/motionplanning/direct.h5"
+    _write_source(dataset_root / source, "traj_0", agent_count=2)
+    checkpoint = tmp_path / "teacher.ckpt"
+    checkpoint.write_bytes(b"official-checkpoint-fixture")
+    checkpoint_sha = sha256_file(checkpoint)
+    selection = tmp_path / "selection.jsonl"
+    selection.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "source_path": source,
+                    "trajectory": "traj_0",
+                    "timestep": 0,
+                    "agent_name": f"panda-{agent}",
+                }
+            )
+            + "\n"
+            for agent in range(2)
+        ),
+        encoding="utf-8",
+    )
+    plan_root = tmp_path / "plan"
+    create_work_plan(
+        plan_root,
+        dataset_root,
+        checkpoint,
+        expected_checkpoint_sha256=checkpoint_sha,
+        planned_worker_count=1,
+        teacher_identity=_planned_teacher_identity(checkpoint_sha),
+        compact_selection_jsonl=selection,
+        producer_identity=_PRODUCER,
+    )
+    teachers = []
+
+    def teacher_factory(_):
+        teacher = _Teacher(checkpoint_sha)
+        teachers.append(teacher)
+        return teacher
+
+    settings = OfficialBuildSettings(
+        teacher_repo=tmp_path,
+        teacher_config="unused.yaml",
+        batch_size=1,
+    )
+    output_root = tmp_path / "direct-compact"
+    worker = WorkerIdentity("dsw", 0, 1, 0, 0, 0, 1)
+    result = run_worker(
+        plan_root,
+        dataset_root,
+        output_root,
+        compact_selection_jsonl=selection,
+        staging_dir=tmp_path / "staging",
+        teacher_factory=teacher_factory,
+        process_micro_part=make_official_processor(settings, direct_compact=True),
+        worker=worker,
+        checkpoint_path=checkpoint,
+        min_staging_free_bytes=0,
+        cuda_binder=lambda _: torch.device("cpu"),
+        direct_compact=True,
+    )
+    assert result["processed"] == 1
+    assert result["teacher_loads"] == 1
+    assert result["primary_cache_kind"] == "compact"
+    assert len(teachers) == 1
+    assert teachers[0].calls == 1
+
+    repeated = run_worker(
+        plan_root,
+        dataset_root,
+        output_root,
+        compact_selection_jsonl=selection,
+        staging_dir=tmp_path / "staging",
+        teacher_factory=lambda _: pytest.fail("verified part must skip teacher load"),
+        process_micro_part=make_official_processor(settings, direct_compact=True),
+        worker=worker,
+        checkpoint_path=checkpoint,
+        min_staging_free_bytes=0,
+        cuda_binder=lambda _: torch.device("cpu"),
+        direct_compact=True,
+    )
+    assert repeated["processed"] == 0
+    assert repeated["skipped_verified"] == 1
+
+    merged = merge_and_validate(
+        plan_root,
+        dataset_root,
+        output_root,
+        direct_compact=True,
+    )
+    assert set(merged) == {"plan_sha256", "micro_part_count", "compact"}
+    assert merged["compact"]["semantic_mode"] == "coverage"
+    manifest = load_manifest(output_root)
+    assert manifest["schema"]["cache_kind"] == "compact"
+    assert manifest["derivation"]["source"] == "direct-teacher-forward-index-v1"
+    assert manifest["total_frames"] == 2
+
+
 def test_shared_source_is_hashed_once_per_worker_and_once_by_coordinator(
     tmp_path,
     monkeypatch,

@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_vg1_hub1_gau1_cont50k_224_1e-4
+  - override /data: robofactory_table11
+  - _self_
+
+wandb:
+  group: robofactory-table11-vg1-hub1-gau1-cont50k
+  name: fastwam-table11-vg1h1gau1-cont50k-s42-16g-r1-20260827

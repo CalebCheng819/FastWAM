@@ -30,6 +30,7 @@ from .selection import (
     load_selection_jsonl,
     normalized_selection_identity,
 )
+from fastwam.datasets.robofactory_layout import agent_names, camera_pair_paths
 
 PLAN_SCHEMA_NAME = "fastwam-gaussian-trajectory-work-plan"
 PLAN_SCHEMA_VERSION = 3
@@ -44,23 +45,6 @@ PRODUCER_SCHEMA_NAME = "fastwam-producer-source-snapshot"
 PRODUCER_SCHEMA_VERSION = 1
 COMPACT_SELECTION_SCHEMA_NAME = "fastwam-compact-selection-plan"
 COMPACT_SELECTION_SCHEMA_VERSION = 1
-
-
-def _agent_sort_key(name: str) -> tuple[int, int | str]:
-    try:
-        return (0, int(str(name).rsplit("-", 1)[-1]))
-    except ValueError:
-        return (1, str(name))
-
-
-def _camera_name(agent_name: str) -> str:
-    _, separator, suffix = str(agent_name).rpartition("-")
-    if not separator or not suffix.isdigit():
-        raise ValueError(
-            "Expected RoboFactory agent name ending in an integer, "
-            f"got {agent_name!r}"
-        )
-    return f"head_camera_agent{int(suffix)}"
 
 
 def _stat_identity(path: Path) -> tuple[int, int]:
@@ -321,17 +305,11 @@ def _discover_source(
             trajectory = handle[trajectory_name]
             if "actions" not in trajectory:
                 continue
-            actions = trajectory["actions"]
-            if not isinstance(actions, h5py.Group):
-                raise TypeError(
-                    f"Expected actions group at {source['path']}:{trajectory_name}"
-                )
-            agent_names = sorted((str(name) for name in actions), key=_agent_sort_key)
-            if not agent_names:
+            names = list(agent_names(trajectory))
+            if not names:
                 continue
-            camera_paths = ["obs/sensor_data/head_camera_global/rgb"] + [
-                f"obs/sensor_data/{_camera_name(name)}/rgb" for name in agent_names
-            ]
+            pairs = camera_pair_paths(trajectory, names)
+            camera_paths = sorted({path for pair in pairs for path in pair})
             missing = [name for name in camera_paths if name not in trajectory]
             if missing:
                 raise KeyError(
@@ -354,8 +332,8 @@ def _discover_source(
                     "source_path": source["path"],
                     "trajectory": str(trajectory_name),
                     "observation_count": observation_count,
-                    "agent_names": agent_names,
-                    "weight": observation_count * len(agent_names),
+                    "agent_names": names,
+                    "weight": observation_count * len(names),
                 }
             )
     if _stat_identity(path) != state_after_hash:

@@ -805,37 +805,46 @@ def merge_part_manifests(
 
     derivation = reference.get("derivation")
     if schema_object.cache_kind == "compact":
-        if canonical_root is None:
-            raise ValueError("Merging compact parts requires canonical_root")
-        canonical_path = Path(canonical_root).expanduser().resolve()
-        canonical = load_manifest(canonical_path, require_complete=True)
-        canonical_schema = GaussianCacheSchema.from_dict(canonical["schema"])
-        if canonical_schema.cache_kind != "canonical":
-            raise ValueError("canonical_root is not a canonical Gaussian cache")
-        if canonical_json_bytes(canonical["teacher"]) != teacher_bytes:
-            raise ValueError("Compact/canonical teacher provenance differs")
-        canonical_producer = canonical.get("producer")
-        canonical_producer_bytes = (
-            None
-            if canonical_producer is None
-            else canonical_json_bytes(dict(canonical_producer))
+        direct_compact = (
+            isinstance(derivation, Mapping)
+            and derivation.get("source") == "direct-teacher-forward-index-v1"
         )
-        if canonical_producer_bytes != producer_bytes:
-            raise ValueError("Compact/canonical FastWAM producer provenance differs")
-        if canonical.get("partition", {}).get("work_plan_sha256") != reference_partition.get(
-            "work_plan_sha256"
-        ):
-            raise ValueError("Compact/canonical partition plans differ")
-        if _normalized_sources(canonical["sources"]) != _normalized_sources(sources):
-            raise ValueError("Compact/canonical source provenance differs")
-        derivation = {
-            **(dict(derivation) if isinstance(derivation, Mapping) else {}),
-            "parent_manifest_sha256": sha256_file(canonical_path / MANIFEST_FILENAME),
-            "parent_cache_kind": "canonical",
-            "parent_total_frames": int(canonical["total_frames"]),
-            "parent_teacher": canonical["teacher"],
-            "parent_selection": canonical["selection"],
-        }
+        if direct_compact and canonical_root is not None:
+            raise ValueError("Direct compact parts must not specify canonical_root")
+        if direct_compact:
+            pass
+        elif canonical_root is None:
+            raise ValueError("Projected compact parts require canonical_root")
+        else:
+            canonical_path = Path(canonical_root).expanduser().resolve()
+            canonical = load_manifest(canonical_path, require_complete=True)
+            canonical_schema = GaussianCacheSchema.from_dict(canonical["schema"])
+            if canonical_schema.cache_kind != "canonical":
+                raise ValueError("canonical_root is not a canonical Gaussian cache")
+            if canonical_json_bytes(canonical["teacher"]) != teacher_bytes:
+                raise ValueError("Compact/canonical teacher provenance differs")
+            canonical_producer = canonical.get("producer")
+            canonical_producer_bytes = (
+                None
+                if canonical_producer is None
+                else canonical_json_bytes(dict(canonical_producer))
+            )
+            if canonical_producer_bytes != producer_bytes:
+                raise ValueError("Compact/canonical FastWAM producer provenance differs")
+            if canonical.get("partition", {}).get("work_plan_sha256") != reference_partition.get(
+                "work_plan_sha256"
+            ):
+                raise ValueError("Compact/canonical partition plans differ")
+            if _normalized_sources(canonical["sources"]) != _normalized_sources(sources):
+                raise ValueError("Compact/canonical source provenance differs")
+            derivation = {
+                **(dict(derivation) if isinstance(derivation, Mapping) else {}),
+                "parent_manifest_sha256": sha256_file(canonical_path / MANIFEST_FILENAME),
+                "parent_cache_kind": "canonical",
+                "parent_total_frames": int(canonical["total_frames"]),
+                "parent_teacher": canonical["teacher"],
+                "parent_selection": canonical["selection"],
+            }
     elif canonical_root is not None:
         raise ValueError("canonical_root is only valid while merging compact parts")
 

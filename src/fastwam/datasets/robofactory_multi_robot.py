@@ -16,6 +16,12 @@ from omegaconf import DictConfig, OmegaConf
 
 from fastwam.datasets.gaussian_cache import FrameKey, GaussianCache, sha256_file
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
+from fastwam.datasets.robofactory_layout import (
+    action_dataset as robofactory_action_dataset,
+    agent_names as robofactory_agent_names,
+    policy_video_path,
+    state_dataset as robofactory_state_dataset,
+)
 from fastwam.utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -132,6 +138,40 @@ def _plain_mapping(value: Optional[Mapping[str, str] | DictConfig]) -> dict[str,
     return merged
 
 
+def _plain_geometry_mapping(
+    value: Optional[Mapping[str, Mapping[str, Any]] | DictConfig],
+) -> dict[str, dict[str, tuple[float, ...]]]:
+    if value is None:
+        return {}
+    if isinstance(value, DictConfig):
+        value = OmegaConf.to_container(value, resolve=True)
+    if not isinstance(value, Mapping):
+        raise TypeError(f"agent_geometry_map must be mapping-like, got {type(value)}")
+    result: dict[str, dict[str, tuple[float, ...]]] = {}
+    for task_name, agents in value.items():
+        if not isinstance(agents, Mapping):
+            raise TypeError(
+                f"agent_geometry_map[{task_name!r}] must map agent names to 7D poses"
+            )
+        task_result: dict[str, tuple[float, ...]] = {}
+        for agent_name, pose in agents.items():
+            try:
+                values = tuple(float(component) for component in pose)
+            except TypeError as exc:
+                raise TypeError(
+                    f"agent_geometry_map[{task_name!r}][{agent_name!r}] "
+                    "must be a 7-value sequence"
+                ) from exc
+            if len(values) != 7 or not all(np.isfinite(values)):
+                raise ValueError(
+                    f"agent_geometry_map[{task_name!r}][{agent_name!r}] must be "
+                    f"finite [x,y,z,qw,qx,qy,qz], got {values}"
+                )
+            task_result[str(agent_name)] = values
+        result[str(task_name)] = task_result
+    return result
+
+
 def _task_name_from_path(path: Path) -> str:
     for part in reversed(path.parts):
         if part.endswith("-rf"):
@@ -239,6 +279,9 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         require_train_only_stats: bool = False,
         context_len: int = 128,
         instruction_map: Optional[Mapping[str, str] | DictConfig] = None,
+        agent_geometry_map: Optional[
+            Mapping[str, Mapping[str, Any]] | DictConfig
+        ] = None,
         b4_proxy_event_delta_threshold: float = 0.05,
         b4_proxy_closed_command_threshold: float = -0.8,
         b4_proxy_stable_steps: int = 4,
@@ -304,6 +347,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         self.require_train_only_stats = bool(require_train_only_stats)
         self.context_len = int(context_len)
         self.instruction_map = _plain_mapping(instruction_map)
+        self.agent_geometry_map = _plain_geometry_mapping(agent_geometry_map)
         self.b4_proxy_event_delta_threshold = float(b4_proxy_event_delta_threshold)
         self.b4_proxy_closed_command_threshold = float(
             b4_proxy_closed_command_threshold
@@ -467,10 +511,12 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                     group = handle[trajectory_name]
                     if "actions" not in group:
                         continue
-                    agent_names = sorted(group["actions"].keys(), key=_agent_sort_key)
+                    agent_names = list(robofactory_agent_names(group))
                     if not agent_names:
                         continue
-                    length = int(group["actions"][agent_names[0]].shape[0])
+                    length = int(
+                        robofactory_action_dataset(group, agent_names[0]).shape[0]
+                    )
                     trajectory_count += 1
                     agent_count = len(agent_names)
                     trajectories_by_agent_count[agent_count] = (
@@ -500,7 +546,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
                         continue
                     raw_gripper_commands = []
                     for agent_name in agent_names:
-                        action_dataset = group[f"actions/{agent_name}"]
+                        action_dataset = robofactory_action_dataset(group, agent_name)
                         if action_dataset.ndim != 2 or action_dataset.shape[1] < self.action_dim:
                             raise ValueError(
                                 f"Expected actions/{agent_name} to be [T,D>={self.action_dim}], "
@@ -928,7 +974,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
         num_agents = len(agent_names)
 
         rgb_indices = np.asarray([start + offset for offset in self.video_indices], dtype=np.int64)
-        rgb = group["obs/sensor_data/head_camera_global/rgb"][rgb_indices]
+        rgb = group[policy_video_path(group)][rgb_indices]
         video = torch.from_numpy(np.asarray(rgb)).permute(0, 3, 1, 2)
         video = transforms_F.resize(
             video,
@@ -975,7 +1021,7 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             original_index = int(original_index_tensor)
             agent_name = agent_names[original_index]
             ordered_agent_names.append(agent_name)
-            action_dataset = group[f"actions/{agent_name}"]
+            action_dataset = robofactory_action_dataset(group, agent_name)
             raw_action = torch.from_numpy(
                 np.asarray(
                     action_dataset[start : start + self.action_horizon],
@@ -1002,27 +1048,42 @@ class RoboFactoryMultiRobotDataset(torch.utils.data.Dataset):
             b4_gripper_closed_target[slot] = proxy["closed_target"][target_slice]
             b4_gripper_event_target[slot] = proxy["event_target"][target_slice]
             b4_stable_contact_proxy[slot] = proxy["stable_closed_proxy"][target_slice]
-            qpos = np.asarray(group[f"obs/agent/{agent_name}/qpos"][start], dtype=np.float32)
-            qvel = np.asarray(group[f"obs/agent/{agent_name}/qvel"][start], dtype=np.float32)
+            qpos = np.asarray(
+                robofactory_state_dataset(group, agent_name, "qpos")[start],
+                dtype=np.float32,
+            )
+            qvel = np.asarray(
+                robofactory_state_dataset(group, agent_name, "qvel")[start],
+                dtype=np.float32,
+            )
             raw_state = torch.from_numpy(np.concatenate([qpos, qvel], axis=0))
             articulation_name = self._articulation_name(agent_name)
             geometry_path = f"env_states/articulations/{articulation_name}"
-            if geometry_path not in group:
-                raise KeyError(
-                    f"Missing agent root-pose geometry {geometry_path!r} in "
-                    f"{entry['path']}:{entry['trajectory']}"
+            if geometry_path in group:
+                articulation_state = group[geometry_path]
+                if articulation_state.ndim != 2 or articulation_state.shape[1] < 7:
+                    raise ValueError(
+                        f"Expected {geometry_path} to be [T,D>=7], got "
+                        f"{tuple(articulation_state.shape)}"
+                    )
+                root_pose = self._canonicalize_root_pose(
+                    torch.from_numpy(
+                        np.asarray(articulation_state[start, :7], dtype=np.float32)
+                    )
                 )
-            articulation_state = group[geometry_path]
-            if articulation_state.ndim != 2 or articulation_state.shape[1] < 7:
-                raise ValueError(
-                    f"Expected {geometry_path} to be [T,D>=7], got "
-                    f"{tuple(articulation_state.shape)}"
+            else:
+                configured_pose = self.agent_geometry_map.get(
+                    str(entry["task_name"]), {}
+                ).get(agent_name)
+                if configured_pose is None:
+                    raise KeyError(
+                        f"Missing agent root-pose geometry {geometry_path!r} in "
+                        f"{entry['path']}:{entry['trajectory']} and no fixed pose for "
+                        f"{entry['task_name']}:{agent_name} in agent_geometry_map"
+                    )
+                root_pose = self._canonicalize_root_pose(
+                    torch.tensor(configured_pose, dtype=torch.float32)
                 )
-            root_pose = self._canonicalize_root_pose(
-                torch.from_numpy(
-                    np.asarray(articulation_state[start, :7], dtype=np.float32)
-                )
-            )
             action[slot] = (raw_action - self.stats["action_mean"]) / self.stats["action_std"]
             agent_state[slot] = (raw_state - self.stats["state_mean"]) / self.stats["state_std"]
             agent_geometry[slot] = root_pose
@@ -1164,7 +1225,7 @@ def compute_robofactory_stats(
                 group = handle[trajectory_name]
                 if "actions" not in group:
                     continue
-                agent_names = sorted(group["actions"].keys(), key=_agent_sort_key)
+                agent_names = list(robofactory_agent_names(group))
                 if not agent_names:
                     continue
                 trajectory_count += 1
@@ -1180,9 +1241,9 @@ def compute_robofactory_stats(
                     fitted_trajectories_by_agent_count.get(agent_count, 0) + 1
                 )
                 for agent_name in agent_names:
-                    update("action", group[f"actions/{agent_name}"][:])
-                    qpos = group[f"obs/agent/{agent_name}/qpos"][:]
-                    qvel = group[f"obs/agent/{agent_name}/qvel"][:]
+                    update("action", robofactory_action_dataset(group, agent_name)[:])
+                    qpos = robofactory_state_dataset(group, agent_name, "qpos")[:]
+                    qvel = robofactory_state_dataset(group, agent_name, "qvel")[:]
                     update("state", np.concatenate([qpos, qvel], axis=-1))
 
     result: dict[str, Any] = {
