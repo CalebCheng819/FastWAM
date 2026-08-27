@@ -11,13 +11,29 @@ import re
 import stat
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _STAT_CMP_MARKER_SCHEMA = "fastwam-runtime-file-barrier-stat-cmp-v2"
 _ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def resolve_provenance_attempt_id(
+    provenance_mode: str,
+    environment: Mapping[str, str] | None = None,
+) -> str | None:
+    """Resolve the attempt identity used by the stat-comparison barrier.
+
+    FASTWAM_ATTEMPT_ID is the launcher-independent contract.  The B4-specific
+    name remains as a compatibility fallback for existing launchers.
+    """
+
+    if provenance_mode.strip().lower() != "stat_cmp":
+        return None
+    values = os.environ if environment is None else environment
+    return values.get("FASTWAM_ATTEMPT_ID") or values.get("FASTWAM_B4_ATTEMPT_ID")
 
 
 def _temporary_path(path: Path) -> Path:

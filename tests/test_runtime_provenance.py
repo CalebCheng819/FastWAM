@@ -25,6 +25,30 @@ def _load_module():
     return module
 
 
+def test_stat_cmp_attempt_id_prefers_generic_launcher_contract() -> None:
+    module = _load_module()
+    assert (
+        module.resolve_provenance_attempt_id(
+            "stat_cmp",
+            {
+                "FASTWAM_ATTEMPT_ID": "table11-attempt-001",
+                "FASTWAM_B4_ATTEMPT_ID": "legacy-b4-attempt",
+            },
+        )
+        == "table11-attempt-001"
+    )
+
+
+def test_stat_cmp_attempt_id_keeps_b4_compatibility_and_other_modes_empty() -> None:
+    module = _load_module()
+    legacy = {"FASTWAM_B4_ATTEMPT_ID": "legacy-b4-attempt"}
+    assert (
+        module.resolve_provenance_attempt_id(" stat_cmp ", legacy)
+        == "legacy-b4-attempt"
+    )
+    assert module.resolve_provenance_attempt_id("sha256", legacy) is None
+
+
 def test_ready_marker_is_hidden_until_its_payload_is_fully_fsynced(
     tmp_path: Path,
 ) -> None:
