@@ -153,6 +153,10 @@ SCALE_PROFILE="robofactory_multi_robot_16gpu_cont50k"
 
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
 is_safe_id "${ATTEMPT_ID}" || die "attempt ID is not a safe identifier: ${ATTEMPT_ID}"
+if [[ -n "${FASTWAM_ATTEMPT_ID:-}" && "${FASTWAM_ATTEMPT_ID}" != "${ATTEMPT_ID}" ]]; then
+  die "FASTWAM_ATTEMPT_ID conflicts with FASTWAM_TABLE11_ATTEMPT_ID"
+fi
+export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"
 [[ "${NUM_MACHINES}" == "2" ]] || \
   die "WORLD_SIZE must be the DLC worker count 2, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || \

@@ -145,6 +145,21 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("WORLD_SIZE must be the DLC worker count 2", result.stderr)
 
+    def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
+        source = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn('export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"', source)
+
+    def test_conflicting_generic_attempt_id_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env["FASTWAM_ATTEMPT_ID"] = "different-attempt"
+            result = self.run_launcher(env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "FASTWAM_ATTEMPT_ID conflicts with FASTWAM_TABLE11_ATTEMPT_ID",
+                result.stderr,
+            )
+
     def test_renderer_is_pure_and_pins_priority7_world16_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

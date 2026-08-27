@@ -16,7 +16,11 @@ from .utils.logging_config import get_logger, setup_logging
 from .utils.pytorch_utils import set_global_seed
 from .utils.video_io import save_mp4
 from .utils import misc
-from .runtime_provenance import publish_rank_zero_file, rank_and_world_from_environment
+from .runtime_provenance import (
+    publish_rank_zero_file,
+    rank_and_world_from_environment,
+    resolve_provenance_attempt_id,
+)
 
 logger = get_logger(__name__)
 
@@ -516,11 +520,7 @@ def run_training(cfg: DictConfig):
     except ValueError as error:
         raise RuntimeError("FASTWAM_CONFIG_BARRIER_TIMEOUT must be numeric") from error
     provenance_mode = str(cfg.get("provenance_mode", "sha256")).strip().lower()
-    attempt_id = (
-        os.environ.get("FASTWAM_B4_ATTEMPT_ID")
-        if provenance_mode == "stat_cmp"
-        else None
-    )
+    attempt_id = resolve_provenance_attempt_id(provenance_mode)
     config_identity = publish_rank_zero_file(
         Path(cfg.output_dir) / config_filename,
         config_payload,
