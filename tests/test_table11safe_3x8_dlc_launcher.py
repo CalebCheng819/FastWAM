@@ -12,8 +12,8 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-LAUNCHER = REPO / "scripts" / "launch_table11_2x8_dlc.sh"
-RENDERER = REPO / "scripts" / "render_table11_2x8_dlc_job.py"
+LAUNCHER = REPO / "scripts" / "launch_table11safe_3x8_dlc.sh"
+RENDERER = REPO / "scripts" / "render_table11safe_3x8_dlc_job.py"
 
 
 class Table11LauncherTests(unittest.TestCase):
@@ -76,7 +76,7 @@ class Table11LauncherTests(unittest.TestCase):
                 "FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR": str(gaussian),
                 "FASTWAM_TABLE11_EXPECTED_H5_FILES": "11",
                 "FASTWAM_TABLE11_CODE_COMMIT": "1" * 40,
-                "WORLD_SIZE": "2",
+                "WORLD_SIZE": "3",
                 "RANK": "0",
                 "LOCAL_RANK": "0",
                 "NPROC_PER_NODE": "8",
@@ -124,26 +124,26 @@ class Table11LauncherTests(unittest.TestCase):
             check=False,
         )
 
-    def test_valid_contract_resolves_world16_continuation(self) -> None:
+    def test_valid_contract_resolves_world24_continuation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_launcher(self.fixture(Path(directory)))
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("--num_machines 2", result.stdout)
-            self.assertIn("--num_processes 16", result.stdout)
+            self.assertIn("--num_machines 3", result.stdout)
+            self.assertIn("--num_processes 24", result.stdout)
             self.assertIn(
                 "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
                 result.stdout,
             )
-            self.assertIn("+scale=robofactory_multi_robot_16gpu_cont50k", result.stdout)
-            self.assertIn("table11 config gate: world=16 global_batch=16", result.stdout)
+            self.assertIn("+scale=robofactory_multi_robot_24gpu_cont50k", result.stdout)
+            self.assertIn("table11 safe config gate: world=24 global_batch=24", result.stdout)
 
     def test_topology_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env = self.fixture(Path(directory))
-            env["WORLD_SIZE"] = "3"
+            env["WORLD_SIZE"] = "2"
             result = self.run_launcher(env)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("WORLD_SIZE must be the DLC worker count 2", result.stderr)
+            self.assertIn("WORLD_SIZE must be the DLC worker count 3", result.stderr)
 
     def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
@@ -160,7 +160,7 @@ class Table11LauncherTests(unittest.TestCase):
                 result.stderr,
             )
 
-    def test_renderer_is_pure_and_pins_priority7_world16_contract(self) -> None:
+    def test_renderer_is_pure_and_pins_priority7_world24_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "job.json"
@@ -199,15 +199,15 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertTrue(manifest["dry_run"])
             self.assertTrue(manifest["submission_not_performed"])
             self.assertEqual(request["Priority"], 7)
-            self.assertEqual(request["JobSpecs"][0]["PodCount"], 2)
+            self.assertEqual(request["JobSpecs"][0]["PodCount"], 3)
             self.assertEqual(request["JobSpecs"][0]["ResourceConfig"]["GPU"], "8")
             self.assertEqual(
                 {(item["MountPath"], item["MountAccess"]) for item in request["DataSources"]},
                 {("/oss-chengjuntao", "RW")},
             )
             self.assertEqual(manifest["batch_contract"]["reference_global_batch"], 24)
-            self.assertEqual(manifest["batch_contract"]["replica_global_batch"], 16)
-            self.assertFalse(manifest["batch_contract"]["sample_budget_equivalent"])
+            self.assertEqual(manifest["batch_contract"]["replica_global_batch"], 24)
+            self.assertTrue(manifest["batch_contract"]["sample_budget_equivalent"])
             self.assertEqual(
                 base64.b64decode(manifest["launcher_payload_base64"]), launcher_bytes
             )

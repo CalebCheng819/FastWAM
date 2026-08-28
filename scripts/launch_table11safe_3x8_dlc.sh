@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Formal 2-worker x 8-GPU launcher for the RoboFactory table11 continuation.
+# Formal 3-worker x 8-GPU launcher for the joint-safe RoboFactory table11 rerun.
 # PAI invokes this script once per worker. The script fails closed on source,
 # topology, assets, configuration, inter-node communication, and output reuse.
 
@@ -44,7 +44,7 @@ fi
 require_env RUN_ID
 require_env FASTWAM_TABLE11_ATTEMPT_ID
 
-# Freeze PAI's outer-worker topology before Accelerate creates its 16-rank
+# Freeze PAI's outer-worker topology before Accelerate creates its 24-rank
 # world, then remove the outer rank variables immediately before exec.
 NUM_MACHINES="${WORLD_SIZE:-}"
 MACHINE_RANK="${RANK:-}"
@@ -149,7 +149,7 @@ EXPECTED_WEIGHT_BYTES="${FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES:-}"
 EXPECTED_H5_FILES="${FASTWAM_TABLE11_EXPECTED_H5_FILES:-}"
 
 TASK_PROFILE="robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4"
-SCALE_PROFILE="robofactory_multi_robot_16gpu_cont50k"
+SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
 
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
 is_safe_id "${ATTEMPT_ID}" || die "attempt ID is not a safe identifier: ${ATTEMPT_ID}"
@@ -157,20 +157,20 @@ if [[ -n "${FASTWAM_ATTEMPT_ID:-}" && "${FASTWAM_ATTEMPT_ID}" != "${ATTEMPT_ID}"
   die "FASTWAM_ATTEMPT_ID conflicts with FASTWAM_TABLE11_ATTEMPT_ID"
 fi
 export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"
-[[ "${NUM_MACHINES}" == "2" ]] || \
-  die "WORLD_SIZE must be the DLC worker count 2, got ${NUM_MACHINES:-unset}"
+[[ "${NUM_MACHINES}" == "3" ]] || \
+  die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || \
   die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
-is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,1]"
-((10#${MACHINE_RANK} < 2)) || die "RANK must be in [0,1], got ${MACHINE_RANK}"
+is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,2]"
+((10#${MACHINE_RANK} < 3)) || die "RANK must be in [0,2], got ${MACHINE_RANK}"
 [[ -z "${LOCAL_RANK:-}" || "${LOCAL_RANK}" == "0" ]] || \
   die "outer DLC command must run once per node with LOCAL_RANK=0"
 is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a shared non-loopback address"
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || \
   die "MASTER_PORT must be in [1,65535]"
-[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 16 ]] || \
-  die "global world size must be exactly 16"
+[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 24 ]] || \
+  die "global world size must be exactly 24"
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || \
   die "FASTWAM_TABLE11_DRY_RUN must be 0 or 1"
 
@@ -187,10 +187,10 @@ if [[ "${TEST_MODE}" != "1" ]]; then
     die "active source checkout is dirty"
 
   require_exact_env FASTWAM_TABLE11_PROVENANCE_MODE "stat_cmp"
-  require_exact_env FASTWAM_TABLE11_DATASET_ROOT "/oss-chengjuntao/robofactory/table/robofactory-table-11task-200each-h299-2g-r1-20260825/tasks"
-  require_exact_env FASTWAM_TABLE11_STATS_PATH "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h299-r1-s42/stats/train-stats.json"
-  require_exact_env FASTWAM_TABLE11_TEXT_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h299-r1-s42/text-embeds"
-  require_exact_env FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h299-r1-s42/gaussian/compact-s42-13x28x40-fp16-meanalpha-direct-v1"
+  require_exact_env FASTWAM_TABLE11_DATASET_ROOT "/oss-chengjuntao/robofactory/table/robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
+  require_exact_env FASTWAM_TABLE11_STATS_PATH "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/stats/train-stats.json"
+  require_exact_env FASTWAM_TABLE11_TEXT_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/text-embeds"
+  require_exact_env FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/gaussian/compact-s42-13x28x40-fp16-meanalpha-direct-v1"
   require_exact_env FASTWAM_TABLE11_MODEL_CACHE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache"
   require_exact_env FASTWAM_TABLE11_VAE_PATH "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
   require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT "/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
@@ -316,7 +316,7 @@ register_default_resolvers()
 repo = Path(os.environ["FASTWAM_TABLE11_REPO_FOR_CONFIG"])
 overrides = [
     "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
-    "+scale=robofactory_multi_robot_16gpu_cont50k",
+    "+scale=robofactory_multi_robot_24gpu_cont50k",
     f"data.train.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
     f"data.val.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
     f"data.train.pretrained_norm_stats={os.environ['FASTWAM_TABLE11_CONFIG_STATS']}",
@@ -364,7 +364,7 @@ for split in ("train", "val"):
         raise SystemExit(f"{split} Gaussian verification is not stat_cmp")
 if len(resolved["data"]["train"]["instruction_map"]) != 11:
     raise SystemExit("instruction map does not contain exactly 11 tasks")
-print("table11 config gate: world=16 global_batch=16 updates=45000 checkpoints=10000..50000/5000")
+print("table11 safe config gate: world=24 global_batch=24 updates=45000 checkpoints=10000..50000/5000")
 PY
 
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
@@ -402,9 +402,9 @@ if [[ "${TEST_MODE}" != "1" ]]; then
 fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
-workers=2
+workers=3
 gpus_per_worker=8
-global_world_size=16
+global_world_size=24
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
@@ -415,8 +415,8 @@ optimizer_steps_this_run=45000
 per_device_batch_size=1
 gradient_accumulation_steps=1
 reference_global_batch_size=24
-global_batch_size=16
-sample_budget_equivalent=false
+global_batch_size=24
+sample_budget_equivalent=true
 learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
@@ -478,11 +478,11 @@ export FASTWAM_B4_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
   --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml"
-  --num_machines 2
+  --num_machines 3
   --machine_rank "${MACHINE_RANK}"
   --main_process_ip "${MASTER_HOST}"
   --main_process_port "${MASTER_TCP_PORT}"
-  --num_processes 16
+  --num_processes 24
   --deepspeed_multinode_launcher standard
   "${REPO_ROOT}/scripts/train.py"
   "task=${TASK_PROFILE}"
