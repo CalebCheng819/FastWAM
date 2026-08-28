@@ -155,14 +155,13 @@ DRY_RUN="${FASTWAM_TABLE11_DRY_RUN:-0}"
 DATASET_ROOT="${FASTWAM_TABLE11_DATASET_ROOT:-}"
 STATS_PATH="${FASTWAM_TABLE11_STATS_PATH:-}"
 TEXT_CACHE_DIR="${FASTWAM_TABLE11_TEXT_CACHE_DIR:-}"
-GAUSSIAN_CACHE_DIR="${FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR:-}"
 MODEL_CACHE_ROOT="${FASTWAM_TABLE11_MODEL_CACHE_ROOT:-}"
 VAE_PATH="${FASTWAM_TABLE11_VAE_PATH:-}"
 SOURCE_WEIGHT="${FASTWAM_TABLE11_SOURCE_WEIGHT:-}"
 EXPECTED_WEIGHT_BYTES="${FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES:-}"
 EXPECTED_H5_FILES="${FASTWAM_TABLE11_EXPECTED_H5_FILES:-}"
 
-TASK_PROFILE="robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4"
+TASK_PROFILE="robofactory_table11_vg1_hub1_gau0_cont50k_224_1e-4"
 SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
 
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
@@ -205,11 +204,12 @@ if [[ "${TEST_MODE}" != "1" ]]; then
   require_exact_env FASTWAM_TABLE11_DATASET_ROOT "/oss-chengjuntao/robofactory/table/robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
   require_exact_env FASTWAM_TABLE11_STATS_PATH "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/stats/train-stats.json"
   require_exact_env FASTWAM_TABLE11_TEXT_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/text-embeds"
-  require_exact_env FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/gaussian/compact-s42-13x28x40-fp16-meanalpha-direct-v1"
+  [[ -z "${FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR:-}" ]] || \
+    die "GAU0 run forbids FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR"
   require_exact_env FASTWAM_TABLE11_MODEL_CACHE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache"
   require_exact_env FASTWAM_TABLE11_VAE_PATH "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
-  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT "/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
-  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES "12047213728"
+  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT "/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/step_005000/checkpoints/weights/step_005000.pt"
+  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES "12045923769"
   require_exact_env FASTWAM_TABLE11_EXPECTED_H5_FILES "11"
 fi
 
@@ -249,13 +249,6 @@ PY
 [[ -d "${DATASET_ROOT}" ]] || die "dataset root is missing: ${DATASET_ROOT}"
 [[ -f "${STATS_PATH}" && ! -L "${STATS_PATH}" ]] || die "stats file is missing"
 [[ -d "${TEXT_CACHE_DIR}" ]] || die "text cache is missing"
-[[ -d "${GAUSSIAN_CACHE_DIR}" ]] || die "Gaussian cache is missing"
-[[ -f "${GAUSSIAN_CACHE_DIR}/COMPLETE" && ! -L "${GAUSSIAN_CACHE_DIR}/COMPLETE" ]] || \
-  die "Gaussian COMPLETE marker is missing"
-[[ -f "${GAUSSIAN_CACHE_DIR}/manifest.json" && ! -L "${GAUSSIAN_CACHE_DIR}/manifest.json" ]] || \
-  die "Gaussian manifest is missing"
-[[ -f "${GAUSSIAN_CACHE_DIR}/selection.jsonl" && ! -L "${GAUSSIAN_CACHE_DIR}/selection.jsonl" ]] || \
-  die "Gaussian selection is missing"
 if [[ "${TEST_MODE}" != "1" ]]; then
   [[ -d "${MODEL_CACHE_ROOT}" ]] || die "model cache is missing"
   [[ -f "${VAE_PATH}" && ! -L "${VAE_PATH}" ]] || die "Wan VAE is missing"
@@ -264,7 +257,6 @@ fi
 FASTWAM_TABLE11_CHECK_ROOT="${DATASET_ROOT}" \
 FASTWAM_TABLE11_CHECK_STATS="${STATS_PATH}" \
 FASTWAM_TABLE11_CHECK_TEXT="${TEXT_CACHE_DIR}" \
-FASTWAM_TABLE11_CHECK_GAUSSIAN="${GAUSSIAN_CACHE_DIR}" \
 FASTWAM_TABLE11_CHECK_H5="${EXPECTED_H5_FILES}" \
 "${PYTHON_BIN}" - <<'PY' || die "RoboFactory table11 asset contract validation failed"
 import json
@@ -293,23 +285,13 @@ text_files = [path for path in Path(os.environ["FASTWAM_TABLE11_CHECK_TEXT"]).rg
 if len(text_files) < 11:
     raise SystemExit(f"expected at least 11 text cache files, observed {len(text_files)}")
 
-gaussian = Path(os.environ["FASTWAM_TABLE11_CHECK_GAUSSIAN"])
-complete = json.loads((gaussian / "COMPLETE").read_text())
-manifest = json.loads((gaussian / "manifest.json").read_text())
-if complete.get("complete") is not True:
-    raise SystemExit("Gaussian completion marker is not terminal")
-if int(manifest.get("total_frames", 0)) <= 0:
-    raise SystemExit("Gaussian manifest has no frames")
-if manifest.get("derivation", {}).get("source") != "direct-teacher-forward-index-v1":
-    raise SystemExit("Gaussian cache is not the formal direct-compact derivation")
 print(
     "table11 asset gate: "
-    f"tasks={len(tasks)} h5={len(h5_files)} text_files={len(text_files)} "
-    f"gaussian_frames={manifest['total_frames']}"
+    f"tasks={len(tasks)} h5={len(h5_files)} text_files={len(text_files)} gaussian=disabled"
 )
 PY
 
-export FASTWAM_GAUSSIAN_CACHE_DIR="${GAUSSIAN_CACHE_DIR}"
+unset FASTWAM_GAUSSIAN_CACHE_DIR
 export FASTWAM_B4_BASE_CHECKPOINT="${SOURCE_WEIGHT}"
 export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_CACHE_ROOT}"
 export FASTWAM_LOCAL_VAE_PATH="${VAE_PATH}"
@@ -318,7 +300,6 @@ FASTWAM_TABLE11_REPO_FOR_CONFIG="${REPO_ROOT}" \
 FASTWAM_TABLE11_CONFIG_DATASET="${DATASET_ROOT}" \
 FASTWAM_TABLE11_CONFIG_STATS="${STATS_PATH}" \
 FASTWAM_TABLE11_CONFIG_TEXT="${TEXT_CACHE_DIR}" \
-FASTWAM_TABLE11_CONFIG_GAUSSIAN="${GAUSSIAN_CACHE_DIR}" \
 FASTWAM_TABLE11_CONFIG_RUN_MODE="${RUN_MODE}" \
 FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD="${EXPECTED_WORLD}" \
 "${PYTHON_BIN}" - <<'PY' || die "formal Hydra configuration contract validation failed"
@@ -332,7 +313,7 @@ from fastwam.utils.config_resolvers import register_default_resolvers
 register_default_resolvers()
 repo = Path(os.environ["FASTWAM_TABLE11_REPO_FOR_CONFIG"])
 overrides = [
-    "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
+    "task=robofactory_table11_vg1_hub1_gau0_cont50k_224_1e-4",
     "+scale=robofactory_multi_robot_24gpu_cont50k",
     f"data.train.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
     f"data.val.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
@@ -340,8 +321,6 @@ overrides = [
     f"data.val.pretrained_norm_stats={os.environ['FASTWAM_TABLE11_CONFIG_STATS']}",
     f"data.train.text_embedding_cache_dir={os.environ['FASTWAM_TABLE11_CONFIG_TEXT']}",
     f"data.val.text_embedding_cache_dir={os.environ['FASTWAM_TABLE11_CONFIG_TEXT']}",
-    f"data.train.gaussian_cache_dir={os.environ['FASTWAM_TABLE11_CONFIG_GAUSSIAN']}",
-    f"data.val.gaussian_cache_dir={os.environ['FASTWAM_TABLE11_CONFIG_GAUSSIAN']}",
 ]
 with initialize_config_dir(config_dir=str(repo / "configs"), version_base="1.3"):
     cfg = compose(config_name="train", overrides=overrides)
@@ -373,14 +352,16 @@ if resolved["model"]["training_mode"] != "joint":
     raise SystemExit("model training mode is not joint")
 if not resolved["model"]["action_dit_config"]["hub_enabled"]:
     raise SystemExit("HUB is disabled")
-if not resolved["model"]["action_dit_config"]["enable_gaussian"]:
-    raise SystemExit("Gaussian conditioning is disabled")
+if resolved["model"]["action_dit_config"]["enable_gaussian"]:
+    raise SystemExit("GAU0 contract unexpectedly enables Gaussian conditioning")
 for split in ("train", "val"):
     data = resolved["data"][split]
     if data["required_agent_counts"] != [1, 2, 3, 4]:
         raise SystemExit(f"{split} agent-count coverage drifted")
-    if data["gaussian_cache_verify"] != "stat_cmp":
-        raise SystemExit(f"{split} Gaussian verification is not stat_cmp")
+    if data["gaussian_cache_dir"] is not None:
+        raise SystemExit(f"{split} Gaussian cache is unexpectedly configured")
+    if data["gaussian_cache_verify"] is not None:
+        raise SystemExit(f"{split} Gaussian verification is unexpectedly configured")
 if len(resolved["data"]["train"]["instruction_map"]) != 11:
     raise SystemExit("instruction map does not contain exactly 11 tasks")
 if run_mode == "preflight-one-step":
@@ -446,7 +427,7 @@ scheduler_warmup_steps=2250
 save_every=5000
 checkpoint_steps=10000,15000,20000,25000,30000,35000,40000,45000,50000
 dataset_root=${DATASET_ROOT}
-gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}
+gaussian_cache_dir=disabled
 "
 
 if [[ "${DRY_RUN}" == "0" ]]; then
@@ -518,8 +499,6 @@ COMMAND=(
   "data.val.stats_source_root=${DATASET_ROOT}"
   "data.train.text_embedding_cache_dir=${TEXT_CACHE_DIR}"
   "data.val.text_embedding_cache_dir=${TEXT_CACHE_DIR}"
-  "data.train.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"
-  "data.val.gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}"
   "output_dir=${OUTPUT_DIR}"
   "wandb.name=${RUN_ID}"
 )

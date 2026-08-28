@@ -1,0 +1,12 @@
+# @package _global_
+# Joint-safe RoboFactory Table11 data with the existing VG1 + HUB1 + GAU0
+# weights-only continuation contract. The model and schedule are inherited
+# unchanged; only the data profile and run identity are replaced.
+defaults:
+  - robofactory_multi_robot_vg1_hub1_gau0_cont50k_224_1e-4
+  - override /data: robofactory_table11
+  - _self_
+
+wandb:
+  group: fastwam-table11safe-vg1h1gau0-cont50k-s42-24g-r1-20260829
+  name: fastwam-table11safe-vg1h1gau0-cont50k-s42-24g-r1-20260829

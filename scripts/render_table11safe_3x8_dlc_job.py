@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, the joint-safe RoboFactory table11 3x8 DLC job."""
+"""Render, but never submit, the joint-safe Table11 VG1H1GAU0 3x8 DLC job."""
 
 from __future__ import annotations
 
@@ -40,10 +40,6 @@ ASSET_ROOT = (
 )
 STATS_PATH = f"{ASSET_ROOT}/stats/train-stats.json"
 TEXT_CACHE_DIR = f"{ASSET_ROOT}/text-embeds"
-GAUSSIAN_CACHE_DIR = (
-    f"{ASSET_ROOT}/gaussian/"
-    "compact-s42-13x28x40-fp16-meanalpha-direct-v1"
-)
 MODEL_CACHE_ROOT = (
     "/oss-chengjuntao/cpfs-user-chengjuntao/"
     "checkpoints/FastWAM/model-cache"
@@ -53,9 +49,9 @@ VAE_PATH = (
     "Wan2.2_VAE.safetensors"
 )
 SOURCE_WEIGHT = (
-    "/oss-chengjuntao/artifacts/"
-    "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-"
-    "a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
+    "/oss-chengjuntao/artifacts/fastwam-checkpoint-archives-v1/"
+    "FASTWAM-MR-N234-VG1H1-S42-20260801/dlc1hqocuisxxdkb/"
+    "step_005000/checkpoints/weights/step_005000.pt"
 )
 
 
@@ -185,11 +181,10 @@ def main() -> int:
         "FASTWAM_TABLE11_DATASET_ROOT": DATASET_ROOT,
         "FASTWAM_TABLE11_STATS_PATH": STATS_PATH,
         "FASTWAM_TABLE11_TEXT_CACHE_DIR": TEXT_CACHE_DIR,
-        "FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR": GAUSSIAN_CACHE_DIR,
         "FASTWAM_TABLE11_MODEL_CACHE_ROOT": MODEL_CACHE_ROOT,
         "FASTWAM_TABLE11_VAE_PATH": VAE_PATH,
         "FASTWAM_TABLE11_SOURCE_WEIGHT": SOURCE_WEIGHT,
-        "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": "12047213728",
+        "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": "12045923769",
         "FASTWAM_TABLE11_EXPECTED_H5_FILES": "11",
         "FASTWAM_ERDMA_BUNDLE_ROOT": "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3",
         "FASTWAM_ERDMA_EXPECTED_VERSION": "56.2-1.0.3",
@@ -212,7 +207,7 @@ def main() -> int:
             }
         ],
         "Description": (
-            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only "
+            "Joint-safe RoboFactory table11 VG1H1GAU0 weights-only "
             + (
                 "runtime preflight: cumulative 5000 to 5001, one fresh-optimizer "
                 "update, 1 worker x 8 GPUs"
@@ -252,8 +247,8 @@ def main() -> int:
             "EnableRDMA": True,
             "EnableSanityCheck": False,
             "Tags": {
-                "experiment": "TABLE11SAFE-VG1H1GAU1-CONT50K",
-                "initialization": "GAU1-step5000-weights-only",
+                "experiment": "TABLE11SAFE-VG1H1GAU0-CONT50K",
+                "initialization": "VG1H1-step5000-weights-only",
                 "optimizer": "fresh",
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "1x8-world8" if args.preflight_one_step else "3x8-world24",

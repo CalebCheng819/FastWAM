@@ -132,7 +132,7 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertIn("--num_machines 3", result.stdout)
             self.assertIn("--num_processes 24", result.stdout)
             self.assertIn(
-                "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
+                "task=robofactory_table11_vg1_hub1_gau0_cont50k_224_1e-4",
                 result.stdout,
             )
             self.assertIn("+scale=robofactory_multi_robot_24gpu_cont50k", result.stdout)
@@ -219,6 +219,8 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertEqual(request["Priority"], 7)
             self.assertEqual(request["JobSpecs"][0]["PodCount"], 3)
             self.assertEqual(request["JobSpecs"][0]["ResourceConfig"]["GPU"], "8")
+            self.assertIn("table11 VG1H1GAU0", request["Description"])
+            self.assertNotIn("FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR", request["Envs"])
             self.assertEqual(
                 {(item["MountPath"], item["MountAccess"]) for item in request["DataSources"]},
                 {("/oss-chengjuntao", "RW")},
