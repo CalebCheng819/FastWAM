@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-bundle", required=True, type=pathlib.Path)
     parser.add_argument("--code-commit", required=True)
     parser.add_argument("--max-running-minutes", type=int, default=20160)
+    parser.add_argument(
+        "--preflight-one-step",
+        action="store_true",
+        help="render a separate 1x8 cumulative-step-5001 runtime preflight",
+    )
     parser.add_argument("--allow-local-bundle-for-tests", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -151,9 +156,12 @@ def main() -> int:
     )
     user_command = "/bin/bash -c " + shlex.quote(outer_shell)
     output_dir = f"/oss-chengjuntao/artifacts/{args.run_id}"
+    run_mode = "preflight-one-step" if args.preflight_one_step else "formal"
+    pod_count = 1 if args.preflight_one_step else 3
     envs = {
         "RUN_ID": args.run_id,
         "FASTWAM_TABLE11_ATTEMPT_ID": args.attempt_id,
+        "FASTWAM_TABLE11_RUN_MODE": run_mode,
         "FASTWAM_TABLE11_OUTPUT_DIR": output_dir,
         "FASTWAM_TABLE11_OUTPUT_RESERVATION_TIMEOUT": "300",
         "FASTWAM_TABLE11_BOOTSTRAP_SCRIPT": args.bootstrap_script,
@@ -204,9 +212,14 @@ def main() -> int:
             }
         ],
         "Description": (
-            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only rerun: "
-            "cumulative 5000 to 50000, 45000 fresh-optimizer updates, "
-            "3 workers x 8 GPUs, world-24 global batch"
+            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only "
+            + (
+                "runtime preflight: cumulative 5000 to 5001, one fresh-optimizer "
+                "update, 1 worker x 8 GPUs"
+                if args.preflight_one_step
+                else "rerun: cumulative 5000 to 50000, 45000 fresh-optimizer "
+                "updates, 3 workers x 8 GPUs, world-24 global batch"
+            )
         ),
         "DisplayName": args.run_id,
         "Envs": envs,
@@ -216,7 +229,7 @@ def main() -> int:
                 "ElasticSpotSpecs": [],
                 "Image": IMAGE,
                 "LocalMountSpecs": [],
-                "PodCount": 3,
+                "PodCount": pod_count,
                 "ResourceConfig": {
                     "CPU": "126",
                     "GPU": "8",
@@ -243,8 +256,12 @@ def main() -> int:
                 "initialization": "GAU1-step5000-weights-only",
                 "optimizer": "fresh",
                 "provenance": "stat-cmp-no-new-hash",
-                "topology": "3x8-world24",
-                "schedule": "cumulative-5000-to-50000-save-5000",
+                "topology": "1x8-world8" if args.preflight_one_step else "3x8-world24",
+                "schedule": (
+                    "cumulative-5000-to-5001-no-checkpoint"
+                    if args.preflight_one_step
+                    else "cumulative-5000-to-50000-save-5000"
+                ),
             },
         },
         "SuccessPolicy": "AllWorkers",
@@ -282,11 +299,11 @@ def main() -> int:
         },
         "batch_contract": {
             "reference_global_batch": 24,
-            "replica_global_batch": 24,
+            "replica_global_batch": 8 if args.preflight_one_step else 24,
             "micro_batch_per_gpu": 1,
             "gradient_accumulation_steps": 1,
-            "optimizer_updates": 45000,
-            "sample_budget_equivalent": True,
+            "optimizer_updates": 1 if args.preflight_one_step else 45000,
+            "sample_budget_equivalent": not args.preflight_one_step,
         },
         "request": request,
     }

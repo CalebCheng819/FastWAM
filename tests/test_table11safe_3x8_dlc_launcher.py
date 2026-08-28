@@ -67,6 +67,7 @@ class Table11LauncherTests(unittest.TestCase):
                 "FASTWAM_TABLE11_OFFLINE_ENV_READY": "1",
                 "FASTWAM_TABLE11_TEST_MODE": "1",
                 "FASTWAM_TABLE11_DRY_RUN": "1",
+                "FASTWAM_TABLE11_RUN_MODE": "formal",
                 "FASTWAM_TABLE11_OUTPUT_DIR": str(root / "output"),
                 "FASTWAM_TABLE11_SOURCE_WEIGHT": str(weight),
                 "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": str(weight.stat().st_size),
@@ -145,6 +146,23 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("WORLD_SIZE must be the DLC worker count 3", result.stderr)
 
+    def test_one_step_preflight_resolves_world8_and_disables_final_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env = self.fixture(Path(directory))
+            env.update(
+                {
+                    "FASTWAM_TABLE11_RUN_MODE": "preflight-one-step",
+                    "WORLD_SIZE": "1",
+                }
+            )
+            result = self.run_launcher(env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("--num_machines 1", result.stdout)
+            self.assertIn("--num_processes 8", result.stdout)
+            self.assertIn("max_steps=5001", result.stdout)
+            self.assertIn("save_training_state=false", result.stdout)
+            self.assertIn("save_final_checkpoint=false", result.stdout)
+
     def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
         self.assertIn('export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"', source)
@@ -211,6 +229,35 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertEqual(
                 base64.b64decode(manifest["launcher_payload_base64"]), launcher_bytes
             )
+
+    def test_renderer_can_render_separate_world8_one_step_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "preflight.json"
+            bundle, commit, _ = self.committed_launcher_bundle(root)
+            command = [
+                sys.executable,
+                str(RENDERER),
+                "--run-id", "fastwam-table11-preflight-test",
+                "--attempt-id", "preflight-1",
+                "--output", str(output),
+                "--bootstrap-script", "/oss-chengjuntao/source/bootstrap.sh",
+                "--offline-env-source-root", "/oss-chengjuntao/offline-env",
+                "--offline-env-manifest", "/oss-chengjuntao/offline-env/manifest.json",
+                "--offline-code-commit", "2" * 40,
+                "--offline-source-bundle-relative-path", "source/FastWAM.bundle",
+                "--base-python", "/opt/conda/bin/python3.10",
+                "--source-bundle", str(bundle),
+                "--code-commit", commit,
+                "--allow-local-bundle-for-tests",
+                "--preflight-one-step",
+            ]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request = json.loads(output.read_text(encoding="utf-8"))["request"]
+            self.assertEqual(request["Priority"], 7)
+            self.assertEqual(request["JobSpecs"][0]["PodCount"], 1)
+            self.assertEqual(request["Envs"]["FASTWAM_TABLE11_RUN_MODE"], "preflight-one-step")
 
     def test_renderer_contains_no_cloud_sdk_call(self) -> None:
         source = RENDERER.read_text(encoding="utf-8")
