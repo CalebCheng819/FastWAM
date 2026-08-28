@@ -1,0 +1,60 @@
+{
+  "children": [
+    {
+      "object": "block",
+      "type": "heading_2",
+      "heading_2": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "2026-08-28 formal submission"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "Runtime gate: the 1x8 real-data preflight dlcjn4f0qolzmgjh reached one finite optimizer update (step 5000 to 5001) and ended Succeeded."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "Formal submission: CreateJob was acknowledged exactly once as dlcglfwnemj3y76y (priority 7, 3x8 GPUs). Current readback is Queuing / JobEnqueued, zero Pods, no GmtRunningTime, so formal optimizer training is not yet claimed."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "object": "block",
+      "type": "bulleted_list_item",
+      "bulleted_list_item": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "Treatment: fresh optimizer from GAU1 cumulative step-5000 weights, new H256 joint-safe Table11 data plus regenerated normalization and 89,977-frame Gaussian cache; recoverable checkpoints every 5,000 cumulative steps through 50,000."
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

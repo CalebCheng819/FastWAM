@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "record_kind": "controller-side formal submission reconciliation",
+  "recorded_at": "2026-08-28T11:05:59+08:00",
+  "experiment_id": "FASTWAM-MR-TABLE11SAFE-VG1H1GAU1-CONT50K-S42-24G-R1-20260828",
+  "run_id": "fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828",
+  "attempt_id": "attempt-r1-20260828",
+  "submission": {
+    "status": "CREATE_JOB_ACKNOWLEDGED",
+    "create_job_calls": 1,
+    "job_id": "dlcglfwnemj3y76y",
+    "request_id": "01A0464F-83C2-5E32-A04D-563992B729D1",
+    "call_started_at": "2026-08-28T03:00:11.274574Z",
+    "acknowledged_at": "2026-08-28T03:00:12.427225Z",
+    "call_finished_at": "2026-08-28T03:00:12.705906Z",
+    "receipt": "/oss-chengjuntao/artifacts/fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828-launch-control/submission-formal-3x8-r1-receipt.json"
+  },
+  "scheduler": {
+    "checked_at": "2026-08-28T11:05:59+08:00",
+    "status": "Queuing",
+    "reason_code": "JobEnqueued",
+    "reason_message": "sync enqueue status from queueUnit status",
+    "priority": 7,
+    "created_at": "2026-08-28T03:00:12Z",
+    "submitted_at": "2026-08-28T03:00:17Z",
+    "running_at": null,
+    "provider_pods": 0,
+    "optimizer_started": false
+  },
+  "formal_contract": {
+    "workers": 3,
+    "gpus_per_worker": 8,
+    "requested_gpus": 24,
+    "global_batch_size": 24,
+    "initial_global_step": 5000,
+    "target_global_step": 50000,
+    "save_every_steps": 5000,
+    "source_optimizer_state_reused": false,
+    "treatment_commit": "9ce447f2a93e6878a56cbc6a93c31a95a8ab6d6f"
+  },
+  "resource_snapshot": {
+    "same_resource_group_running_requested_gpus": 88,
+    "running_priority_7_jobs": 4,
+    "formal_job_requested_gpus": 24
+  },
+  "conclusion": {
+    "status": "QUEUED",
+    "claim": "The formal priority-7 3x8 DLC request was acknowledged exactly once and is waiting for resources.",
+    "scope": "Zero Pods and no GmtRunningTime were observed, so the formal run has not started an optimizer step."
+  }
+}

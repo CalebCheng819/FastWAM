@@ -1,0 +1,39 @@
+{
+  "properties": {
+    "Status": {
+      "status": {
+        "name": "Queued"
+      }
+    },
+    "Job ID": {
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "dlcglfwnemj3y76y"
+          }
+        }
+      ]
+    },
+    "Git Commit": {
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "9ce447f2a93e6878a56cbc6a93c31a95a8ab6d6f"
+          }
+        }
+      ]
+    },
+    "Conclusion / Failure Reason": {
+      "rich_text": [
+        {
+          "type": "text",
+          "text": {
+            "content": "Submitted exactly once; PAI acknowledged job dlcglfwnemj3y76y at 2026-08-28T03:00:12Z. Priority 7, 3x8 GPUs. Current scheduler state is Queuing / JobEnqueued with zero Pods and no GmtRunningTime; formal optimizer training has not started. The 1x8 real-data preflight dlcjn4f0qolzmgjh succeeded after one finite optimizer update."
+          }
+        }
+      ]
+    }
+  }
+}
