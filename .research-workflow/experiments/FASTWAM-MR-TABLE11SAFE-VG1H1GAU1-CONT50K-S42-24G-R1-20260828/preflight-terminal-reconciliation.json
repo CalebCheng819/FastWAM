@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "record_kind": "controller-side terminal reconciliation",
+  "recorded_at": "2026-08-28T10:55:31+08:00",
+  "experiment_id": "FASTWAM-MR-TABLE11SAFE-VG1H1GAU1-CONT50K-S42-24G-R1-20260828",
+  "preflight": {
+    "run_id": "fastwam-table11safe-vg1h1gau1-preflight5001-s42-8g-r2-20260828",
+    "job_id": "dlcjn4f0qolzmgjh",
+    "priority": 7,
+    "topology": "1 worker x 8 GPUs",
+    "initial_global_step": 5000,
+    "maximum_global_step": 5001,
+    "save_final_checkpoint": false,
+    "save_training_state": false
+  },
+  "scheduler_terminal": {
+    "status": "Succeeded",
+    "reason_code": "JobSucceeded",
+    "reason_message": "PyTorchJob dlcjn4f0qolzmgjh is successfully completed.",
+    "created_at": "2026-08-28T02:39:04Z",
+    "running_at": "2026-08-28T02:39:17Z",
+    "finished_at": "2026-08-28T02:51:51Z",
+    "pod": {
+      "pod_id": "dlcjn4f0qolzmgjh-master-0",
+      "pod_uid": "e72e6510-cf76-448d-bd73-2dc0cc2456bf",
+      "status": "Succeeded",
+      "duration_seconds": 763
+    }
+  },
+  "runtime_evidence": {
+    "retrieved_log_lines": 4796,
+    "source_import_gate_count": 1,
+    "asset_gate_count": 1,
+    "training_loop_entry_count": 1,
+    "cuda_out_of_memory_count": 0,
+    "non_finite_training_count": 0,
+    "python_traceback_count": 0,
+    "runtime_error_count": 0,
+    "asset_gate": {
+      "tasks": 11,
+      "h5_files": 11,
+      "text_files": 11,
+      "gaussian_frames": 89977
+    },
+    "distributed_cuda_validation": {
+      "status": "PASS",
+      "backend": "nccl",
+      "world_size": 8,
+      "median_algorithm_bandwidth_gbps": 8.924221,
+      "minimum_algorithm_bandwidth_gbps": 8.887144,
+      "required_algorithm_bandwidth_gbps": 5.0
+    },
+    "weights_only_warm_start": {
+      "checkpoint_bytes": 12047213728,
+      "checkpoint_validated": true,
+      "checkpoint_loaded": true,
+      "optimizer_initialized_fresh": true,
+      "scheduler_initialized_fresh": true,
+      "cumulative_step": 5000
+    }
+  },
+  "source_contract": {
+    "treatment_commit": "9ce447f2a93e6878a56cbc6a93c31a95a8ab6d6f",
+    "trainer": "src/fastwam/trainer.py",
+    "contract": "After the training-loop entry, the trainer performs forward, backward, optimizer.step, scheduler.step when not skipped, zero_grad, increments global_step, gathers loss and gradient metrics, raises on any non-finite metric, and returns once global_step reaches max_steps.",
+    "terminal_marker_expected": false,
+    "terminal_checkpoint_expected": false
+  },
+  "conclusion": {
+    "status": "PASS",
+    "claim": "The real 1x8 DLC preflight completed one finite optimizer update from cumulative step 5000 to 5001 and returned cleanly.",
+    "scope": "This validates the runtime path and one optimizer update only; it is not evidence that the formal 3x8 training job has been submitted or started."
+  }
+}
