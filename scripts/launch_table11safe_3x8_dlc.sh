@@ -43,6 +43,20 @@ fi
 
 require_env RUN_ID
 require_env FASTWAM_TABLE11_ATTEMPT_ID
+RUN_MODE="${FASTWAM_TABLE11_RUN_MODE:-formal}"
+[[ "${RUN_MODE}" == "formal" || "${RUN_MODE}" == "preflight-one-step" ]] || \
+  die "FASTWAM_TABLE11_RUN_MODE must be formal or preflight-one-step"
+if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
+  EXPECTED_MACHINES=1
+  EXPECTED_WORLD=8
+  TARGET_STEP=5001
+  OPTIMIZER_UPDATES=1
+else
+  EXPECTED_MACHINES=3
+  EXPECTED_WORLD=24
+  TARGET_STEP=50000
+  OPTIMIZER_UPDATES=45000
+fi
 
 # Freeze PAI's outer-worker topology before Accelerate creates its 24-rank
 # world, then remove the outer rank variables immediately before exec.
@@ -157,20 +171,21 @@ if [[ -n "${FASTWAM_ATTEMPT_ID:-}" && "${FASTWAM_ATTEMPT_ID}" != "${ATTEMPT_ID}"
   die "FASTWAM_ATTEMPT_ID conflicts with FASTWAM_TABLE11_ATTEMPT_ID"
 fi
 export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"
-[[ "${NUM_MACHINES}" == "3" ]] || \
-  die "WORLD_SIZE must be the DLC worker count 3, got ${NUM_MACHINES:-unset}"
+[[ "${NUM_MACHINES}" == "${EXPECTED_MACHINES}" ]] || \
+  die "WORLD_SIZE must be the DLC worker count ${EXPECTED_MACHINES}, got ${NUM_MACHINES:-unset}"
 [[ "${GPUS_PER_NODE}" == "8" ]] || \
   die "NPROC_PER_NODE must be 8, got ${GPUS_PER_NODE:-unset}"
 is_uint "${MACHINE_RANK:-x}" || die "RANK must be an integer in [0,2]"
-((10#${MACHINE_RANK} < 3)) || die "RANK must be in [0,2], got ${MACHINE_RANK}"
+((10#${MACHINE_RANK} < 10#${EXPECTED_MACHINES})) || \
+  die "RANK must be below ${EXPECTED_MACHINES}, got ${MACHINE_RANK}"
 [[ -z "${LOCAL_RANK:-}" || "${LOCAL_RANK}" == "0" ]] || \
   die "outer DLC command must run once per node with LOCAL_RANK=0"
 is_non_loopback "${MASTER_HOST}" || die "MASTER_ADDR must be a shared non-loopback address"
 is_uint "${MASTER_TCP_PORT:-x}" || die "MASTER_PORT must be an integer"
 ((10#${MASTER_TCP_PORT} >= 1 && 10#${MASTER_TCP_PORT} <= 65535)) || \
   die "MASTER_PORT must be in [1,65535]"
-[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 24 ]] || \
-  die "global world size must be exactly 24"
+[[ $((10#${NUM_MACHINES} * 10#${GPUS_PER_NODE})) -eq 10#${EXPECTED_WORLD} ]] || \
+  die "global world size must be exactly ${EXPECTED_WORLD}"
 [[ "${DRY_RUN}" == "0" || "${DRY_RUN}" == "1" ]] || \
   die "FASTWAM_TABLE11_DRY_RUN must be 0 or 1"
 
@@ -304,6 +319,8 @@ FASTWAM_TABLE11_CONFIG_DATASET="${DATASET_ROOT}" \
 FASTWAM_TABLE11_CONFIG_STATS="${STATS_PATH}" \
 FASTWAM_TABLE11_CONFIG_TEXT="${TEXT_CACHE_DIR}" \
 FASTWAM_TABLE11_CONFIG_GAUSSIAN="${GAUSSIAN_CACHE_DIR}" \
+FASTWAM_TABLE11_CONFIG_RUN_MODE="${RUN_MODE}" \
+FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD="${EXPECTED_WORLD}" \
 "${PYTHON_BIN}" - <<'PY' || die "formal Hydra configuration contract validation failed"
 import os
 from pathlib import Path
@@ -329,6 +346,8 @@ overrides = [
 with initialize_config_dir(config_dir=str(repo / "configs"), version_base="1.3"):
     cfg = compose(config_name="train", overrides=overrides)
 resolved = OmegaConf.to_container(cfg, resolve=True)
+run_mode = os.environ["FASTWAM_TABLE11_CONFIG_RUN_MODE"]
+expected_world = int(os.environ["FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD"])
 
 expected = {
     "batch_size": 1,
@@ -364,7 +383,10 @@ for split in ("train", "val"):
         raise SystemExit(f"{split} Gaussian verification is not stat_cmp")
 if len(resolved["data"]["train"]["instruction_map"]) != 11:
     raise SystemExit("instruction map does not contain exactly 11 tasks")
-print("table11 safe config gate: world=24 global_batch=24 updates=45000 checkpoints=10000..50000/5000")
+if run_mode == "preflight-one-step":
+    print(f"table11 safe config gate: preflight world={expected_world} update=5000->5001")
+else:
+    print("table11 safe config gate: world=24 global_batch=24 updates=45000 checkpoints=10000..50000/5000")
 PY
 
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
@@ -402,21 +424,22 @@ if [[ "${TEST_MODE}" != "1" ]]; then
 fi
 RESERVATION_BODY="run_id=${RUN_ID}
 attempt_id=${ATTEMPT_ID}
-workers=3
+run_mode=${RUN_MODE}
+workers=${EXPECTED_MACHINES}
 gpus_per_worker=8
-global_world_size=24
+global_world_size=${EXPECTED_WORLD}
 source_weight=${SOURCE_WEIGHT}
 initialization=weights-only
 optimizer=fresh
 provenance_mode=stat_cmp
 initial_global_step=5000
-target_global_step=50000
-optimizer_steps_this_run=45000
+target_global_step=${TARGET_STEP}
+optimizer_steps_this_run=${OPTIMIZER_UPDATES}
 per_device_batch_size=1
 gradient_accumulation_steps=1
 reference_global_batch_size=24
-global_batch_size=24
-sample_budget_equivalent=true
+global_batch_size=${EXPECTED_WORLD}
+sample_budget_equivalent=$([[ "${RUN_MODE}" == "formal" ]] && printf true || printf false)
 learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
@@ -478,11 +501,11 @@ export FASTWAM_B4_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
   --config_file "${REPO_ROOT}/scripts/accelerate_configs/accelerate_zero2_ds.yaml"
-  --num_machines 3
+  --num_machines "${EXPECTED_MACHINES}"
   --machine_rank "${MACHINE_RANK}"
   --main_process_ip "${MASTER_HOST}"
   --main_process_port "${MASTER_TCP_PORT}"
-  --num_processes 24
+  --num_processes "${EXPECTED_WORLD}"
   --deepspeed_multinode_launcher standard
   "${REPO_ROOT}/scripts/train.py"
   "task=${TASK_PROFILE}"
@@ -500,6 +523,14 @@ COMMAND=(
   "output_dir=${OUTPUT_DIR}"
   "wandb.name=${RUN_ID}"
 )
+
+if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
+  COMMAND+=(
+    "max_steps=5001"
+    "save_training_state=false"
+    "save_final_checkpoint=false"
+  )
+fi
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   printf 'table11 resolved command:'
