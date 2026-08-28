@@ -438,7 +438,7 @@ def validate_assets() -> dict:
     require(stat.S_ISREG(bundle_stat.st_mode), "source bundle is not regular")
     heads = str(git_stdout("bundle", "list-heads", BUNDLE, text=True)).splitlines()
     require(
-        heads == [f"{COMMIT} refs/heads/exp/table11safe-gau1-cont50k-24g-20260828"],
+        heads == [f"{COMMIT} HEAD"],
         f"source bundle heads drift: {heads}",
     )
     h5_files = list(pathlib.Path(DATASET_ROOT).rglob("*.h5"))
