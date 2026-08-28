@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "READY_TO_SUBMIT",
+  "ready_to_submit": true,
+  "create_job_called": false,
+  "checked_at": "2026-08-28T10:55:31+08:00",
+  "run_id": "fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828",
+  "attempt_id": "attempt-r1-20260828",
+  "code_commit": "9ce447f2a93e6878a56cbc6a93c31a95a8ab6d6f",
+  "source_bundle": "/oss-chengjuntao/artifacts/fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828-launch-control/fastwam-table11safe-preflight-formal-r2-20260828.bundle",
+  "request_path": "/oss-chengjuntao/artifacts/fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828-launch-control/rendered-request-r3.json",
+  "output_dir": "/oss-chengjuntao/artifacts/fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828",
+  "real_data_preflight": {
+    "status": "PASS",
+    "path": "/oss-chengjuntao/artifacts/fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828-launch-control/preflight-terminal-reconciliation-r2.json",
+    "job_id": "dlcjn4f0qolzmgjh",
+    "scheduler_status": "Succeeded",
+    "optimizer_updates": 1
+  },
+  "formal_contract": {
+    "priority": 7,
+    "workers": 3,
+    "gpus_per_worker": 8,
+    "global_batch_size": 24,
+    "initial_global_step": 5000,
+    "target_global_step": 50000,
+    "save_every_steps": 5000,
+    "source_optimizer_state_reused": false
+  }
+}
