@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, the formal RoboFactory table11 2x8 DLC job."""
+"""Render, but never submit, the joint-safe RoboFactory table11 3x8 DLC job."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ IMAGE = (
 )
 RESOURCE_ID = "quotaksvqq2oh2pg"
 WORKSPACE_ID = "270969"
-LAUNCHER_PATH = "scripts/launch_table11_2x8_dlc.sh"
+LAUNCHER_PATH = "scripts/launch_table11safe_3x8_dlc.sh"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
@@ -32,11 +32,11 @@ LEGACY_DEPENDENCY_CACHE_HELPER_ID = "89dc9d7302f2edc1320b5f08f0516d5d2e9c6a17670
 
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
-    "robofactory-table-11task-200each-h299-2g-r1-20260825/tasks"
+    "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
 )
 ASSET_ROOT = (
     "/oss-chengjuntao/fastwam-assets/robofactory/"
-    "table11-200each-h299-r1-s42"
+    "table11-200each-h256-stateful-safe-r3-s42"
 )
 STATS_PATH = f"{ASSET_ROOT}/stats/train-stats.json"
 TEXT_CACHE_DIR = f"{ASSET_ROOT}/text-embeds"
@@ -204,9 +204,9 @@ def main() -> int:
             }
         ],
         "Description": (
-            "RoboFactory table11 VG1H1GAU1 weights-only continuation: cumulative "
-            "5000 to 50000, 45000 fresh-optimizer updates, 2 workers x 8 GPUs; "
-            "world-16 global batch differs from the world-24 reference"
+            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only rerun: "
+            "cumulative 5000 to 50000, 45000 fresh-optimizer updates, "
+            "3 workers x 8 GPUs, world-24 global batch"
         ),
         "DisplayName": args.run_id,
         "Envs": envs,
@@ -216,7 +216,7 @@ def main() -> int:
                 "ElasticSpotSpecs": [],
                 "Image": IMAGE,
                 "LocalMountSpecs": [],
-                "PodCount": 2,
+                "PodCount": 3,
                 "ResourceConfig": {
                     "CPU": "126",
                     "GPU": "8",
@@ -239,11 +239,11 @@ def main() -> int:
             "EnableRDMA": True,
             "EnableSanityCheck": False,
             "Tags": {
-                "experiment": "TABLE11-VG1H1GAU1-CONT50K",
+                "experiment": "TABLE11SAFE-VG1H1GAU1-CONT50K",
                 "initialization": "GAU1-step5000-weights-only",
                 "optimizer": "fresh",
                 "provenance": "stat-cmp-no-new-hash",
-                "topology": "2x8-world16",
+                "topology": "3x8-world24",
                 "schedule": "cumulative-5000-to-50000-save-5000",
             },
         },
@@ -282,11 +282,11 @@ def main() -> int:
         },
         "batch_contract": {
             "reference_global_batch": 24,
-            "replica_global_batch": 16,
+            "replica_global_batch": 24,
             "micro_batch_per_gpu": 1,
             "gradient_accumulation_steps": 1,
             "optimizer_updates": 45000,
-            "sample_budget_equivalent": False,
+            "sample_budget_equivalent": True,
         },
         "request": request,
     }
