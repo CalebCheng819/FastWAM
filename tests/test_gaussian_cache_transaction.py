@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -14,6 +15,7 @@ from fastwam.datasets.gaussian_cache.transaction import (
     UnsafeCacheRestartError,
     prepare_cache_build,
     run_paired_micro_part,
+    run_single_micro_part,
 )
 
 
@@ -170,3 +172,33 @@ def test_restart_rejects_foreign_marker_and_invalid_complete_without_deleting(tm
     with pytest.raises(UnsafeCacheRestartError, match="invalid COMPLETE"):
         prepare_cache_build(root, role="canonical", **args)
     assert survivor.read_bytes() == b"keep"
+
+
+def test_new_seal_verification_retries_transient_manifest_visibility(tmp_path, monkeypatch):
+    source = _source(tmp_path)
+    compact = tmp_path / "compact" / "parts" / "part-00000"
+    args = _transaction_args()
+
+    from fastwam.datasets.gaussian_cache import transaction
+
+    real_load_manifest = transaction.load_manifest
+    calls = 0
+
+    def transient_empty_manifest(*load_args, **load_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise json.JSONDecodeError("transient empty OSSFS read", "", 0)
+        return real_load_manifest(*load_args, **load_kwargs)
+
+    monkeypatch.setattr(transaction, "load_manifest", transient_empty_manifest)
+    monkeypatch.setattr(transaction, "_NEW_SEAL_VERIFY_DELAY_SECONDS", 0)
+    result = run_single_micro_part(
+        compact,
+        role="compact",
+        build=lambda: _seal(compact, source, tmp_path / "staging", "compact"),
+        **args,
+    )
+    assert result["status"] == "built"
+    assert calls == 2
+    assert (compact / "COMPLETE").is_file()

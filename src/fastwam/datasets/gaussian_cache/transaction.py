@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,8 @@ from .manifest import (
 
 TRANSACTION_VERSION = 1
 _PART_NAME_RE = re.compile(r"^part-\d{5,}$")
+_NEW_SEAL_VERIFY_ATTEMPTS = 20
+_NEW_SEAL_VERIFY_DELAY_SECONDS = 0.5
 
 
 class UnsafeCacheRestartError(RuntimeError):
@@ -214,11 +217,26 @@ def _finish_cache_build(
     *,
     verify_shard_checksums: bool,
 ) -> dict[str, Any]:
-    manifest = verify_complete_cache(
-        root,
-        verify_shard_checksums=verify_shard_checksums,
-    )
+    # Object-storage FUSE mounts can expose COMPLETE before the manifest write
+    # becomes readable to the same process.  Retry only this immediate
+    # post-build verification; restart-time verification remains fail-closed.
+    last_error: UnsafeCacheRestartError | None = None
+    manifest: dict[str, Any] | None = None
+    for attempt in range(_NEW_SEAL_VERIFY_ATTEMPTS):
+        try:
+            manifest = verify_complete_cache(
+                root,
+                verify_shard_checksums=verify_shard_checksums,
+            )
+        except UnsafeCacheRestartError as exc:
+            last_error = exc
+        if manifest is not None:
+            break
+        if attempt + 1 < _NEW_SEAL_VERIFY_ATTEMPTS:
+            time.sleep(_NEW_SEAL_VERIFY_DELAY_SECONDS)
     if manifest is None:
+        if last_error is not None:
+            raise last_error
         raise RuntimeError(f"Build callback returned without sealing cache: {root}")
     marker = _marker_path(root)
     if marker.exists():
