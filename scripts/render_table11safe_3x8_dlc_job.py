@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render, but never submit, the joint-safe RoboFactory table11 3x8 DLC job."""
+"""Render, but never submit, the joint-safe Table11 IDM 3x8 DLC job."""
 
 from __future__ import annotations
 
@@ -212,7 +212,7 @@ def main() -> int:
             }
         ],
         "Description": (
-            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only "
+            "Joint-safe RoboFactory table11 IDM H1GAU1 weights-only "
             + (
                 "runtime preflight: cumulative 5000 to 5001, one fresh-optimizer "
                 "update, 1 worker x 8 GPUs"
@@ -252,8 +252,8 @@ def main() -> int:
             "EnableRDMA": True,
             "EnableSanityCheck": False,
             "Tags": {
-                "experiment": "TABLE11SAFE-VG1H1GAU1-CONT50K",
-                "initialization": "GAU1-step5000-weights-only",
+                "experiment": "TABLE11SAFE-IDM-H1GAU1-CONT50K",
+                "initialization": "IDM-H1GAU1-step5000-weights-only",
                 "optimizer": "fresh",
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "1x8-world8" if args.preflight_one_step else "3x8-world24",

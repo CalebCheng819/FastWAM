@@ -162,7 +162,7 @@ SOURCE_WEIGHT="${FASTWAM_TABLE11_SOURCE_WEIGHT:-}"
 EXPECTED_WEIGHT_BYTES="${FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES:-}"
 EXPECTED_H5_FILES="${FASTWAM_TABLE11_EXPECTED_H5_FILES:-}"
 
-TASK_PROFILE="robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4"
+TASK_PROFILE="robofactory_table11_idm_hub1_gau1_cont50k_224_1e-4"
 SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
 
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
@@ -332,7 +332,7 @@ from fastwam.utils.config_resolvers import register_default_resolvers
 register_default_resolvers()
 repo = Path(os.environ["FASTWAM_TABLE11_REPO_FOR_CONFIG"])
 overrides = [
-    "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
+    "task=robofactory_table11_idm_hub1_gau1_cont50k_224_1e-4",
     "+scale=robofactory_multi_robot_24gpu_cont50k",
     f"data.train.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
     f"data.val.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
@@ -371,6 +371,10 @@ if resolved["weights_only_warm_start"]["enabled"] is not True:
     raise SystemExit("weights-only warm start is disabled")
 if resolved["model"]["training_mode"] != "joint":
     raise SystemExit("model training mode is not joint")
+if resolved["model"]["model_variant"] != "idm":
+    raise SystemExit("model variant is not idm")
+if resolved["model"]["video_cond_noise_prob"] != 0.5:
+    raise SystemExit("IDM video-conditioning noise probability drifted")
 if not resolved["model"]["action_dit_config"]["hub_enabled"]:
     raise SystemExit("HUB is disabled")
 if not resolved["model"]["action_dit_config"]["enable_gaussian"]:
