@@ -22,23 +22,23 @@ from alibabacloud_pai_dlc20201203.client import Client
 from alibabacloud_tea_openapi.models import Config
 
 
-RUN_ID = "fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828"
-ATTEMPT_ID = "attempt-r1-20260828"
+RUN_ID = "fastwam-table11safe-idm-h1gau1-cont50k-s42-24g-r1-20260829"
+ATTEMPT_ID = "attempt-r1-20260829"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-COMMIT = "9ce447f2a93e6878a56cbc6a93c31a95a8ab6d6f"
+COMMIT = "8354485f6dd5879705ef9a43164068182b1b6452"
 IMAGE = (
     "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/"
     "pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
 )
 LAUNCH_ROOT = pathlib.Path(f"/oss-chengjuntao/artifacts/{RUN_ID}-launch-control")
-DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r3.json"
-PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r3.json"
+DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r1.json"
+PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r1.json"
 AUDIT_RECORD = LAUNCH_ROOT / "submission-formal-3x8-r1-audit.json"
 RECEIPT = LAUNCH_ROOT / "submission-formal-3x8-r1-receipt.json"
-REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r2.json"
+REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-dsw-r1.json"
 OUTPUT_DIR = f"/oss-chengjuntao/artifacts/{RUN_ID}"
-BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-preflight-formal-r2-20260828.bundle")
+BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-idm-h1gau1-cont50k-s42-24g-r1-20260829.bundle")
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
     "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
@@ -135,8 +135,8 @@ EXPECTED_SETTINGS = {
     "EnableRDMA": True,
     "EnableSanityCheck": False,
     "Tags": {
-        "experiment": "TABLE11SAFE-VG1H1GAU1-CONT50K",
-        "initialization": "GAU1-step5000-weights-only",
+        "experiment": "TABLE11SAFE-IDM-H1GAU1-CONT50K",
+        "initialization": "IDM-H1GAU1-step5000-weights-only",
         "optimizer": "fresh",
         "provenance": "stat-cmp-no-new-hash",
         "schedule": "cumulative-5000-to-50000-save-5000",
@@ -495,14 +495,28 @@ def validate_prelaunch() -> dict:
     require(real.get("status") == "PASS", "real-data preflight did not pass")
     require(real.get("path") == str(REAL_DATA_PREFLIGHT), "real-data preflight path drift")
     terminal = read_json(REAL_DATA_PREFLIGHT)
-    require(
-        terminal.get("conclusion", {}).get("status") == "PASS",
-        "preflight terminal reconciliation drift",
-    )
-    require(
-        terminal.get("scheduler_terminal", {}).get("status") == "Succeeded",
-        "preflight scheduler terminal status drift",
-    )
+    require(terminal.get("schema_version") == 1, "DSW preflight schema drift")
+    require(terminal.get("status") == "PASS", "DSW preflight did not pass")
+    require(terminal.get("run_id") == RUN_ID, "DSW preflight run_id drift")
+    require(terminal.get("attempt_id") == ATTEMPT_ID, "DSW preflight attempt drift")
+    require(terminal.get("code_commit") == COMMIT, "DSW preflight commit drift")
+    require(terminal.get("source_bundle") == BUNDLE, "DSW preflight bundle drift")
+    require(terminal.get("dataset_root") == DATASET_ROOT, "DSW preflight dataset drift")
+    require(terminal.get("source_weight") == SOURCE_WEIGHT, "DSW preflight weight drift")
+    require(terminal.get("output_dir") == OUTPUT_DIR, "DSW preflight output drift")
+    require(terminal.get("scheduler_submission_performed") is False, "DSW preflight submitted")
+    require(terminal.get("create_job_called") is False, "DSW preflight called CreateJob")
+    checks = terminal.get("checks") or {}
+    for name in (
+        "hydra_compose",
+        "dataset_contract",
+        "runtime_assets",
+        "source_bundle",
+        "request_sdk_roundtrip",
+        "output_absent",
+        "priority_7_world_24",
+    ):
+        require(checks.get(name) == "PASS", f"DSW preflight check failed: {name}")
     return prelaunch
 
 
@@ -579,7 +593,7 @@ def validate_document(document: dict) -> dict:
     require(
         body["Description"]
         == (
-            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only rerun: "
+            "Joint-safe RoboFactory table11 IDM H1GAU1 weights-only rerun: "
             "cumulative 5000 to 50000, 45000 fresh-optimizer updates, "
             "3 workers x 8 GPUs, world-24 global batch"
         ),
