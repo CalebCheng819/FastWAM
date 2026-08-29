@@ -14,6 +14,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO / "scripts" / "launch_table11safe_3x8_dlc.sh"
 RENDERER = REPO / "scripts" / "render_table11safe_3x8_dlc_job.py"
+SUBMITTER = REPO / "scripts" / "submit_table11safe_formal_once.py"
 
 
 class Table11LauncherTests(unittest.TestCase):
@@ -55,7 +56,7 @@ class Table11LauncherTests(unittest.TestCase):
         )
         (gaussian / "selection.jsonl").write_text("{}\n", encoding="utf-8")
 
-        weight = root / "step_005000.pt"
+        weight = root / "libero_uncond_2cam224.pt"
         weight.write_bytes(b"fixture-weight")
         env = os.environ.copy()
         env.update(
@@ -63,7 +64,9 @@ class Table11LauncherTests(unittest.TestCase):
                 "RUN_ID": "fastwam-table11-launcher-test",
                 "FASTWAM_TABLE11_ATTEMPT_ID": "attempt-1",
                 "FASTWAM_TABLE11_REPO_ROOT": str(REPO),
-                "FASTWAM_TABLE11_PYTHON": sys.executable,
+                "FASTWAM_TABLE11_PYTHON": os.environ.get(
+                    "FASTWAM_TEST_HYDRA_PYTHON", sys.executable
+                ),
                 "FASTWAM_TABLE11_OFFLINE_ENV_READY": "1",
                 "FASTWAM_TABLE11_TEST_MODE": "1",
                 "FASTWAM_TABLE11_DRY_RUN": "1",
@@ -125,17 +128,19 @@ class Table11LauncherTests(unittest.TestCase):
             check=False,
         )
 
-    def test_valid_contract_resolves_world24_continuation(self) -> None:
+    def test_valid_contract_resolves_world24_scratch_training(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_launcher(self.fixture(Path(directory)))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("--num_machines 3", result.stdout)
             self.assertIn("--num_processes 24", result.stdout)
             self.assertIn(
-                "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
+                "task=robofactory_table11_vg1_hub1_gau1_scratch50k_224_1e-4",
                 result.stdout,
             )
-            self.assertIn("+scale=robofactory_multi_robot_24gpu_cont50k", result.stdout)
+            self.assertIn("+scale=robofactory_multi_robot_24gpu_scratch50k", result.stdout)
+            self.assertIn("run_initial_global_step=0", result.stdout)
+            self.assertIn("weights_only_warm_start.enabled=false", result.stdout)
             self.assertIn("table11 safe config gate: world=24 global_batch=24", result.stdout)
 
     def test_topology_is_fail_closed(self) -> None:
@@ -159,7 +164,8 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("--num_machines 1", result.stdout)
             self.assertIn("--num_processes 8", result.stdout)
-            self.assertIn("max_steps=5001", result.stdout)
+            self.assertIn("max_steps=1", result.stdout)
+            self.assertIn("run_initial_global_step=0", result.stdout)
             self.assertIn("save_training_state=false", result.stdout)
             self.assertIn("save_final_checkpoint=false", result.stdout)
 
@@ -226,6 +232,20 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertEqual(manifest["batch_contract"]["reference_global_batch"], 24)
             self.assertEqual(manifest["batch_contract"]["replica_global_batch"], 24)
             self.assertTrue(manifest["batch_contract"]["sample_budget_equivalent"])
+            self.assertEqual(manifest["batch_contract"]["optimizer_updates"], 50000)
+            self.assertEqual(
+                request["Envs"]["FASTWAM_TABLE11_SOURCE_WEIGHT"],
+                "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/"
+                "yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/"
+                "libero_uncond_2cam224.pt",
+            )
+            self.assertEqual(request["Envs"]["FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES"], "12041735140")
+            self.assertEqual(
+                request["Settings"]["Tags"]["initialization"],
+                "official-generic-pretrained-model-weights",
+            )
+            self.assertEqual(request["Settings"]["Tags"]["optimizer"], "fresh")
+            self.assertIn("optimizer steps 0 to 50000", request["Description"])
             self.assertEqual(
                 base64.b64decode(manifest["launcher_payload_base64"]), launcher_bytes
             )
@@ -258,6 +278,29 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertEqual(request["Priority"], 7)
             self.assertEqual(request["JobSpecs"][0]["PodCount"], 1)
             self.assertEqual(request["Envs"]["FASTWAM_TABLE11_RUN_MODE"], "preflight-one-step")
+            self.assertIn("optimizer step 0 to 1", request["Description"])
+
+    def test_operational_contract_forbids_old_n234_checkpoint(self) -> None:
+        paths = [
+            LAUNCHER,
+            RENDERER,
+            SUBMITTER,
+            REPO
+            / "configs"
+            / "task"
+            / "robofactory_multi_robot_vg1_hub1_gau1_scratch50k_224_1e-4.yaml",
+            REPO
+            / "configs"
+            / "task"
+            / "robofactory_table11_vg1_hub1_gau1_scratch50k_224_1e-4.yaml",
+            REPO / "configs" / "scale" / "robofactory_multi_robot_24gpu_scratch50k.yaml",
+        ]
+        source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+        self.assertNotIn("step_005000.pt", source)
+        self.assertNotIn("FASTWAM_B4_BASE_CHECKPOINT", source)
+        self.assertIn("libero_uncond_2cam224.pt", source)
+        self.assertIn("num_workers: 8", source)
+        self.assertIn("weights_only_warm_start:\n  enabled: false", source)
 
     def test_renderer_contains_no_cloud_sdk_call(self) -> None:
         source = RENDERER.read_text(encoding="utf-8")

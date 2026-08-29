@@ -22,23 +22,23 @@ from alibabacloud_pai_dlc20201203.client import Client
 from alibabacloud_tea_openapi.models import Config
 
 
-RUN_ID = "fastwam-table11safe-vg1h1gau1-cont50k-s42-24g-r1-20260828"
-ATTEMPT_ID = "attempt-r1-20260828"
+RUN_ID = "fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829"
+ATTEMPT_ID = "attempt-r1-20260829"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-COMMIT = "9ce447f2a93e6878a56cbc6a93c31a95a8ab6d6f"
+COMMIT = "0000000000000000000000000000000000000000"
 IMAGE = (
     "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/"
     "pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
 )
 LAUNCH_ROOT = pathlib.Path(f"/oss-chengjuntao/artifacts/{RUN_ID}-launch-control")
-DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r3.json"
-PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r3.json"
+DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r1.json"
+PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r1.json"
 AUDIT_RECORD = LAUNCH_ROOT / "submission-formal-3x8-r1-audit.json"
 RECEIPT = LAUNCH_ROOT / "submission-formal-3x8-r1-receipt.json"
-REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r2.json"
+REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r1.json"
 OUTPUT_DIR = f"/oss-chengjuntao/artifacts/{RUN_ID}"
-BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-preflight-formal-r2-20260828.bundle")
+BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r1-20260829.bundle")
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
     "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
@@ -61,9 +61,9 @@ VAE_PATH = (
     "Wan2.2_VAE.safetensors"
 )
 SOURCE_WEIGHT = (
-    "/oss-chengjuntao/artifacts/"
-    "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-"
-    "a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
+    "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/"
+    "yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/"
+    "libero_uncond_2cam224.pt"
 )
 OFFLINE_ROOT = (
     "/oss-chengjuntao/artifacts/"
@@ -117,7 +117,7 @@ EXPECTED_ENVS = {
     "FASTWAM_TABLE11_PROVENANCE_MODE": "stat_cmp",
     "FASTWAM_TABLE11_SOURCE_BUNDLE": BUNDLE,
     "FASTWAM_TABLE11_SOURCE_WEIGHT": SOURCE_WEIGHT,
-    "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": "12047213728",
+    "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": "12041735140",
     "FASTWAM_TABLE11_STATS_PATH": STATS_PATH,
     "FASTWAM_TABLE11_TEXT_CACHE_DIR": TEXT_CACHE_DIR,
     "FASTWAM_TABLE11_VAE_PATH": VAE_PATH,
@@ -135,11 +135,11 @@ EXPECTED_SETTINGS = {
     "EnableRDMA": True,
     "EnableSanityCheck": False,
     "Tags": {
-        "experiment": "TABLE11SAFE-VG1H1GAU1-CONT50K",
-        "initialization": "GAU1-step5000-weights-only",
+        "experiment": "TABLE11SAFE-VG1H1GAU1-SCRATCH50K",
+        "initialization": "official-generic-pretrained-model-weights",
         "optimizer": "fresh",
         "provenance": "stat-cmp-no-new-hash",
-        "schedule": "cumulative-5000-to-50000-save-5000",
+        "schedule": "optimizer-0-to-50000-save-5000",
         "topology": "3x8-world24",
     },
 }
@@ -427,7 +427,7 @@ def validate_embedded_launcher(document: dict, body: dict) -> None:
         b"--deepspeed_multinode_launcher standard",
         b"fastwam_run_global_allreduce_preflight",
         b'export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"',
-        b"checkpoints=10000..50000/5000",
+        b"checkpoints=5000..50000/5000",
     ):
         require(fragment in launcher, f"launcher omitted contract fragment: {fragment!r}")
 
@@ -457,7 +457,7 @@ def validate_assets() -> dict:
         "Gaussian derivation drift",
     )
     weight = os.stat(SOURCE_WEIGHT, follow_symlinks=False)
-    require(stat.S_ISREG(weight.st_mode) and weight.st_size == 12047213728, "weight drift")
+    require(stat.S_ISREG(weight.st_mode) and weight.st_size == 12041735140, "weight drift")
     for path in (
         pathlib.Path(VAE_PATH),
         pathlib.Path(f"{OFFLINE_ROOT}/SHA256SUMS"),
@@ -547,7 +547,7 @@ def validate_document(document: dict) -> dict:
             "replica_global_batch": 24,
             "micro_batch_per_gpu": 1,
             "gradient_accumulation_steps": 1,
-            "optimizer_updates": 45000,
+            "optimizer_updates": 50000,
             "sample_budget_equivalent": True,
         },
         "batch contract drift",
@@ -579,8 +579,8 @@ def validate_document(document: dict) -> dict:
     require(
         body["Description"]
         == (
-            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only rerun: "
-            "cumulative 5000 to 50000, 45000 fresh-optimizer updates, "
+            "Joint-safe RoboFactory table11 VG1H1GAU1 scratch-from-generic-base training: "
+            "optimizer steps 0 to 50000, 50000 fresh-optimizer updates, "
             "3 workers x 8 GPUs, world-24 global batch"
         ),
         "Description drift",

@@ -49,13 +49,13 @@ RUN_MODE="${FASTWAM_TABLE11_RUN_MODE:-formal}"
 if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
   EXPECTED_MACHINES=1
   EXPECTED_WORLD=8
-  TARGET_STEP=5001
+  TARGET_STEP=1
   OPTIMIZER_UPDATES=1
 else
   EXPECTED_MACHINES=3
   EXPECTED_WORLD=24
   TARGET_STEP=50000
-  OPTIMIZER_UPDATES=45000
+  OPTIMIZER_UPDATES=50000
 fi
 
 # Freeze PAI's outer-worker topology before Accelerate creates its 24-rank
@@ -162,8 +162,8 @@ SOURCE_WEIGHT="${FASTWAM_TABLE11_SOURCE_WEIGHT:-}"
 EXPECTED_WEIGHT_BYTES="${FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES:-}"
 EXPECTED_H5_FILES="${FASTWAM_TABLE11_EXPECTED_H5_FILES:-}"
 
-TASK_PROFILE="robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4"
-SCALE_PROFILE="robofactory_multi_robot_24gpu_cont50k"
+TASK_PROFILE="robofactory_table11_vg1_hub1_gau1_scratch50k_224_1e-4"
+SCALE_PROFILE="robofactory_multi_robot_24gpu_scratch50k"
 
 is_safe_id "${RUN_ID}" || die "RUN_ID is not a safe identifier: ${RUN_ID}"
 is_safe_id "${ATTEMPT_ID}" || die "attempt ID is not a safe identifier: ${ATTEMPT_ID}"
@@ -208,8 +208,8 @@ if [[ "${TEST_MODE}" != "1" ]]; then
   require_exact_env FASTWAM_TABLE11_GAUSSIAN_CACHE_DIR "/oss-chengjuntao/fastwam-assets/robofactory/table11-200each-h256-stateful-safe-r3-s42/gaussian/compact-s42-13x28x40-fp16-meanalpha-direct-v1"
   require_exact_env FASTWAM_TABLE11_MODEL_CACHE_ROOT "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache"
   require_exact_env FASTWAM_TABLE11_VAE_PATH "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/model-cache/DiffSynth-Studio/Wan-Series-Converted-Safetensors/Wan2.2_VAE.safetensors"
-  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT "/oss-chengjuntao/artifacts/fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
-  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES "12047213728"
+  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/libero_uncond_2cam224.pt"
+  require_exact_env FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES "12041735140"
   require_exact_env FASTWAM_TABLE11_EXPECTED_H5_FILES "11"
 fi
 
@@ -310,7 +310,7 @@ print(
 PY
 
 export FASTWAM_GAUSSIAN_CACHE_DIR="${GAUSSIAN_CACHE_DIR}"
-export FASTWAM_B4_BASE_CHECKPOINT="${SOURCE_WEIGHT}"
+export FASTWAM_PRETRAINED_ROOT="${SOURCE_WEIGHT}"
 export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_CACHE_ROOT}"
 export FASTWAM_LOCAL_VAE_PATH="${VAE_PATH}"
 
@@ -319,6 +319,7 @@ FASTWAM_TABLE11_CONFIG_DATASET="${DATASET_ROOT}" \
 FASTWAM_TABLE11_CONFIG_STATS="${STATS_PATH}" \
 FASTWAM_TABLE11_CONFIG_TEXT="${TEXT_CACHE_DIR}" \
 FASTWAM_TABLE11_CONFIG_GAUSSIAN="${GAUSSIAN_CACHE_DIR}" \
+FASTWAM_TABLE11_CONFIG_SOURCE_WEIGHT="${SOURCE_WEIGHT}" \
 FASTWAM_TABLE11_CONFIG_RUN_MODE="${RUN_MODE}" \
 FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD="${EXPECTED_WORLD}" \
 "${PYTHON_BIN}" - <<'PY' || die "formal Hydra configuration contract validation failed"
@@ -332,8 +333,8 @@ from fastwam.utils.config_resolvers import register_default_resolvers
 register_default_resolvers()
 repo = Path(os.environ["FASTWAM_TABLE11_REPO_FOR_CONFIG"])
 overrides = [
-    "task=robofactory_table11_vg1_hub1_gau1_cont50k_224_1e-4",
-    "+scale=robofactory_multi_robot_24gpu_cont50k",
+    "task=robofactory_table11_vg1_hub1_gau1_scratch50k_224_1e-4",
+    "+scale=robofactory_multi_robot_24gpu_scratch50k",
     f"data.train.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
     f"data.val.root_dir={os.environ['FASTWAM_TABLE11_CONFIG_DATASET']}",
     f"data.train.pretrained_norm_stats={os.environ['FASTWAM_TABLE11_CONFIG_STATS']}",
@@ -351,12 +352,13 @@ expected_world = int(os.environ["FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD"])
 
 expected = {
     "batch_size": 1,
+    "num_workers": 8,
     "gradient_accumulation_steps": 1,
     "learning_rate": 1.0e-4,
     "weight_decay": 1.0e-2,
     "lr_scheduler_type": "cosine",
     "max_steps": 50000,
-    "run_initial_global_step": 5000,
+    "run_initial_global_step": 0,
     "save_every": 5000,
     "eval_every": 5000,
     "checkpoint_state_kind": "full",
@@ -367,8 +369,10 @@ expected = {
 for key, wanted in expected.items():
     if resolved[key] != wanted:
         raise SystemExit(f"config drift at {key}: expected {wanted!r}, got {resolved[key]!r}")
-if resolved["weights_only_warm_start"]["enabled"] is not True:
-    raise SystemExit("weights-only warm start is disabled")
+if resolved["weights_only_warm_start"]["enabled"] is not False:
+    raise SystemExit("weights-only warm start must remain disabled")
+if resolved["resume"] != os.environ["FASTWAM_TABLE11_CONFIG_SOURCE_WEIGHT"]:
+    raise SystemExit("generic pretrained initialization path drifted")
 if resolved["model"]["training_mode"] != "joint":
     raise SystemExit("model training mode is not joint")
 if not resolved["model"]["action_dit_config"]["hub_enabled"]:
@@ -384,9 +388,10 @@ for split in ("train", "val"):
 if len(resolved["data"]["train"]["instruction_map"]) != 11:
     raise SystemExit("instruction map does not contain exactly 11 tasks")
 if run_mode == "preflight-one-step":
-    print(f"table11 safe config gate: preflight world={expected_world} update=5000->5001")
+    print(f"table11 safe config gate: preflight world={expected_world} update=0->1")
 else:
-    print("table11 safe config gate: world=24 global_batch=24 updates=45000 checkpoints=10000..50000/5000")
+    print("table11 safe config gate: world=24 global_batch=24 updates=50000 checkpoints=5000..50000/5000")
+print("table11 initialization gate: run_initial_global_step=0 weights_only_warm_start.enabled=false")
 PY
 
 if [[ "${TEST_MODE}" != "1" && "${DRY_RUN}" == "0" ]]; then
@@ -412,7 +417,7 @@ fi
 
 LOCAL_CACHE_ROOT="${FASTWAM_TABLE11_LOCAL_WEIGHT_ROOT:-/tmp/fastwam-table11-checkpoints}"
 LOCAL_ATTEMPT_DIR="${LOCAL_CACHE_ROOT}/${RUN_ID}/${ATTEMPT_ID}"
-LOCAL_WEIGHT="${LOCAL_ATTEMPT_DIR}/step_005000.pt"
+LOCAL_WEIGHT="${LOCAL_ATTEMPT_DIR}/libero_uncond_2cam224.pt"
 LOCAL_READY="${LOCAL_ATTEMPT_DIR}/.ready"
 RESERVATION="${OUTPUT_DIR}/.table11-run-reservation"
 OUTPUT_RESERVATION_TIMEOUT="${FASTWAM_TABLE11_OUTPUT_RESERVATION_TIMEOUT:-300}"
@@ -429,10 +434,10 @@ workers=${EXPECTED_MACHINES}
 gpus_per_worker=8
 global_world_size=${EXPECTED_WORLD}
 source_weight=${SOURCE_WEIGHT}
-initialization=weights-only
+initialization=official-generic-pretrained-model-weights
 optimizer=fresh
 provenance_mode=stat_cmp
-initial_global_step=5000
+initial_global_step=0
 target_global_step=${TARGET_STEP}
 optimizer_steps_this_run=${OPTIMIZER_UPDATES}
 per_device_batch_size=1
@@ -444,7 +449,7 @@ learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
 save_every=5000
-checkpoint_steps=10000,15000,20000,25000,30000,35000,40000,45000,50000
+checkpoint_steps=5000,10000,15000,20000,25000,30000,35000,40000,45000,50000
 dataset_root=${DATASET_ROOT}
 gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}
 "
@@ -473,7 +478,7 @@ if [[ "${DRY_RUN}" == "0" ]]; then
   PARTIAL_ATTEMPT="${LOCAL_ATTEMPT_DIR}.partial.${BASHPID}"
   mkdir -p -- "$(dirname -- "${LOCAL_ATTEMPT_DIR}")"
   mkdir -- "${PARTIAL_ATTEMPT}"
-  PARTIAL_WEIGHT="${PARTIAL_ATTEMPT}/step_005000.pt"
+  PARTIAL_WEIGHT="${PARTIAL_ATTEMPT}/libero_uncond_2cam224.pt"
   SOURCE_STAT_BEFORE="$(stat -Lc '%d:%i:%s:%Y' -- "${SOURCE_WEIGHT}")"
   SOURCE_MTIME="$(stat -Lc '%Y' -- "${SOURCE_WEIGHT}")"
   cp -- "${SOURCE_WEIGHT}" "${PARTIAL_WEIGHT}" || die "failed to copy source weight"
@@ -496,7 +501,7 @@ else
   printf 'table11 dry-run: no output reservation, GPU query, weight copy, or training was performed.\n'
 fi
 
-export FASTWAM_B4_BASE_CHECKPOINT="${LOCAL_WEIGHT}"
+export FASTWAM_PRETRAINED_ROOT="${LOCAL_WEIGHT}"
 
 COMMAND=(
   "${PYTHON_BIN}" -m accelerate.commands.launch
@@ -526,7 +531,7 @@ COMMAND=(
 
 if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
   COMMAND+=(
-    "max_steps=5001"
+    "max_steps=1"
     "save_training_state=false"
     "save_final_checkpoint=false"
   )

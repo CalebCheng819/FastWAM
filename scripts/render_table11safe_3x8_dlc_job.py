@@ -53,9 +53,9 @@ VAE_PATH = (
     "Wan2.2_VAE.safetensors"
 )
 SOURCE_WEIGHT = (
-    "/oss-chengjuntao/artifacts/"
-    "fastwam-n234-vg1hub1gau1-s42-5000-r2a2-beg0t5rle97qepyw8u-"
-    "a57915104bff-20260802t1820z/checkpoints/weights/step_005000.pt"
+    "/oss-chengjuntao/cpfs-user-chengjuntao/checkpoints/FastWAM/"
+    "yuanty-fastwam-139eebb6d90cdd9bdbbe465f72c6edc9ad5a518a/"
+    "libero_uncond_2cam224.pt"
 )
 
 
@@ -76,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preflight-one-step",
         action="store_true",
-        help="render a separate 1x8 cumulative-step-5001 runtime preflight",
+        help="render a separate 1x8 optimizer-step-0-to-1 scratch runtime preflight",
     )
     parser.add_argument("--allow-local-bundle-for-tests", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -189,7 +189,7 @@ def main() -> int:
         "FASTWAM_TABLE11_MODEL_CACHE_ROOT": MODEL_CACHE_ROOT,
         "FASTWAM_TABLE11_VAE_PATH": VAE_PATH,
         "FASTWAM_TABLE11_SOURCE_WEIGHT": SOURCE_WEIGHT,
-        "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": "12047213728",
+        "FASTWAM_TABLE11_SOURCE_WEIGHT_BYTES": "12041735140",
         "FASTWAM_TABLE11_EXPECTED_H5_FILES": "11",
         "FASTWAM_ERDMA_BUNDLE_ROOT": "/oss-chengjuntao/artifacts/erdma-userspace-56.2-1.0.3",
         "FASTWAM_ERDMA_EXPECTED_VERSION": "56.2-1.0.3",
@@ -212,12 +212,12 @@ def main() -> int:
             }
         ],
         "Description": (
-            "Joint-safe RoboFactory table11 VG1H1GAU1 weights-only "
+            "Joint-safe RoboFactory table11 VG1H1GAU1 scratch-from-generic-base "
             + (
-                "runtime preflight: cumulative 5000 to 5001, one fresh-optimizer "
+                "runtime preflight: optimizer step 0 to 1, one fresh-optimizer "
                 "update, 1 worker x 8 GPUs"
                 if args.preflight_one_step
-                else "rerun: cumulative 5000 to 50000, 45000 fresh-optimizer "
+                else "training: optimizer steps 0 to 50000, 50000 fresh-optimizer "
                 "updates, 3 workers x 8 GPUs, world-24 global batch"
             )
         ),
@@ -252,15 +252,15 @@ def main() -> int:
             "EnableRDMA": True,
             "EnableSanityCheck": False,
             "Tags": {
-                "experiment": "TABLE11SAFE-VG1H1GAU1-CONT50K",
-                "initialization": "GAU1-step5000-weights-only",
+                "experiment": "TABLE11SAFE-VG1H1GAU1-SCRATCH50K",
+                "initialization": "official-generic-pretrained-model-weights",
                 "optimizer": "fresh",
                 "provenance": "stat-cmp-no-new-hash",
                 "topology": "1x8-world8" if args.preflight_one_step else "3x8-world24",
                 "schedule": (
-                    "cumulative-5000-to-5001-no-checkpoint"
+                    "optimizer-0-to-1-no-checkpoint"
                     if args.preflight_one_step
-                    else "cumulative-5000-to-50000-save-5000"
+                    else "optimizer-0-to-50000-save-5000"
                 ),
             },
         },
@@ -302,7 +302,7 @@ def main() -> int:
             "replica_global_batch": 8 if args.preflight_one_step else 24,
             "micro_batch_per_gpu": 1,
             "gradient_accumulation_steps": 1,
-            "optimizer_updates": 1 if args.preflight_one_step else 45000,
+            "optimizer_updates": 1 if args.preflight_one_step else 50000,
             "sample_budget_equivalent": not args.preflight_one_step,
         },
         "request": request,
