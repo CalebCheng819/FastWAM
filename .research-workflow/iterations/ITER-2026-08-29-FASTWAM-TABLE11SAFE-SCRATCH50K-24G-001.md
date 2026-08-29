@@ -2,7 +2,7 @@
 
 - Experiment: `FASTWAM-MR-TABLE11SAFE-VG1H1GAU1-SCRATCH50K-S42-24G-R1-20260829`
 - Run: `fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829`
-- Code treatment commit: pending publication
+- Code treatment commit: `2ee842ade870b5d1f211f125758d9120949dfba6`
 - Requested action: replace the illegal-data continuation with a new Table11-safe training run whose optimizer, scheduler, and global step all start at zero.
 
 ## Decision
