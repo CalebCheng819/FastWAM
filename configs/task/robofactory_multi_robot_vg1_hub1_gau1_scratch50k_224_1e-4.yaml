@@ -18,6 +18,7 @@ lr_scheduler_type: cosine
 max_steps: 50000
 run_initial_global_step: 0
 save_every: 1000
+checkpoint_keep_last: 2
 eval_every: 5000
 offline_eval_num_samples: 12
 phase_balanced_fraction: 0.0

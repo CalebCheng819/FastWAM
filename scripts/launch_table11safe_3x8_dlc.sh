@@ -350,6 +350,7 @@ if run_mode == "preflight-one-step":
         [
             "max_steps=1",
             "save_every=0",
+            "checkpoint_keep_last=0",
             "eval_every=0",
             "log_every=1",
             "save_training_state=false",
@@ -374,6 +375,7 @@ expected = {
     "max_steps": 50000,
     "run_initial_global_step": 0,
     "save_every": 1000,
+    "checkpoint_keep_last": 2,
     "eval_every": 5000,
     "checkpoint_state_kind": "full",
     "save_training_state": True,
@@ -385,6 +387,7 @@ if run_mode == "preflight-one-step":
         {
             "max_steps": 1,
             "save_every": 0,
+            "checkpoint_keep_last": 0,
             "eval_every": 0,
             "log_every": 1,
             "save_training_state": False,
@@ -416,7 +419,7 @@ if len(resolved["data"]["train"]["instruction_map"]) != 11:
 if run_mode == "preflight-one-step":
     print(f"table11 safe config gate: preflight world={expected_world} update=0->1")
 else:
-    print("table11 safe config gate: world=24 global_batch=24 updates=50000 checkpoints=5000..50000/5000")
+    print("table11 safe config gate: world=24 global_batch=24 updates=50000 save_every=1000 rolling_keep_last=2")
 print("table11 initialization gate: run_initial_global_step=0 weights_only_warm_start.enabled=false")
 PY
 
@@ -475,12 +478,16 @@ learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
 save_every=1000
+checkpoint_keep_last=2
+checkpoint_retention=rolling-complete-resumable-tuples
 checkpoint_steps=1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000,16000,17000,18000,19000,20000,21000,22000,23000,24000,25000,26000,27000,28000,29000,30000,31000,32000,33000,34000,35000,36000,37000,38000,39000,40000,41000,42000,43000,44000,45000,46000,47000,48000,49000,50000
 dataset_root=${DATASET_ROOT}
 gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}
 "
 if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
   RESERVATION_BODY="${RESERVATION_BODY/save_every=1000/save_every=0}"
+  RESERVATION_BODY="${RESERVATION_BODY/checkpoint_keep_last=2/checkpoint_keep_last=0}"
+  RESERVATION_BODY="${RESERVATION_BODY/checkpoint_retention=rolling-complete-resumable-tuples/checkpoint_retention=disabled}"
   RESERVATION_BODY="${RESERVATION_BODY/checkpoint_steps=1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000,16000,17000,18000,19000,20000,21000,22000,23000,24000,25000,26000,27000,28000,29000,30000,31000,32000,33000,34000,35000,36000,37000,38000,39000,40000,41000,42000,43000,44000,45000,46000,47000,48000,49000,50000/checkpoint_steps=none}"
 fi
 
@@ -563,6 +570,7 @@ if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
   COMMAND+=(
     "max_steps=1"
     "save_every=0"
+    "checkpoint_keep_last=0"
     "eval_every=0"
     "log_every=1"
     "save_training_state=false"

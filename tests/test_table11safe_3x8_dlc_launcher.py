@@ -144,6 +144,7 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertIn("run_initial_global_step=0", result.stdout)
             self.assertIn("weights_only_warm_start.enabled=false", result.stdout)
             self.assertIn("table11 safe config gate: world=24 global_batch=24", result.stdout)
+            self.assertIn("save_every=1000 rolling_keep_last=2", result.stdout)
 
     def test_topology_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -169,6 +170,7 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertIn("max_steps=1", result.stdout)
             self.assertIn("run_initial_global_step=0", result.stdout)
             self.assertIn("save_every=0", result.stdout)
+            self.assertIn("checkpoint_keep_last=0", result.stdout)
             self.assertIn("eval_every=0", result.stdout)
             self.assertIn("log_every=1", result.stdout)
             self.assertIn("save_training_state=false", result.stdout)
@@ -383,6 +385,9 @@ class Table11LauncherTests(unittest.TestCase):
         self.assertIn("prefetch_factor: 1", source)
         self.assertIn("persistent_workers: false", source)
         self.assertIn("save_every: 1000", source)
+        self.assertIn("checkpoint_keep_last: 2", source)
+        self.assertIn("checkpoint_keep_last=2", source)
+        self.assertIn("checkpoint_retention=rolling-complete-resumable-tuples", source)
         self.assertIn("weights_only_warm_start:\n  enabled: false", source)
         self.assertIn("optimizer-0-to-50000-save-1000", source)
         self.assertNotIn("optimizer-0-to-50000-save-5000", source)

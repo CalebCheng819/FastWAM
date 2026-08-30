@@ -8,6 +8,7 @@ import re
 import resource
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -238,6 +239,22 @@ class Wan22Trainer:
         self.seal_training_state = bool(cfg.get("seal_training_state", False))
         self.save_final_checkpoint_enabled = bool(cfg.get("save_final_checkpoint", True))
         self.seal_training_run = bool(cfg.get("seal_training_run", False))
+        self.checkpoint_keep_last = int(cfg.get("checkpoint_keep_last", 0))
+        if self.checkpoint_keep_last < 0:
+            raise ValueError(
+                "`checkpoint_keep_last` must be non-negative, got "
+                f"{self.checkpoint_keep_last}"
+            )
+        if self.checkpoint_keep_last > 0 and not self.save_training_state_enabled:
+            raise ValueError(
+                "`checkpoint_keep_last` requires save_training_state=true so only "
+                "complete resumable checkpoint tuples are pruned"
+            )
+        if self.checkpoint_keep_last > 0 and self.seal_training_run:
+            raise ValueError(
+                "`checkpoint_keep_last` is incompatible with seal_training_run=true "
+                "because pruning intentionally removes older checkpoint artifacts"
+            )
         self.terminal_rehash_weights = bool(cfg.get("terminal_rehash_weights", True))
         self.provenance_mode = str(
             cfg.get("provenance_mode", "sha256")
@@ -1424,6 +1441,7 @@ class Wan22Trainer:
             "persistent_workers",
             "log_every",
             "save_every",
+            "checkpoint_keep_last",
             "eval_every",
             "eval_num_inference_steps",
             "offline_eval_num_samples",
@@ -2803,6 +2821,247 @@ class Wan22Trainer:
                 f"pre-existing targets for {step_tag}; local_conflicts={local_detail}"
             )
 
+    @staticmethod
+    def _checkpoint_retention_lstat(path: Path, *, allow_directory: bool) -> os.stat_result:
+        """Return a no-follow stat for a retention-owned path or fail closed."""
+
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError(f"Checkpoint retention refuses symlink: {path}")
+        if stat.S_ISDIR(metadata.st_mode):
+            if not allow_directory:
+                raise RuntimeError(f"Checkpoint retention expected a regular file: {path}")
+            return metadata
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"Checkpoint retention refuses special file: {path}")
+        if metadata.st_nlink != 1:
+            raise RuntimeError(
+                "Checkpoint retention refuses multiply-linked regular file: "
+                f"path={path} nlink={metadata.st_nlink}"
+            )
+        return metadata
+
+    @staticmethod
+    def _checkpoint_retention_fingerprint(
+        metadata: os.stat_result,
+        *,
+        directory: bool,
+    ) -> tuple[int, ...]:
+        common = (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+        if directory:
+            return common
+        return common + (
+            metadata.st_nlink,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def _checkpoint_retention_tree_snapshot(
+        self,
+        root: Path,
+    ) -> list[tuple[Path, bool, tuple[int, ...]]]:
+        """Snapshot a state tree without following links, children before parents."""
+
+        root_metadata = self._checkpoint_retention_lstat(root, allow_directory=True)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise RuntimeError(f"Checkpoint state root must be a directory: {root}")
+        snapshot: list[tuple[Path, bool, tuple[int, ...]]] = []
+        with os.scandir(root) as entries:
+            children = sorted((Path(entry.path) for entry in entries), key=lambda item: item.name)
+        for child in children:
+            child_metadata = self._checkpoint_retention_lstat(child, allow_directory=True)
+            if stat.S_ISDIR(child_metadata.st_mode):
+                snapshot.extend(self._checkpoint_retention_tree_snapshot(child))
+            else:
+                snapshot.append(
+                    (
+                        child,
+                        False,
+                        self._checkpoint_retention_fingerprint(
+                            child_metadata,
+                            directory=False,
+                        ),
+                    )
+                )
+        snapshot.append(
+            (
+                root,
+                True,
+                self._checkpoint_retention_fingerprint(root_metadata, directory=True),
+            )
+        )
+        return snapshot
+
+    def _completed_checkpoint_tuple(self, step: int) -> dict[str, object] | None:
+        """Validate and return one complete resumable tuple, or ignore an incomplete one."""
+
+        step_tag = f"step_{step:06d}"
+        state_path = Path(self.state_dir) / step_tag
+        if state_path.is_symlink():
+            raise RuntimeError(f"Checkpoint retention refuses state symlink: {state_path}")
+        if not state_path.exists():
+            return None
+        state_metadata = self._checkpoint_retention_lstat(
+            state_path,
+            allow_directory=True,
+        )
+        if not stat.S_ISDIR(state_metadata.st_mode):
+            raise RuntimeError(f"Checkpoint state path must be a directory: {state_path}")
+
+        trainer_state = state_path / "trainer_state.json"
+        if trainer_state.is_symlink():
+            raise RuntimeError(
+                f"Checkpoint retention refuses trainer-state symlink: {trainer_state}"
+            )
+        if not trainer_state.exists():
+            return None
+        self._checkpoint_retention_lstat(trainer_state, allow_directory=False)
+        with trainer_state.open("r", encoding="utf-8") as handle:
+            trainer_payload = json.load(handle)
+        if not isinstance(trainer_payload, dict) or trainer_payload.get("global_step") != step:
+            raise RuntimeError(
+                "Checkpoint trainer_state global_step mismatch: "
+                f"path={trainer_state} expected={step} "
+                f"actual={getattr(trainer_payload, 'get', lambda *_: None)('global_step')}"
+            )
+
+        weights_path = Path(self.weights_dir) / f"{step_tag}.pt"
+        weights_manifest = weights_path.with_name(f"{weights_path.name}.manifest.json")
+        weights_complete = weights_path.with_name(f"{weights_path.name}.COMPLETE")
+        required_files = [weights_path, weights_manifest, weights_complete]
+        state_manifest = state_path.with_name(f"{state_path.name}.state-tree.json")
+        if self.seal_training_state:
+            required_files.append(state_manifest)
+        for path in required_files:
+            if not path.exists() and not path.is_symlink():
+                raise RuntimeError(
+                    "Checkpoint tuple has trainer_state but is missing required artifact: "
+                    f"{path}"
+                )
+            self._checkpoint_retention_lstat(path, allow_directory=False)
+
+        with weights_manifest.open("r", encoding="utf-8") as handle:
+            weights_payload = json.load(handle)
+        if not isinstance(weights_payload, dict) or weights_payload.get("global_step") != step:
+            raise RuntimeError(
+                "Checkpoint weights manifest global_step mismatch: "
+                f"path={weights_manifest} expected={step} "
+                f"actual={getattr(weights_payload, 'get', lambda *_: None)('global_step')}"
+            )
+        return {
+            "step": step,
+            "state_path": state_path,
+            "state_manifest": state_manifest if self.seal_training_state else None,
+            "weights_path": weights_path,
+            "weights_manifest": weights_manifest,
+            "weights_complete": weights_complete,
+        }
+
+    def _remove_checkpoint_retention_file(
+        self,
+        path: Path,
+        expected: tuple[int, ...],
+    ) -> None:
+        metadata = self._checkpoint_retention_lstat(path, allow_directory=False)
+        actual = self._checkpoint_retention_fingerprint(metadata, directory=False)
+        if actual != expected:
+            raise RuntimeError(f"Checkpoint artifact changed before retention delete: {path}")
+        path.unlink()
+
+    def _remove_checkpoint_retention_tree(
+        self,
+        snapshot: list[tuple[Path, bool, tuple[int, ...]]],
+    ) -> None:
+        for path, is_directory, expected in snapshot:
+            metadata = self._checkpoint_retention_lstat(
+                path,
+                allow_directory=is_directory,
+            )
+            actual = self._checkpoint_retention_fingerprint(
+                metadata,
+                directory=is_directory,
+            )
+            if actual != expected:
+                raise RuntimeError(f"Checkpoint state tree changed before delete: {path}")
+            if is_directory:
+                path.rmdir()
+            else:
+                path.unlink()
+
+    def _prune_completed_checkpoints(self) -> list[int]:
+        """Keep only the newest configured number of complete resumable tuples."""
+
+        keep_last = int(getattr(self, "checkpoint_keep_last", 0))
+        if keep_last <= 0:
+            return []
+        state_root = Path(self.state_dir)
+        weights_root = Path(self.weights_dir)
+        for root in (state_root, weights_root):
+            metadata = self._checkpoint_retention_lstat(root, allow_directory=True)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise RuntimeError(f"Checkpoint retention root must be a directory: {root}")
+
+        completed: list[dict[str, object]] = []
+        for child in sorted(state_root.iterdir(), key=lambda item: item.name):
+            match = re.fullmatch(r"step_(\d{6})", child.name)
+            if match is None:
+                continue
+            candidate = self._completed_checkpoint_tuple(int(match.group(1)))
+            if candidate is not None:
+                completed.append(candidate)
+        completed.sort(key=lambda item: int(item["step"]))
+        victims = completed[:-keep_last]
+        if not victims:
+            return []
+
+        audited: list[dict[str, object]] = []
+        for victim in victims:
+            file_snapshots: dict[Path, tuple[int, ...]] = {}
+            for key in ("weights_complete", "state_manifest", "weights_manifest", "weights_path"):
+                path = victim[key]
+                if path is None:
+                    continue
+                metadata = self._checkpoint_retention_lstat(path, allow_directory=False)
+                file_snapshots[path] = self._checkpoint_retention_fingerprint(
+                    metadata,
+                    directory=False,
+                )
+            audited.append(
+                {
+                    **victim,
+                    "file_snapshots": file_snapshots,
+                    "state_snapshot": self._checkpoint_retention_tree_snapshot(
+                        victim["state_path"]
+                    ),
+                }
+            )
+
+        pruned: list[int] = []
+        for victim in audited:
+            snapshots = victim["file_snapshots"]
+            self._remove_checkpoint_retention_file(
+                victim["weights_complete"],
+                snapshots[victim["weights_complete"]],
+            )
+            self._remove_checkpoint_retention_tree(victim["state_snapshot"])
+            state_manifest = victim["state_manifest"]
+            if state_manifest is not None:
+                self._remove_checkpoint_retention_file(
+                    state_manifest,
+                    snapshots[state_manifest],
+                )
+            for key in ("weights_manifest", "weights_path"):
+                path = victim[key]
+                self._remove_checkpoint_retention_file(path, snapshots[path])
+            pruned.append(int(victim["step"]))
+        logger.info(
+            "Checkpoint retention pruned complete resumable tuples: steps=%s keep_last=%d",
+            pruned,
+            keep_last,
+        )
+        return pruned
+
     def _save_trainer_state(self, state_path: str):
         state_file = os.path.join(state_path, "trainer_state.json")
         payload = {
@@ -2989,6 +3248,35 @@ class Wan22Trainer:
                         label="sealed training state-tree manifest",
                     )
                 self.accelerator.wait_for_everyone()
+
+        pruned_steps: list[int] = []
+        retention_error: BaseException | None = None
+        if int(getattr(self, "checkpoint_keep_last", 0)) > 0:
+            if self.accelerator.is_main_process:
+                try:
+                    pruned_steps = self._prune_completed_checkpoints()
+                except BaseException as error:
+                    retention_error = error
+            local_failed = torch.tensor(
+                [1 if retention_error is not None else 0],
+                device=self.accelerator.device,
+                dtype=torch.int64,
+            )
+            global_failed = self.accelerator.reduce(local_failed, reduction="sum")
+            if int(global_failed.item()) != 0:
+                if retention_error is not None:
+                    raise RuntimeError(
+                        "Checkpoint retention failed on the main process"
+                    ) from retention_error
+                raise RuntimeError("Checkpoint retention failed on another process")
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process and pruned_steps:
+                logger.info(
+                    "[ckpt-retention] kept newest %d complete resumable tuples; "
+                    "pruned steps=%s",
+                    int(self.checkpoint_keep_last),
+                    pruned_steps,
+                )
 
         return {
             "weights_path": ckpt_path,
