@@ -230,9 +230,8 @@ class Table11LauncherTests(unittest.TestCase):
             '"FASTWAM_TRAINING_START initial_global_step=%d max_steps=%d '
             'optimizer_steps_this_run=%d"'
         )
-        optimizer_step_index = source.index(
-            '"FASTWAM_OPTIMIZER_STEP global_step=%d max_steps=%d"'
-        )
+        optimizer_step_index = source.index('"FASTWAM_OPTIMIZER_STEP "')
+        self.assertIn("os.write(1, receipt)", source)
         self.assertLess(load_index, receipt_index)
         self.assertLess(receipt_index, fresh_optimizer_index)
         self.assertLess(fresh_optimizer_index, training_start_index)
