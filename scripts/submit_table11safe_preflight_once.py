@@ -16,12 +16,12 @@ import submit_table11safe_formal_once as common
 
 RUN_ID = common.REAL_DATA_PREFLIGHT_RUN_ID
 ATTEMPT_ID = common.REAL_DATA_PREFLIGHT_ATTEMPT_ID
-COMMIT = "73b967598f4773497f5232a339a6f5faa9e2e95a"
+COMMIT = "dad1200894e22e837564cbcaaf68645c33e7875d"
 LAUNCH_ROOT = common.LAUNCH_ROOT
-DRY_REQUEST = LAUNCH_ROOT / "rendered-request-preflight-r3.json"
-AUDIT_RECORD = LAUNCH_ROOT / "submission-preflight-r3-audit.json"
-LATCH = LAUNCH_ROOT / "submission-preflight-r3-latch.json"
-ACK = LAUNCH_ROOT / "submission-preflight-r3-job-ack.json"
+DRY_REQUEST = LAUNCH_ROOT / "rendered-request-preflight-r4.json"
+AUDIT_RECORD = LAUNCH_ROOT / "submission-preflight-r4-audit.json"
+LATCH = LAUNCH_ROOT / "submission-preflight-r4-latch.json"
+ACK = LAUNCH_ROOT / "submission-preflight-r4-job-ack.json"
 RECONCILIATION = common.REAL_DATA_PREFLIGHT
 OUTPUT_DIR = common.REAL_DATA_PREFLIGHT_OUTPUT_DIR
 BUNDLE = common.BUNDLE

@@ -26,7 +26,7 @@ RUN_ID = "fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829"
 ATTEMPT_ID = "attempt-r1-20260829"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-COMMIT = "73b967598f4773497f5232a339a6f5faa9e2e95a"
+COMMIT = "dad1200894e22e837564cbcaaf68645c33e7875d"
 IMAGE = (
     "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/"
     "pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
@@ -36,16 +36,16 @@ DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r1.json"
 PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r1.json"
 AUDIT_RECORD = LAUNCH_ROOT / "submission-formal-3x8-r1-audit.json"
 RECEIPT = LAUNCH_ROOT / "submission-formal-3x8-r1-receipt.json"
-REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r3.json"
+REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r4.json"
 OUTPUT_DIR = f"/oss-chengjuntao/artifacts/{RUN_ID}"
 REAL_DATA_PREFLIGHT_RUN_ID = (
-    "fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r3-20260830"
+    "fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r4-20260830"
 )
-REAL_DATA_PREFLIGHT_ATTEMPT_ID = "attempt-r3-20260830"
+REAL_DATA_PREFLIGHT_ATTEMPT_ID = "attempt-r4-20260830"
 REAL_DATA_PREFLIGHT_OUTPUT_DIR = (
     f"/oss-chengjuntao/artifacts/{REAL_DATA_PREFLIGHT_RUN_ID}"
 )
-BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r4-20260830.bundle")
+BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r5-20260830.bundle")
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
     "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
