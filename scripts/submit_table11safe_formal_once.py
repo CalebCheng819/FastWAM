@@ -45,7 +45,7 @@ REAL_DATA_PREFLIGHT_ATTEMPT_ID = "attempt-r1-20260830"
 REAL_DATA_PREFLIGHT_OUTPUT_DIR = (
     f"/oss-chengjuntao/artifacts/{REAL_DATA_PREFLIGHT_RUN_ID}"
 )
-BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r1-20260829.bundle")
+BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r2-20260830.bundle")
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
     "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
