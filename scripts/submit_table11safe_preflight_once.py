@@ -16,12 +16,12 @@ import submit_table11safe_formal_once as common
 
 RUN_ID = common.REAL_DATA_PREFLIGHT_RUN_ID
 ATTEMPT_ID = common.REAL_DATA_PREFLIGHT_ATTEMPT_ID
-COMMIT = "d20e5d6d98537b6e8ee6bdc50a9defb08307f77a"
+COMMIT = "7a99d93dcc14cd8b8afeb962b589b67c79ea89e1"
 LAUNCH_ROOT = common.LAUNCH_ROOT
-DRY_REQUEST = LAUNCH_ROOT / "rendered-request-preflight-r7.json"
-AUDIT_RECORD = LAUNCH_ROOT / "submission-preflight-r7-audit.json"
-LATCH = LAUNCH_ROOT / "submission-preflight-r7-latch.json"
-ACK = LAUNCH_ROOT / "submission-preflight-r7-job-ack.json"
+DRY_REQUEST = LAUNCH_ROOT / "rendered-request-preflight-r8.json"
+AUDIT_RECORD = LAUNCH_ROOT / "submission-preflight-r8-audit.json"
+LATCH = LAUNCH_ROOT / "submission-preflight-r8-latch.json"
+ACK = LAUNCH_ROOT / "submission-preflight-r8-job-ack.json"
 RECONCILIATION = common.REAL_DATA_PREFLIGHT
 OUTPUT_DIR = common.REAL_DATA_PREFLIGHT_OUTPUT_DIR
 BUNDLE = common.BUNDLE
@@ -341,6 +341,8 @@ def validate_output() -> dict:
             "lr_scheduler": "cosine",
             "scheduler_warmup_steps": "2250",
             "save_every": "0",
+            "checkpoint_keep_last": "0",
+            "checkpoint_retention": "disabled",
             "checkpoint_steps": "none",
             "dataset_root": common.DATASET_ROOT,
             "gaussian_cache_dir": common.GAUSSIAN_CACHE_DIR,

@@ -19,15 +19,25 @@
 - Set DataLoader `prefetch_factor=1` and `persistent_workers=false` explicitly.
 - Log DataLoader multiprocessing, worker PID, file-descriptor limits, and `/dev/shm` capacity at startup for diagnosis.
 - Save recoverable checkpoints every 1,000 updates instead of every 5,000 updates.
+- Retain the newest two complete resumable checkpoint tuples; invalidate the
+  weight `COMPLETE` marker first and fail closed on links, special files,
+  multiply-linked files, incomplete tuples, or concurrent tree changes. The
+  one-step preflight disables retention because it does not publish checkpoints.
 - Use new R2 run, attempt, preflight, output, latch, and Notion identities; submit with Priority 7 exactly once after all gates pass.
 
 ## Status
 
-- Phase: `SOURCE_PUBLISHED`
+- Phase: `SOURCE_FREEZE_IN_PROGRESS`
 - Chronicle marker written and strictly read back before code mutation.
 - Exact configuration semantic diff passed: model/defaults, data wiring, batch, learning rate, schedule, objective, world size, and 50,000-step target are unchanged.
-- Validation passed: `316 passed, 3 deselected, 2 subtests passed`; the three deselections are environment-only checks requiring unavailable write permissions or `boto3`. Three additional collection modules require unavailable local `h5py`; the directly relevant controller/trainer suite passed `64/64`.
-- Python compile, Bash syntax, and whitespace checks passed.
-- Runtime/source commit `d20e5d6d98537b6e8ee6bdc50a9defb08307f77a` and controller/record commit `1432c3dcab65e2db782b6f3b13fb0024b694a204` are cleanly published on the isolated R2 branch.
+- Rolling-retention target tests passed (`37 passed` across retention, checkpoint
+  load-order, and launcher contracts). The expanded available local suite passed
+  (`320 passed`, `3 deselected`, `2 subtests passed`); compileall, launcher
+  `bash -n`, and `git diff --check` also passed. The three deselections are the
+  previously isolated local permission/optional-`boto3` environment cases.
+- Immutable source and refreshed controller bindings are being frozen; neither
+  the 1x8 preflight nor the 3x8 formal job has been submitted yet.
+- Frozen runtime/source commit: `7a99d93dcc14cd8b8afeb962b589b67c79ea89e1`.
+- Rotated preflight identity: `fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r8-20260831`; source bundle target: `fastwam-table11safe-scratch50k-source-r9-20260831.bundle`.
 - The exact Experiment ID resolves to the unique Notion page above. The page is `Planned`, with no Job ID or runtime/result fields populated.
 - No preflight submission, formal CreateJob, or optimizer step has occurred yet.
