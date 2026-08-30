@@ -3036,6 +3036,14 @@ class Wan22Trainer:
             self.max_steps,
             self.optimizer_steps_this_run,
         )
+        # Keep this deliberately short: Rich may wrap the human-readable line
+        # above, while the formal one-step launcher needs a stable receipt.
+        logger.warning(
+            "FASTWAM_TRAINING_START initial_global_step=%d max_steps=%d optimizer_steps_this_run=%d",
+            self.global_step,
+            self.max_steps,
+            self.optimizer_steps_this_run,
+        )
         self._set_train_data_epoch(self.epoch)
         data_iter = iter(self.train_loader)
         self.run_start_step = self.global_step

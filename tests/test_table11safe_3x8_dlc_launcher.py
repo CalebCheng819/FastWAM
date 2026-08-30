@@ -182,6 +182,11 @@ class Table11LauncherTests(unittest.TestCase):
             'grep -Fq -- "FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true"',
             source,
         )
+        self.assertIn(
+            'grep -Fq -- "FASTWAM_TRAINING_START initial_global_step=0 '
+            'max_steps=1 optimizer_steps_this_run=1"',
+            source,
+        )
         self.assertNotIn(
             'grep -Fq -- "Loading weight checkpoint before optimizer/DeepSpeed '
             'initialization: ${LOCAL_WEIGHT}"',
@@ -217,8 +222,13 @@ class Table11LauncherTests(unittest.TestCase):
         fresh_optimizer_index = source.index(
             '"optimizer/scheduler/step are intentionally not restored."'
         )
+        training_start_index = source.index(
+            '"FASTWAM_TRAINING_START initial_global_step=%d max_steps=%d '
+            'optimizer_steps_this_run=%d"'
+        )
         self.assertLess(load_index, receipt_index)
         self.assertLess(receipt_index, fresh_optimizer_index)
+        self.assertLess(fresh_optimizer_index, training_start_index)
 
     def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")

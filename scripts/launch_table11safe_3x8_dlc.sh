@@ -602,7 +602,7 @@ grep -Fq -- "FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true" "${PREFLIGHT_LO
   die "generic base checkpoint load was not observed"
 grep -Fq -- "optimizer/scheduler/step are intentionally not restored." "${PREFLIGHT_LOG}" || \
   die "fresh optimizer/scheduler declaration was not observed"
-grep -Fq -- "Starting training at cumulative_step=0 with max_steps=1 and optimizer_steps_this_run=1." "${PREFLIGHT_LOG}" || \
+grep -Fq -- "FASTWAM_TRAINING_START initial_global_step=0 max_steps=1 optimizer_steps_this_run=1" "${PREFLIGHT_LOG}" || \
   die "step-zero training start was not observed"
 grep -Eq -- '\[train\].*step=1/1([[:space:]]|$)' "${PREFLIGHT_LOG}" || \
   die "real optimizer step 1/1 was not observed"

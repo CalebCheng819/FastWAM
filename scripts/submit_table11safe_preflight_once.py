@@ -320,7 +320,7 @@ def validate_output() -> dict:
     required = (
         f"Loading weight checkpoint before optimizer/DeepSpeed initialization: {common.SOURCE_WEIGHT}",
         "optimizer/scheduler/step are intentionally not restored.",
-        "Starting training at cumulative_step=0 with max_steps=1 and optimizer_steps_this_run=1.",
+        "FASTWAM_TRAINING_START initial_global_step=0 max_steps=1 optimizer_steps_this_run=1",
     )
     for marker in required:
         common.require(marker in log, f"preflight log omitted marker: {marker}")
