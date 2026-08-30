@@ -3126,6 +3126,18 @@ class Wan22Trainer:
                         "loss_components": dict(sorted(global_loss_metrics.items())),
                         "step": int(self.global_step),
                     }
+                    if (
+                        self.accelerator.is_main_process
+                        and self.optimizer_steps_this_run == 1
+                        and self.global_step == self.max_steps
+                    ):
+                        # Keep this receipt short and independent of the rich
+                        # human-readable progress line, which may be wrapped.
+                        logger.warning(
+                            "FASTWAM_OPTIMIZER_STEP global_step=%d max_steps=%d",
+                            self.global_step,
+                            self.max_steps,
+                        )
                     if self.formal_n4_fullmodel_gate:
                         if gate_sample_shapes is None or gate_losses is None or gate_gradients is None:
                             raise RuntimeError("N=4 gate lost required per-step evidence")

@@ -187,6 +187,10 @@ class Table11LauncherTests(unittest.TestCase):
             'max_steps=1 optimizer_steps_this_run=1"',
             source,
         )
+        self.assertIn(
+            'grep -Fq -- "FASTWAM_OPTIMIZER_STEP global_step=1 max_steps=1"',
+            source,
+        )
         self.assertNotIn(
             'grep -Fq -- "Loading weight checkpoint before optimizer/DeepSpeed '
             'initialization: ${LOCAL_WEIGHT}"',
@@ -226,9 +230,13 @@ class Table11LauncherTests(unittest.TestCase):
             '"FASTWAM_TRAINING_START initial_global_step=%d max_steps=%d '
             'optimizer_steps_this_run=%d"'
         )
+        optimizer_step_index = source.index(
+            '"FASTWAM_OPTIMIZER_STEP global_step=%d max_steps=%d"'
+        )
         self.assertLess(load_index, receipt_index)
         self.assertLess(receipt_index, fresh_optimizer_index)
         self.assertLess(fresh_optimizer_index, training_start_index)
+        self.assertLess(training_start_index, optimizer_step_index)
 
     def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")

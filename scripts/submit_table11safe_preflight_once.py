@@ -8,7 +8,6 @@ import copy
 import json
 import os
 import pathlib
-import re
 import stat
 import sys
 
@@ -321,10 +320,10 @@ def validate_output() -> dict:
         f"Loading weight checkpoint before optimizer/DeepSpeed initialization: {common.SOURCE_WEIGHT}",
         "optimizer/scheduler/step are intentionally not restored.",
         "FASTWAM_TRAINING_START initial_global_step=0 max_steps=1 optimizer_steps_this_run=1",
+        "FASTWAM_OPTIMIZER_STEP global_step=1 max_steps=1",
     )
     for marker in required:
         common.require(marker in log, f"preflight log omitted marker: {marker}")
-    common.require(re.search(r"\[train\].*step=1/1", log) is not None, "step 1/1 absent")
     common.require("step_005000.pt" not in log, "old N234 checkpoint loaded")
     common.require(
         "Loaded explicit cross-treatment weights-only warm start" not in log,

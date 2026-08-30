@@ -604,7 +604,7 @@ grep -Fq -- "optimizer/scheduler/step are intentionally not restored." "${PREFLI
   die "fresh optimizer/scheduler declaration was not observed"
 grep -Fq -- "FASTWAM_TRAINING_START initial_global_step=0 max_steps=1 optimizer_steps_this_run=1" "${PREFLIGHT_LOG}" || \
   die "step-zero training start was not observed"
-grep -Eq -- '\[train\].*step=1/1([[:space:]]|$)' "${PREFLIGHT_LOG}" || \
+grep -Fq -- "FASTWAM_OPTIMIZER_STEP global_step=1 max_steps=1" "${PREFLIGHT_LOG}" || \
   die "real optimizer step 1/1 was not observed"
 ! grep -Fq -- "step_005000.pt" "${PREFLIGHT_LOG}" || die "forbidden old checkpoint appeared in log"
 ! grep -Fq -- "Loaded explicit cross-treatment weights-only warm start" "${PREFLIGHT_LOG}" || \
