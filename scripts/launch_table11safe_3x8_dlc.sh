@@ -344,10 +344,22 @@ overrides = [
     f"data.train.gaussian_cache_dir={os.environ['FASTWAM_TABLE11_CONFIG_GAUSSIAN']}",
     f"data.val.gaussian_cache_dir={os.environ['FASTWAM_TABLE11_CONFIG_GAUSSIAN']}",
 ]
+run_mode = os.environ["FASTWAM_TABLE11_CONFIG_RUN_MODE"]
+if run_mode == "preflight-one-step":
+    overrides.extend(
+        [
+            "max_steps=1",
+            "save_every=0",
+            "eval_every=0",
+            "log_every=1",
+            "save_training_state=false",
+            "save_final_checkpoint=false",
+            "seal_training_run=false",
+        ]
+    )
 with initialize_config_dir(config_dir=str(repo / "configs"), version_base="1.3"):
     cfg = compose(config_name="train", overrides=overrides)
 resolved = OmegaConf.to_container(cfg, resolve=True)
-run_mode = os.environ["FASTWAM_TABLE11_CONFIG_RUN_MODE"]
 expected_world = int(os.environ["FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD"])
 
 expected = {
@@ -366,6 +378,18 @@ expected = {
     "save_final_checkpoint": True,
     "trainable_scope": "dit",
 }
+if run_mode == "preflight-one-step":
+    expected.update(
+        {
+            "max_steps": 1,
+            "save_every": 0,
+            "eval_every": 0,
+            "log_every": 1,
+            "save_training_state": False,
+            "save_final_checkpoint": False,
+            "seal_training_run": False,
+        }
+    )
 for key, wanted in expected.items():
     if resolved[key] != wanted:
         raise SystemExit(f"config drift at {key}: expected {wanted!r}, got {resolved[key]!r}")
@@ -453,6 +477,10 @@ checkpoint_steps=5000,10000,15000,20000,25000,30000,35000,40000,45000,50000
 dataset_root=${DATASET_ROOT}
 gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}
 "
+if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
+  RESERVATION_BODY="${RESERVATION_BODY/save_every=5000/save_every=0}"
+  RESERVATION_BODY="${RESERVATION_BODY/checkpoint_steps=5000,10000,15000,20000,25000,30000,35000,40000,45000,50000/checkpoint_steps=none}"
+fi
 
 if [[ "${DRY_RUN}" == "0" ]]; then
   gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"
@@ -532,8 +560,12 @@ COMMAND=(
 if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
   COMMAND+=(
     "max_steps=1"
+    "save_every=0"
+    "eval_every=0"
+    "log_every=1"
     "save_training_state=false"
     "save_final_checkpoint=false"
+    "seal_training_run=false"
   )
 fi
 
@@ -546,4 +578,125 @@ fi
 
 unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE GROUP_RANK ROLE_RANK NODE_RANK
 cd -- "${REPO_ROOT}"
-exec "${COMMAND[@]}"
+if [[ "${RUN_MODE}" == "formal" ]]; then
+  exec "${COMMAND[@]}"
+fi
+
+[[ "${MACHINE_RANK}" == "0" ]] || die "one-step preflight must have exactly one worker"
+PREFLIGHT_LOG="${OUTPUT_DIR}/preflight-train.log"
+PREFLIGHT_TERMINAL="${OUTPUT_DIR}/terminal.json"
+PREFLIGHT_COMPLETE="${OUTPUT_DIR}/COMPLETE"
+for target in "${PREFLIGHT_LOG}" "${PREFLIGHT_TERMINAL}" "${PREFLIGHT_COMPLETE}"; do
+  [[ ! -e "${target}" && ! -L "${target}" ]] || die "preflight target already exists: ${target}"
+done
+set +e
+"${COMMAND[@]}" 2>&1 | tee -- "${PREFLIGHT_LOG}"
+pipeline_status=("${PIPESTATUS[@]}")
+command_status=${pipeline_status[0]}
+tee_status=${pipeline_status[1]}
+set -e
+[[ "${command_status}" == "0" ]] || die "one-step training command failed with ${command_status}"
+[[ "${tee_status}" == "0" ]] || die "one-step log capture failed with ${tee_status}"
+[[ -f "${PREFLIGHT_LOG}" && ! -L "${PREFLIGHT_LOG}" ]] || die "preflight log is not a regular file"
+grep -Fq -- "Loading weight checkpoint before optimizer/DeepSpeed initialization: ${LOCAL_WEIGHT}" "${PREFLIGHT_LOG}" || \
+  die "generic base checkpoint load was not observed"
+grep -Fq -- "optimizer/scheduler/step are intentionally not restored." "${PREFLIGHT_LOG}" || \
+  die "fresh optimizer/scheduler declaration was not observed"
+grep -Fq -- "Starting training at cumulative_step=0 with max_steps=1 and optimizer_steps_this_run=1." "${PREFLIGHT_LOG}" || \
+  die "step-zero training start was not observed"
+grep -Eq -- '\[train\].*step=1/1([[:space:]]|$)' "${PREFLIGHT_LOG}" || \
+  die "real optimizer step 1/1 was not observed"
+! grep -Fq -- "step_005000.pt" "${PREFLIGHT_LOG}" || die "forbidden old checkpoint appeared in log"
+! grep -Fq -- "Loaded explicit cross-treatment weights-only warm start" "${PREFLIGHT_LOG}" || \
+  die "weights-only continuation appeared in scratch preflight"
+
+FASTWAM_TABLE11_PREFLIGHT_LOG="${PREFLIGHT_LOG}" \
+FASTWAM_TABLE11_PREFLIGHT_TERMINAL="${PREFLIGHT_TERMINAL}" \
+FASTWAM_TABLE11_PREFLIGHT_COMPLETE="${PREFLIGHT_COMPLETE}" \
+FASTWAM_TABLE11_PREFLIGHT_RUN_ID="${RUN_ID}" \
+FASTWAM_TABLE11_PREFLIGHT_ATTEMPT_ID="${ATTEMPT_ID}" \
+FASTWAM_TABLE11_PREFLIGHT_SOURCE_WEIGHT="${SOURCE_WEIGHT}" \
+FASTWAM_TABLE11_PREFLIGHT_OUTPUT_DIR="${OUTPUT_DIR}" \
+"${PYTHON_BIN}" - <<'PY' || die "failed to publish one-step preflight terminal receipt"
+import datetime as dt
+import json
+import os
+from pathlib import Path
+
+
+def publish(path: Path, value: dict) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        view = memoryview(payload)
+        offset = 0
+        while offset < len(view):
+            written = os.write(fd, view[offset:])
+            if written <= 0:
+                raise OSError("short write while publishing preflight receipt")
+            offset += written
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+run_id = os.environ["FASTWAM_TABLE11_PREFLIGHT_RUN_ID"]
+attempt_id = os.environ["FASTWAM_TABLE11_PREFLIGHT_ATTEMPT_ID"]
+source_weight = os.environ["FASTWAM_TABLE11_PREFLIGHT_SOURCE_WEIGHT"]
+output_dir = Path(os.environ["FASTWAM_TABLE11_PREFLIGHT_OUTPUT_DIR"])
+log_path = Path(os.environ["FASTWAM_TABLE11_PREFLIGHT_LOG"])
+terminal_path = Path(os.environ["FASTWAM_TABLE11_PREFLIGHT_TERMINAL"])
+complete_path = Path(os.environ["FASTWAM_TABLE11_PREFLIGHT_COMPLETE"])
+terminal = {
+    "schema": "fastwam-table11safe-realdata-scratch-preflight-terminal-v1",
+    "status": "PASS",
+    "run_id": run_id,
+    "attempt_id": attempt_id,
+    "run_mode": "preflight-one-step",
+    "dataset_kind": "joint-safe-table11-real-data",
+    "initialization": "official-generic-pretrained-model-weights",
+    "source_weight": source_weight,
+    "optimizer": "fresh",
+    "scheduler": "fresh",
+    "initial_global_step": 0,
+    "final_global_step": 1,
+    "optimizer_steps_this_run": 1,
+    "world_size": 8,
+    "per_device_batch_size": 1,
+    "gradient_accumulation_steps": 1,
+    "log_path": str(log_path),
+    "completed_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+publish(terminal_path, terminal)
+expected_before_complete = {
+    ".table11-run-reservation",
+    "preflight-train.log",
+    "terminal.json",
+}
+actual_before_complete = {path.name for path in output_dir.iterdir()}
+if actual_before_complete != expected_before_complete:
+    raise SystemExit(
+        f"preflight pre-COMPLETE allowlist drift: {sorted(actual_before_complete)}"
+    )
+complete = {
+    "schema": "fastwam-table11safe-realdata-scratch-preflight-complete-v1",
+    "status": "PASS",
+    "run_id": run_id,
+    "attempt_id": attempt_id,
+    "terminal": str(terminal_path),
+}
+publish(complete_path, complete)
+expected = {".table11-run-reservation", "preflight-train.log", "terminal.json", "COMPLETE"}
+actual = {path.name for path in output_dir.iterdir()}
+if actual != expected:
+    raise SystemExit(f"preflight output allowlist drift: {sorted(actual)}")
+PY
+printf 'table11 real-data scratch preflight: PASS run=%s step=0->1\n' "${RUN_ID}"

@@ -15,6 +15,7 @@ REPO = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO / "scripts" / "launch_table11safe_3x8_dlc.sh"
 RENDERER = REPO / "scripts" / "render_table11safe_3x8_dlc_job.py"
 SUBMITTER = REPO / "scripts" / "submit_table11safe_formal_once.py"
+PREFLIGHT_SUBMITTER = REPO / "scripts" / "submit_table11safe_preflight_once.py"
 
 
 class Table11LauncherTests(unittest.TestCase):
@@ -166,8 +167,34 @@ class Table11LauncherTests(unittest.TestCase):
             self.assertIn("--num_processes 8", result.stdout)
             self.assertIn("max_steps=1", result.stdout)
             self.assertIn("run_initial_global_step=0", result.stdout)
+            self.assertIn("save_every=0", result.stdout)
+            self.assertIn("eval_every=0", result.stdout)
+            self.assertIn("log_every=1", result.stdout)
             self.assertIn("save_training_state=false", result.stdout)
             self.assertIn("save_final_checkpoint=false", result.stdout)
+            self.assertIn("seal_training_run=false", result.stdout)
+
+    def test_preflight_publication_is_fail_closed_and_complete_last(self) -> None:
+        source = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn('pipeline_status=("${PIPESTATUS[@]}")', source)
+        terminal_index = source.index("publish(terminal_path, terminal)")
+        allowlist_index = source.index("actual_before_complete =")
+        complete_index = source.index("publish(complete_path, complete)")
+        final_allowlist_index = source.index(
+            'expected = {".table11-run-reservation", "preflight-train.log", '
+            '"terminal.json", "COMPLETE"}'
+        )
+        self.assertLess(terminal_index, allowlist_index)
+        self.assertLess(allowlist_index, complete_index)
+        self.assertLess(complete_index, final_allowlist_index)
+        self.assertIn(
+            '"schema": "fastwam-table11safe-realdata-scratch-preflight-terminal-v1"',
+            source,
+        )
+        self.assertIn('"initial_global_step": 0', source)
+        self.assertIn('"final_global_step": 1', source)
+        self.assertIn('"optimizer": "fresh"', source)
+        self.assertIn('"scheduler": "fresh"', source)
 
     def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
@@ -282,7 +309,6 @@ class Table11LauncherTests(unittest.TestCase):
 
     def test_operational_contract_forbids_old_n234_checkpoint(self) -> None:
         paths = [
-            LAUNCHER,
             RENDERER,
             SUBMITTER,
             REPO
@@ -298,9 +324,53 @@ class Table11LauncherTests(unittest.TestCase):
         source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         self.assertNotIn("step_005000.pt", source)
         self.assertNotIn("FASTWAM_B4_BASE_CHECKPOINT", source)
+        launcher = LAUNCHER.read_text(encoding="utf-8")
+        preflight_submitter = PREFLIGHT_SUBMITTER.read_text(encoding="utf-8")
+        self.assertIn(
+            '! grep -Fq -- "step_005000.pt" "${PREFLIGHT_LOG}"', launcher
+        )
+        self.assertIn(
+            'common.require("step_005000.pt" not in log', preflight_submitter
+        )
         self.assertIn("libero_uncond_2cam224.pt", source)
         self.assertIn("num_workers: 8", source)
         self.assertIn("weights_only_warm_start:\n  enabled: false", source)
+
+    def test_preflight_controller_latches_before_exactly_one_create(self) -> None:
+        source = PREFLIGHT_SUBMITTER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        create_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_job"
+        ]
+        self.assertEqual(len(create_calls), 1)
+        self.assertLess(
+            source.index("common.write_exclusive(LATCH, latch)"),
+            source.index("response = dlc.create_job(request)"),
+        )
+        self.assertIn("LATCHED_CREATEJOB_ONCE_NEVER_RETRY", source)
+        self.assertIn("CREATE_JOB_EXCEPTION_AMBIGUOUS_DO_NOT_RETRY", source)
+        self.assertNotIn("stop_job(", source)
+        self.assertNotIn("update_job(", source)
+
+    def test_preflight_controller_requires_provider_and_output_pass(self) -> None:
+        source = PREFLIGHT_SUBMITTER.read_text(encoding="utf-8")
+        self.assertIn('if status == "Succeeded":', source)
+        self.assertIn('if not os.path.lexists(pathlib.Path(OUTPUT_DIR) / "COMPLETE"):', source)
+        validation_index = source.index("output = validate_output()")
+        pass_index = source.index(
+            'conclusion = {\n            "status": "PASS"', validation_index
+        )
+        self.assertLess(validation_index, pass_index)
+        self.assertIn('"initial_global_step": 0', source)
+        self.assertIn('"final_global_step": 1', source)
+        self.assertIn('"optimizer_steps_this_run": 1', source)
+        self.assertIn('"optimizer": "fresh"', source)
+        self.assertIn('"scheduler": "fresh"', source)
+        self.assertIn('"sample_budget_equivalent": "false"', source)
 
     def test_renderer_contains_no_cloud_sdk_call(self) -> None:
         source = RENDERER.read_text(encoding="utf-8")

@@ -38,6 +38,13 @@ AUDIT_RECORD = LAUNCH_ROOT / "submission-formal-3x8-r1-audit.json"
 RECEIPT = LAUNCH_ROOT / "submission-formal-3x8-r1-receipt.json"
 REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r1.json"
 OUTPUT_DIR = f"/oss-chengjuntao/artifacts/{RUN_ID}"
+REAL_DATA_PREFLIGHT_RUN_ID = (
+    "fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r1-20260830"
+)
+REAL_DATA_PREFLIGHT_ATTEMPT_ID = "attempt-r1-20260830"
+REAL_DATA_PREFLIGHT_OUTPUT_DIR = (
+    f"/oss-chengjuntao/artifacts/{REAL_DATA_PREFLIGHT_RUN_ID}"
+)
 BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r1-20260829.bundle")
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
@@ -370,12 +377,12 @@ def all_jobs_snapshot(dlc: Client) -> list[dict]:
         page += 1
 
 
-def verify_no_duplicate_job(dlc: Client) -> list[dict]:
+def verify_no_duplicate_job(dlc: Client, run_id: str = RUN_ID) -> list[dict]:
     first = all_jobs_snapshot(dlc)
     second = all_jobs_snapshot(dlc)
     identity = lambda values: sorted((job_id(job), display_name(job)) for job in values)
     require(identity(first) == identity(second), "ListJobs identity snapshot drifted")
-    matches = [job for job in second if display_name(job) == RUN_ID]
+    matches = [job for job in second if display_name(job) == run_id]
     require(not matches, f"refuse duplicate CreateJob: {matches}")
     return second
 
@@ -390,7 +397,16 @@ def git_stdout(*arguments: str, text: bool = False) -> bytes | str:
     ).stdout
 
 
-def validate_embedded_launcher(document: dict, body: dict) -> None:
+def validate_embedded_launcher(
+    document: dict,
+    body: dict,
+    *,
+    expected_machines: int = 3,
+    expected_world: int = 24,
+    bundle: str = BUNDLE,
+    commit: str = COMMIT,
+    require_formal_schedule: bool = True,
+) -> None:
     encoded = document["launcher_payload_base64"]
     require(isinstance(encoded, str) and encoded, "missing launcher payload")
     try:
@@ -412,33 +428,40 @@ def validate_embedded_launcher(document: dict, body: dict) -> None:
     require(body["UserCommand"].count(encoded) == 1, "payload occurrence count drift")
     with tempfile.TemporaryDirectory(prefix="table11-submit-audit.") as temp:
         checkout = pathlib.Path(temp) / "source"
-        git_stdout("clone", "--quiet", "--no-checkout", BUNDLE, str(checkout))
-        git_stdout("-C", str(checkout), "bundle", "verify", BUNDLE)
+        git_stdout("clone", "--quiet", "--no-checkout", bundle, str(checkout))
+        git_stdout("-C", str(checkout), "bundle", "verify", bundle)
         expected = git_stdout(
-            "-C", str(checkout), "show", f"{COMMIT}:scripts/launch_table11safe_3x8_dlc.sh"
+            "-C", str(checkout), "show", f"{commit}:scripts/launch_table11safe_3x8_dlc.sh"
         )
     require(launcher == expected, "embedded launcher differs from frozen commit")
-    for fragment in (
+    fragments = [
         b'[[ "${GPUS_PER_NODE}" == "8" ]]',
-        b"EXPECTED_MACHINES=3",
-        b"EXPECTED_WORLD=24",
+        f"EXPECTED_MACHINES={expected_machines}".encode("ascii"),
+        f"EXPECTED_WORLD={expected_world}".encode("ascii"),
         b'--num_machines "${EXPECTED_MACHINES}"',
         b'--num_processes "${EXPECTED_WORLD}"',
         b"--deepspeed_multinode_launcher standard",
         b"fastwam_run_global_allreduce_preflight",
         b'export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"',
-        b"checkpoints=5000..50000/5000",
-    ):
+    ]
+    if require_formal_schedule:
+        fragments.append(b"checkpoints=5000..50000/5000")
+    for fragment in fragments:
         require(fragment in launcher, f"launcher omitted contract fragment: {fragment!r}")
 
 
-def validate_assets() -> dict:
-    require(not os.path.lexists(OUTPUT_DIR), "canonical output already exists")
-    bundle_stat = os.stat(BUNDLE, follow_symlinks=False)
+def validate_assets(
+    output_dir: str = OUTPUT_DIR,
+    *,
+    bundle: str = BUNDLE,
+    commit: str = COMMIT,
+) -> dict:
+    require(not os.path.lexists(output_dir), "canonical output already exists")
+    bundle_stat = os.stat(bundle, follow_symlinks=False)
     require(stat.S_ISREG(bundle_stat.st_mode), "source bundle is not regular")
-    heads = str(git_stdout("bundle", "list-heads", BUNDLE, text=True)).splitlines()
+    heads = str(git_stdout("bundle", "list-heads", bundle, text=True)).splitlines()
     require(
-        heads == [f"{COMMIT} HEAD"],
+        heads == [f"{commit} HEAD"],
         f"source bundle heads drift: {heads}",
     )
     h5_files = list(pathlib.Path(DATASET_ROOT).rglob("*.h5"))
@@ -496,12 +519,58 @@ def validate_prelaunch() -> dict:
     require(real.get("path") == str(REAL_DATA_PREFLIGHT), "real-data preflight path drift")
     terminal = read_json(REAL_DATA_PREFLIGHT)
     require(
-        terminal.get("conclusion", {}).get("status") == "PASS",
-        "preflight terminal reconciliation drift",
+        terminal.get("schema")
+        == "fastwam-table11safe-preflight-terminal-reconciliation-v1",
+        "preflight reconciliation schema drift",
     )
     require(
-        terminal.get("scheduler_terminal", {}).get("status") == "Succeeded",
+        terminal.get("run_id") == REAL_DATA_PREFLIGHT_RUN_ID,
+        "preflight reconciliation run_id drift",
+    )
+    require(
+        terminal.get("attempt_id") == REAL_DATA_PREFLIGHT_ATTEMPT_ID,
+        "preflight reconciliation attempt drift",
+    )
+    require(terminal.get("code_commit") == COMMIT, "preflight reconciliation commit drift")
+    require(terminal.get("source_bundle") == BUNDLE, "preflight reconciliation bundle drift")
+    require(
+        terminal.get("output_dir") == REAL_DATA_PREFLIGHT_OUTPUT_DIR,
+        "preflight reconciliation output drift",
+    )
+    require(
+        terminal.get("conclusion")
+        == {
+            "status": "PASS",
+            "initialization": "official-generic-pretrained-model-weights",
+            "optimizer": "fresh",
+            "scheduler": "fresh",
+            "initial_global_step": 0,
+            "final_global_step": 1,
+            "optimizer_steps_this_run": 1,
+        },
+        "preflight terminal reconciliation drift",
+    )
+    scheduler = terminal.get("scheduler_terminal") or {}
+    require(
+        scheduler.get("status") == "Succeeded",
         "preflight scheduler terminal status drift",
+    )
+    require(bool(scheduler.get("job_id")), "preflight scheduler job_id absent")
+    output = terminal.get("output_validation") or {}
+    output_terminal = output.get("terminal") or {}
+    require(
+        output_terminal.get("status") == "PASS"
+        and output_terminal.get("run_id") == REAL_DATA_PREFLIGHT_RUN_ID
+        and output_terminal.get("attempt_id") == REAL_DATA_PREFLIGHT_ATTEMPT_ID
+        and output_terminal.get("initialization")
+        == "official-generic-pretrained-model-weights"
+        and output_terminal.get("optimizer") == "fresh"
+        and output_terminal.get("scheduler") == "fresh"
+        and output_terminal.get("initial_global_step") == 0
+        and output_terminal.get("final_global_step") == 1
+        and output_terminal.get("optimizer_steps_this_run") == 1
+        and output_terminal.get("world_size") == 8,
+        "preflight output validation drift",
     )
     return prelaunch
 
