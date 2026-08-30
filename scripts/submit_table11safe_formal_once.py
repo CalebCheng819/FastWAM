@@ -22,30 +22,30 @@ from alibabacloud_pai_dlc20201203.client import Client
 from alibabacloud_tea_openapi.models import Config
 
 
-RUN_ID = "fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829"
-ATTEMPT_ID = "attempt-r1-20260829"
+RUN_ID = "fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r2-20260831"
+ATTEMPT_ID = "attempt-r2-20260831"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-COMMIT = "8ac5a8dc707084db406f99874d4123749401819a"
+COMMIT = "d20e5d6d98537b6e8ee6bdc50a9defb08307f77a"
 IMAGE = (
     "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/"
     "pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
 )
 LAUNCH_ROOT = pathlib.Path(f"/oss-chengjuntao/artifacts/{RUN_ID}-launch-control")
-DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r1.json"
-PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r1.json"
-AUDIT_RECORD = LAUNCH_ROOT / "submission-formal-3x8-r1-audit.json"
-RECEIPT = LAUNCH_ROOT / "submission-formal-3x8-r1-receipt.json"
-REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r6.json"
+DRY_REQUEST = LAUNCH_ROOT / "rendered-request-r2.json"
+PRELAUNCH = LAUNCH_ROOT / "prelaunch-formal-3x8-r2.json"
+AUDIT_RECORD = LAUNCH_ROOT / "submission-formal-3x8-r2-audit.json"
+RECEIPT = LAUNCH_ROOT / "submission-formal-3x8-r2-receipt.json"
+REAL_DATA_PREFLIGHT = LAUNCH_ROOT / "preflight-terminal-reconciliation-r7.json"
 OUTPUT_DIR = f"/oss-chengjuntao/artifacts/{RUN_ID}"
 REAL_DATA_PREFLIGHT_RUN_ID = (
-    "fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r6-20260830"
+    "fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r7-20260831"
 )
-REAL_DATA_PREFLIGHT_ATTEMPT_ID = "attempt-r6-20260830"
+REAL_DATA_PREFLIGHT_ATTEMPT_ID = "attempt-r7-20260831"
 REAL_DATA_PREFLIGHT_OUTPUT_DIR = (
     f"/oss-chengjuntao/artifacts/{REAL_DATA_PREFLIGHT_RUN_ID}"
 )
-BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r7-20260830.bundle")
+BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r8-20260831.bundle")
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
     "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
@@ -146,7 +146,7 @@ EXPECTED_SETTINGS = {
         "initialization": "official-generic-pretrained-model-weights",
         "optimizer": "fresh",
         "provenance": "stat-cmp-no-new-hash",
-        "schedule": "optimizer-0-to-50000-save-5000",
+        "schedule": "optimizer-0-to-50000-save-1000",
         "topology": "3x8-world24",
     },
 }
