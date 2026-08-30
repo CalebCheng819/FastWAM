@@ -413,6 +413,10 @@ class Table11LauncherTests(unittest.TestCase):
         self.assertIn('"optimizer": "fresh"', source)
         self.assertIn('"scheduler": "fresh"', source)
         self.assertIn('"sample_budget_equivalent": "false"', source)
+        self.assertIn(
+            '"gaussian_cache_dir": common.GAUSSIAN_CACHE_DIR,', source
+        )
+        self.assertNotIn('"gaussian_cache_dir": common.GAUSSIAN_CACHE,', source)
 
     def test_renderer_contains_no_cloud_sdk_call(self) -> None:
         source = RENDERER.read_text(encoding="utf-8")

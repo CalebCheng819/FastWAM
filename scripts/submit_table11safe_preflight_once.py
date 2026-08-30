@@ -343,7 +343,7 @@ def validate_output() -> dict:
             "save_every": "0",
             "checkpoint_steps": "none",
             "dataset_root": common.DATASET_ROOT,
-            "gaussian_cache_dir": common.GAUSSIAN_CACHE,
+            "gaussian_cache_dir": common.GAUSSIAN_CACHE_DIR,
         },
         "preflight reservation drift",
     )
