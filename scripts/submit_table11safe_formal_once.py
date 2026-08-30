@@ -46,6 +46,7 @@ REAL_DATA_PREFLIGHT_OUTPUT_DIR = (
     f"/oss-chengjuntao/artifacts/{REAL_DATA_PREFLIGHT_RUN_ID}"
 )
 BUNDLE = str(LAUNCH_ROOT / "fastwam-table11safe-scratch50k-source-r9-20260831.bundle")
+BUNDLE_REF = "refs/bundles/fastwam-table11safe-scratch50k-r9"
 DATASET_ROOT = (
     "/oss-chengjuntao/robofactory/table/"
     "robofactory-table-11task-200each-h256-2g-stateful-safe-r3-20260827/tasks"
@@ -458,6 +459,13 @@ def validate_embedded_launcher(
         require(fragment in launcher, f"launcher omitted contract fragment: {fragment!r}")
 
 
+def validate_source_bundle_heads(heads: list[str], commit: str) -> None:
+    require(
+        heads == [f"{commit} {BUNDLE_REF}"],
+        f"source bundle heads drift: {heads}",
+    )
+
+
 def validate_assets(
     output_dir: str = OUTPUT_DIR,
     *,
@@ -468,10 +476,7 @@ def validate_assets(
     bundle_stat = os.stat(bundle, follow_symlinks=False)
     require(stat.S_ISREG(bundle_stat.st_mode), "source bundle is not regular")
     heads = str(git_stdout("bundle", "list-heads", bundle, text=True)).splitlines()
-    require(
-        heads == [f"{commit} HEAD"],
-        f"source bundle heads drift: {heads}",
-    )
+    validate_source_bundle_heads(heads, commit)
     h5_files = list(pathlib.Path(DATASET_ROOT).rglob("*.h5"))
     require(len(h5_files) == 11, f"expected 11 H5 files, got {len(h5_files)}")
     require(pathlib.Path(STATS_PATH).is_file(), "stats file is absent")

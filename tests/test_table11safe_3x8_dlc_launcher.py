@@ -392,6 +392,40 @@ class Table11LauncherTests(unittest.TestCase):
         self.assertIn("optimizer-0-to-50000-save-1000", source)
         self.assertNotIn("optimizer-0-to-50000-save-5000", source)
 
+    def test_formal_controller_accepts_only_frozen_bundle_ref_and_commit(self) -> None:
+        source = SUBMITTER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        helper = next(
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "validate_source_bundle_heads"
+        )
+        namespace = {
+            "BUNDLE_REF": "refs/bundles/fastwam-table11safe-scratch50k-r9",
+            "require": lambda condition, message: (
+                None
+                if condition
+                else (_ for _ in ()).throw(RuntimeError(message))
+            ),
+        }
+        module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+        exec(compile(module, str(SUBMITTER), "exec"), namespace)
+        validate = namespace["validate_source_bundle_heads"]
+        commit = "7a99d93dcc14cd8b8afeb962b589b67c79ea89e1"
+        frozen_ref = "refs/bundles/fastwam-table11safe-scratch50k-r9"
+
+        validate([f"{commit} {frozen_ref}"], commit)
+        rejected = (
+            [f"{commit} HEAD"],
+            [f"{'0' * 40} {frozen_ref}"],
+            [f"{commit} refs/bundles/unexpected"],
+            [f"{commit} {frozen_ref}", f"{commit} HEAD"],
+        )
+        for heads in rejected:
+            with self.subTest(heads=heads), self.assertRaises(RuntimeError):
+                validate(heads, commit)
+
     def test_dataloader_runtime_diagnostics_are_enabled(self) -> None:
         source = (REPO / "src" / "fastwam" / "trainer.py").read_text(
             encoding="utf-8"

@@ -37,6 +37,13 @@
   previously isolated local permission/optional-`boto3` environment cases.
 - Immutable source and refreshed controller bindings are being frozen; neither
   the 1x8 preflight nor the 3x8 formal job has been submitted yet.
+- The first R8 preflight audit stopped before its audit/latch/ACK/output or any
+  cloud mutation because the controller expected the bundle head name `HEAD`,
+  while the immutable bundle deliberately exposes only
+  `refs/bundles/fastwam-table11safe-scratch50k-r9`. The controller now accepts
+  exactly that frozen ref at exactly the frozen runtime commit and rejects
+  `HEAD`, alternate refs, alternate commits, and multiple heads; the focused
+  controller suite passes (`15 passed`, `4 subtests passed`).
 - Frozen runtime/source commit: `7a99d93dcc14cd8b8afeb962b589b67c79ea89e1`.
 - Rotated preflight identity: `fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r8-20260831`; source bundle target: `fastwam-table11safe-scratch50k-source-r9-20260831.bundle`.
 - The exact Experiment ID resolves to the unique Notion page above. The page is `Planned`, with no Job ID or runtime/result fields populated.
