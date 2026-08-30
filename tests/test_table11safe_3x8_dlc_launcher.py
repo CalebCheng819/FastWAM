@@ -16,6 +16,7 @@ LAUNCHER = REPO / "scripts" / "launch_table11safe_3x8_dlc.sh"
 RENDERER = REPO / "scripts" / "render_table11safe_3x8_dlc_job.py"
 SUBMITTER = REPO / "scripts" / "submit_table11safe_formal_once.py"
 PREFLIGHT_SUBMITTER = REPO / "scripts" / "submit_table11safe_preflight_once.py"
+TRAINER = REPO / "src" / "fastwam" / "trainer.py"
 
 
 class Table11LauncherTests(unittest.TestCase):
@@ -177,6 +178,15 @@ class Table11LauncherTests(unittest.TestCase):
     def test_preflight_publication_is_fail_closed_and_complete_last(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")
         self.assertIn('pipeline_status=("${PIPESTATUS[@]}")', source)
+        self.assertIn(
+            'grep -Fq -- "FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true"',
+            source,
+        )
+        self.assertNotIn(
+            'grep -Fq -- "Loading weight checkpoint before optimizer/DeepSpeed '
+            'initialization: ${LOCAL_WEIGHT}"',
+            source,
+        )
         terminal_index = source.index("publish(terminal_path, terminal)")
         allowlist_index = source.index("actual_before_complete =")
         complete_index = source.index("publish(complete_path, complete)")
@@ -195,6 +205,20 @@ class Table11LauncherTests(unittest.TestCase):
         self.assertIn('"final_global_step": 1', source)
         self.assertIn('"optimizer": "fresh"', source)
         self.assertIn('"scheduler": "fresh"', source)
+
+    def test_generic_base_receipt_is_emitted_after_successful_weight_load(self) -> None:
+        source = TRAINER.read_text(encoding="utf-8")
+        load_index = source.index(
+            "self.model.load_checkpoint(str(resume_path), optimizer=None)"
+        )
+        receipt_index = source.index(
+            'logger.warning("FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true")'
+        )
+        fresh_optimizer_index = source.index(
+            '"optimizer/scheduler/step are intentionally not restored."'
+        )
+        self.assertLess(load_index, receipt_index)
+        self.assertLess(receipt_index, fresh_optimizer_index)
 
     def test_launcher_exports_generic_runtime_attempt_contract(self) -> None:
         source = LAUNCHER.read_text(encoding="utf-8")

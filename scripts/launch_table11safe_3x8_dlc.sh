@@ -598,7 +598,7 @@ set -e
 [[ "${command_status}" == "0" ]] || die "one-step training command failed with ${command_status}"
 [[ "${tee_status}" == "0" ]] || die "one-step log capture failed with ${tee_status}"
 [[ -f "${PREFLIGHT_LOG}" && ! -L "${PREFLIGHT_LOG}" ]] || die "preflight log is not a regular file"
-grep -Fq -- "Loading weight checkpoint before optimizer/DeepSpeed initialization: ${LOCAL_WEIGHT}" "${PREFLIGHT_LOG}" || \
+grep -Fq -- "FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true" "${PREFLIGHT_LOG}" || \
   die "generic base checkpoint load was not observed"
 grep -Fq -- "optimizer/scheduler/step are intentionally not restored." "${PREFLIGHT_LOG}" || \
   die "fresh optimizer/scheduler declaration was not observed"

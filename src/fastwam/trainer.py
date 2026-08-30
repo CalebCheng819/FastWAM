@@ -1697,6 +1697,11 @@ class Wan22Trainer:
         )
         self.model.load_checkpoint(str(resume_path), optimizer=None)
         self._weight_checkpoint_loaded_before_prepare = True
+        # Keep this marker deliberately short and path-free. Rich may wrap the
+        # preceding human-readable path across physical log lines, while the
+        # formal scratch preflight needs one stable machine-readable receipt
+        # emitted only after the checkpoint loader has returned successfully.
+        logger.warning("FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true")
         logger.warning(
             "Loaded .pt weights before ZeRO master construction; "
             "optimizer/scheduler/step are intentionally not restored."
