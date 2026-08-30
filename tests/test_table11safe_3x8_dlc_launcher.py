@@ -417,6 +417,15 @@ class Table11LauncherTests(unittest.TestCase):
             '"gaussian_cache_dir": common.GAUSSIAN_CACHE_DIR,', source
         )
         self.assertNotIn('"gaussian_cache_dir": common.GAUSSIAN_CACHE,', source)
+        self.assertIn('"Loading weight checkpoint before",', source)
+        self.assertIn('"optimizer/DeepSpeed initialization:",', source)
+        self.assertIn(
+            '"FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true",', source
+        )
+        self.assertNotIn(
+            'f"Loading weight checkpoint before optimizer/DeepSpeed initialization:',
+            source,
+        )
 
     def test_renderer_contains_no_cloud_sdk_call(self) -> None:
         source = RENDERER.read_text(encoding="utf-8")

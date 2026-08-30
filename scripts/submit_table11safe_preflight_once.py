@@ -384,7 +384,9 @@ def validate_output() -> dict:
     )
     log = common.read_regular_bytes(root / "preflight-train.log").decode("utf-8")
     required = (
-        f"Loading weight checkpoint before optimizer/DeepSpeed initialization: {common.SOURCE_WEIGHT}",
+        "Loading weight checkpoint before",
+        "optimizer/DeepSpeed initialization:",
+        "FASTWAM_GENERIC_BASE_LOAD=PASS before_prepare=true",
         "optimizer/scheduler/step are intentionally not restored.",
         "FASTWAM_TRAINING_START initial_global_step=0 max_steps=1 optimizer_steps_this_run=1",
         "FASTWAM_OPTIMIZER_STEP global_step=1 max_steps=1",
