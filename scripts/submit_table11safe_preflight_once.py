@@ -17,7 +17,7 @@ import submit_table11safe_formal_once as common
 
 RUN_ID = common.REAL_DATA_PREFLIGHT_RUN_ID
 ATTEMPT_ID = common.REAL_DATA_PREFLIGHT_ATTEMPT_ID
-COMMIT = "2fe36b7c3985153de2f91a8c3d76a37985474674"
+COMMIT = "167e12bc551761277cf76f194bd66db25aae8dca"
 LAUNCH_ROOT = common.LAUNCH_ROOT
 DRY_REQUEST = LAUNCH_ROOT / "rendered-request-preflight-r1.json"
 AUDIT_RECORD = LAUNCH_ROOT / "submission-preflight-r1-audit.json"

@@ -26,7 +26,7 @@ RUN_ID = "fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829"
 ATTEMPT_ID = "attempt-r1-20260829"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
-COMMIT = "2ee842ade870b5d1f211f125758d9120949dfba6"
+COMMIT = "167e12bc551761277cf76f194bd66db25aae8dca"
 IMAGE = (
     "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/"
     "pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
