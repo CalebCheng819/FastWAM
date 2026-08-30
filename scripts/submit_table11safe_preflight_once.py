@@ -226,19 +226,86 @@ def immutable_file(path: pathlib.Path) -> os.stat_result:
     return current
 
 
+def immutable_dir(path: pathlib.Path) -> os.stat_result:
+    current = os.stat(path, follow_symlinks=False)
+    common.require(stat.S_ISDIR(current.st_mode), f"not directory: {path}")
+    return current
+
+
 def validate_output() -> dict:
     root = pathlib.Path(OUTPUT_DIR)
-    current = os.stat(root, follow_symlinks=False)
-    common.require(stat.S_ISDIR(current.st_mode), "preflight output is not a directory")
+    immutable_dir(root)
+    ready_name = f".config.yaml.ready.stat_cmp.{ATTEMPT_ID}"
     expected = {
         ".table11-run-reservation",
+        ready_name,
+        "checkpoints",
+        "config.yaml",
+        "eval",
         "preflight-train.log",
         "terminal.json",
         "COMPLETE",
     }
     common.require({item.name for item in root.iterdir()} == expected, "output allowlist drift")
-    for name in expected:
+    for name in expected - {"checkpoints", "eval"}:
         immutable_file(root / name)
+    immutable_dir(root / "checkpoints")
+    immutable_dir(root / "checkpoints" / "state")
+    immutable_dir(root / "checkpoints" / "weights")
+    immutable_dir(root / "eval")
+    common.require(
+        {item.name for item in (root / "checkpoints").iterdir()}
+        == {"state", "weights"},
+        "checkpoint allowlist drift",
+    )
+    for empty_dir in (
+        root / "checkpoints" / "state",
+        root / "checkpoints" / "weights",
+        root / "eval",
+    ):
+        common.require(not any(empty_dir.iterdir()), f"directory not empty: {empty_dir}")
+    config_stat = immutable_file(root / "config.yaml")
+    common.require(config_stat.st_size > 0, "runtime config is empty")
+    ready = common.read_json(root / ready_name)
+    common.require(
+        set(ready)
+        == {
+            "schema",
+            "attempt_id",
+            "world_size",
+            "path",
+            "bytes",
+            "mtime_ns",
+            "count",
+        },
+        "runtime config marker schema drift",
+    )
+    common.require(
+        {
+            key: ready.get(key)
+            for key in (
+                "schema",
+                "attempt_id",
+                "world_size",
+                "path",
+                "bytes",
+                "mtime_ns",
+                "count",
+            )
+        }
+        == {
+            "schema": "fastwam-runtime-file-barrier-stat-cmp-v2",
+            "attempt_id": ATTEMPT_ID,
+            "world_size": 8,
+            "path": str((root / "config.yaml").resolve()),
+            "bytes": config_stat.st_size,
+            "mtime_ns": config_stat.st_mtime_ns,
+            "count": 1,
+        },
+        "runtime config marker contract drift",
+    )
+    for key in ("world_size", "bytes", "count", "mtime_ns"):
+        common.require(type(ready.get(key)) is int, f"runtime marker {key} type drift")
     reservation_text = common.read_regular_bytes(
         root / ".table11-run-reservation"
     ).decode("utf-8")
@@ -333,6 +400,8 @@ def validate_output() -> dict:
         "terminal": terminal,
         "complete": complete,
         "output_entries": sorted(expected),
+        "empty_directories": ["checkpoints/state", "checkpoints/weights", "eval"],
+        "runtime_config_marker": ready,
         "reservation": reservation,
         "log_bytes": immutable_file(root / "preflight-train.log").st_size,
     }

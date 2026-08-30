@@ -197,15 +197,16 @@ class Table11LauncherTests(unittest.TestCase):
             source,
         )
         terminal_index = source.index("publish(terminal_path, terminal)")
-        allowlist_index = source.index("actual_before_complete =")
+        allowlist_index = source.index("validate_layout(include_complete=False)")
         complete_index = source.index("publish(complete_path, complete)")
-        final_allowlist_index = source.index(
-            'expected = {".table11-run-reservation", "preflight-train.log", '
-            '"terminal.json", "COMPLETE"}'
-        )
+        final_allowlist_index = source.index("validate_layout(include_complete=True)")
         self.assertLess(terminal_index, allowlist_index)
         self.assertLess(allowlist_index, complete_index)
         self.assertLess(complete_index, final_allowlist_index)
+        self.assertIn('ready_name = f".config.yaml.ready.stat_cmp.{attempt_id}"', source)
+        self.assertIn('checkpoint_children != {"state", "weights"}', source)
+        self.assertIn('raise SystemExit(f"preflight directory is not empty:', source)
+        self.assertIn('"schema": "fastwam-runtime-file-barrier-stat-cmp-v2"', source)
         self.assertIn(
             '"schema": "fastwam-table11safe-realdata-scratch-preflight-terminal-v1"',
             source,

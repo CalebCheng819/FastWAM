@@ -621,6 +621,7 @@ FASTWAM_TABLE11_PREFLIGHT_OUTPUT_DIR="${OUTPUT_DIR}" \
 import datetime as dt
 import json
 import os
+import stat
 from pathlib import Path
 
 
@@ -646,6 +647,107 @@ def publish(path: Path, value: dict) -> None:
         os.fsync(parent_fd)
     finally:
         os.close(parent_fd)
+
+
+def require_regular(path: Path) -> os.stat_result:
+    current = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+        raise SystemExit(f"preflight output is not a single-link regular file: {path}")
+    return current
+
+
+def require_directory(path: Path) -> None:
+    current = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(current.st_mode):
+        raise SystemExit(f"preflight output is not a directory: {path}")
+
+
+def validate_layout(*, include_complete: bool) -> None:
+    ready_name = f".config.yaml.ready.stat_cmp.{attempt_id}"
+    expected = {
+        ".table11-run-reservation",
+        ready_name,
+        "checkpoints",
+        "config.yaml",
+        "eval",
+        "preflight-train.log",
+        "terminal.json",
+    }
+    if include_complete:
+        expected.add("COMPLETE")
+    actual = {path.name for path in output_dir.iterdir()}
+    if actual != expected:
+        phase = "output" if include_complete else "pre-COMPLETE"
+        raise SystemExit(f"preflight {phase} allowlist drift: {sorted(actual)}")
+
+    require_directory(output_dir / "checkpoints")
+    require_directory(output_dir / "checkpoints" / "state")
+    require_directory(output_dir / "checkpoints" / "weights")
+    require_directory(output_dir / "eval")
+    checkpoint_children = {
+        path.name for path in (output_dir / "checkpoints").iterdir()
+    }
+    if checkpoint_children != {"state", "weights"}:
+        raise SystemExit(
+            f"preflight checkpoint allowlist drift: {sorted(checkpoint_children)}"
+        )
+    for empty_dir in (
+        output_dir / "checkpoints" / "state",
+        output_dir / "checkpoints" / "weights",
+        output_dir / "eval",
+    ):
+        if any(empty_dir.iterdir()):
+            raise SystemExit(f"preflight directory is not empty: {empty_dir}")
+
+    regular_names = {
+        ".table11-run-reservation",
+        ready_name,
+        "config.yaml",
+        "preflight-train.log",
+        "terminal.json",
+    }
+    if include_complete:
+        regular_names.add("COMPLETE")
+    for name in regular_names:
+        require_regular(output_dir / name)
+
+    config_path = output_dir / "config.yaml"
+    config_stat = require_regular(config_path)
+    if config_stat.st_size <= 0:
+        raise SystemExit("preflight runtime config is empty")
+    ready_path = output_dir / ready_name
+    try:
+        ready = json.loads(ready_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit("preflight runtime config marker is invalid JSON") from error
+    expected_ready_keys = {
+        "schema",
+        "attempt_id",
+        "world_size",
+        "path",
+        "bytes",
+        "mtime_ns",
+        "count",
+    }
+    if not isinstance(ready, dict) or set(ready) != expected_ready_keys:
+        raise SystemExit("preflight runtime config marker schema drift")
+    expected_ready = {
+        "schema": "fastwam-runtime-file-barrier-stat-cmp-v2",
+        "attempt_id": attempt_id,
+        "world_size": 8,
+        "path": str(config_path.resolve()),
+        "bytes": config_stat.st_size,
+        "mtime_ns": config_stat.st_mtime_ns,
+        "count": 1,
+    }
+    if (
+        any(ready.get(key) != value for key, value in expected_ready.items())
+        or type(ready.get("world_size")) is not int
+        or type(ready.get("bytes")) is not int
+        or type(ready.get("count")) is not int
+        or type(ready.get("mtime_ns")) is not int
+    ):
+        raise SystemExit("preflight runtime config marker contract drift")
 
 
 run_id = os.environ["FASTWAM_TABLE11_PREFLIGHT_RUN_ID"]
@@ -676,16 +778,7 @@ terminal = {
     "completed_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
 }
 publish(terminal_path, terminal)
-expected_before_complete = {
-    ".table11-run-reservation",
-    "preflight-train.log",
-    "terminal.json",
-}
-actual_before_complete = {path.name for path in output_dir.iterdir()}
-if actual_before_complete != expected_before_complete:
-    raise SystemExit(
-        f"preflight pre-COMPLETE allowlist drift: {sorted(actual_before_complete)}"
-    )
+validate_layout(include_complete=False)
 complete = {
     "schema": "fastwam-table11safe-realdata-scratch-preflight-complete-v1",
     "status": "PASS",
@@ -694,9 +787,6 @@ complete = {
     "terminal": str(terminal_path),
 }
 publish(complete_path, complete)
-expected = {".table11-run-reservation", "preflight-train.log", "terminal.json", "COMPLETE"}
-actual = {path.name for path in output_dir.iterdir()}
-if actual != expected:
-    raise SystemExit(f"preflight output allowlist drift: {sorted(actual)}")
+validate_layout(include_complete=True)
 PY
 printf 'table11 real-data scratch preflight: PASS run=%s step=0->1\n' "${RUN_ID}"
