@@ -1,6 +1,7 @@
 # ITER-2026-08-31-FASTWAM-TABLE11SAFE-SCRATCH50K-24G-R2-001
 
-- Experiment: `FASTWAM-MR-TABLE11SAFE-VG1H1GAU1-SCRATCH50K-S42-24G-R2-20260831`
+- Experiment: `FASTWAM-TABLE11SAFE-VG1H1GAU1-SCRATCH50K-S42-24G-R2-20260831`
+- Notion page: `3cc21e77-89cc-8102-b55e-ed80c242e465`
 - Base revision: `3b594a9`
 - Parent failed run: `fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829` / `dlct0cxzes6kj364`
 - Failure boundary: DataLoader worker PID 8728 received `SIGBUS` at step 1630; no durable training checkpoint or terminal completion marker was published.
@@ -22,9 +23,11 @@
 
 ## Status
 
-- Phase: `CODE_VALIDATED`
+- Phase: `SOURCE_PUBLISHED`
 - Chronicle marker written and strictly read back before code mutation.
 - Exact configuration semantic diff passed: model/defaults, data wiring, batch, learning rate, schedule, objective, world size, and 50,000-step target are unchanged.
 - Validation passed: `316 passed, 3 deselected, 2 subtests passed`; the three deselections are environment-only checks requiring unavailable write permissions or `boto3`. Three additional collection modules require unavailable local `h5py`; the directly relevant controller/trainer suite passed `64/64`.
 - Python compile, Bash syntax, and whitespace checks passed.
-- No code commit, source publication, preflight submission, formal CreateJob, or optimizer step yet.
+- Runtime/source commit `d20e5d6d98537b6e8ee6bdc50a9defb08307f77a` and controller/record commit `1432c3dcab65e2db782b6f3b13fb0024b694a204` are cleanly published on the isolated R2 branch.
+- The exact Experiment ID resolves to the unique Notion page above. The page is `Planned`, with no Job ID or runtime/result fields populated.
+- No preflight submission, formal CreateJob, or optimizer step has occurred yet.
