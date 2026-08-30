@@ -27,7 +27,7 @@
 
 ## Status
 
-- Phase: `SOURCE_FREEZE_IN_PROGRESS`
+- Phase: `RUNNING`
 - Chronicle marker written and strictly read back before code mutation.
 - Exact configuration semantic diff passed: model/defaults, data wiring, batch, learning rate, schedule, objective, world size, and 50,000-step target are unchanged.
 - Rolling-retention target tests passed (`37 passed` across retention, checkpoint
@@ -35,8 +35,8 @@
   (`320 passed`, `3 deselected`, `2 subtests passed`); compileall, launcher
   `bash -n`, and `git diff --check` also passed. The three deselections are the
   previously isolated local permission/optional-`boto3` environment cases.
-- Immutable source and refreshed controller bindings are being frozen; neither
-  the 1x8 preflight nor the 3x8 formal job has been submitted yet.
+- Immutable source and refreshed controller bindings passed their source,
+  configuration, and exactly-once launch gates.
 - The first R8 preflight audit stopped before its audit/latch/ACK/output or any
   cloud mutation because the controller expected the bundle head name `HEAD`,
   while the immutable bundle deliberately exposes only
@@ -46,5 +46,31 @@
   controller suite passes (`15 passed`, `4 subtests passed`).
 - Frozen runtime/source commit: `7a99d93dcc14cd8b8afeb962b589b67c79ea89e1`.
 - Rotated preflight identity: `fastwam-table11safe-vg1h1gau1-scratch-preflight-s42-8g-r8-20260831`; source bundle target: `fastwam-table11safe-scratch50k-source-r9-20260831.bundle`.
-- The exact Experiment ID resolves to the unique Notion page above. The page is `Planned`, with no Job ID or runtime/result fields populated.
-- No preflight submission, formal CreateJob, or optimizer step has occurred yet.
+- The 1-worker x 8-GPU step-0-to-step-1 preflight completed successfully as
+  DLC job `dlc1baelu2qkl1uw` before formal submission.
+- The formal 3-worker x 8-GPU job was submitted exactly once as
+  `dlcx57qq2xf7sn7p` at Priority 7. The permanent submission receipt records
+  CreateJob RequestId `01A0548C-F657-5A2B-B78C-18666BAE1072`; this identity
+  must never be retried or recreated.
+- Runtime source was bound to commit
+  `7a99d93dcc14cd8b8afeb962b589b67c79ea89e1`; the submission controller was
+  bound to commit `3823452bb4b44d9b96afb0a74ca72dcefc66aa56`.
+- Live runtime gates passed on all 3 nodes / 24 ranks: distributed CUDA
+  validation, staged source/config barrier, joint-safe Table11 train and val
+  indexing, and the official generic `libero_uncond_2cam224.pt` weight-only
+  initialization. The run then created optimizer state from scratch and
+  announced `initial_global_step=0`, `max_steps=50000`, and
+  `optimizer_steps_this_run=50000`.
+- The effective rank-0 DataLoader contract was logged as `num_workers=2`,
+  `prefetch_factor=1`, `persistent_workers=False`, and `pin_memory=True`; worker
+  IDs 0 and 1 both started successfully.
+- First confirmed optimizer progress: `2026-08-31T05:34:25+08:00`, epoch 0,
+  step `10/50000`, total loss `2.4186`, action loss `2.1234`, video loss
+  `0.2952`, gradient norm `7.3022`, and learning rate `4.40e-07`.
+- At that observation the provider and all three pods were `Running`, Priority
+  remained 7, pod UIDs were unchanged, `RestartTimes` and `RestartRecord` were
+  empty, and no Bus error, OOM, traceback, or `ChildFailedError` was present.
+- This is verified live optimizer progress, not a durable checkpoint or terminal
+  success. Recoverability first becomes provable after the complete step-1000
+  checkpoint tuple is published and independently read back; terminal success
+  still requires provider success plus the formal completion evidence.
