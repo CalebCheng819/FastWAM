@@ -346,6 +346,10 @@ class Table11LauncherTests(unittest.TestCase):
             request = json.loads(output.read_text(encoding="utf-8"))["request"]
             self.assertEqual(request["Priority"], 7)
             self.assertEqual(request["JobSpecs"][0]["PodCount"], 1)
+            self.assertEqual(
+                request["Settings"]["Tags"]["schedule"],
+                "optimizer-0-to-1-no-checkpoint",
+            )
             self.assertEqual(request["Envs"]["FASTWAM_TABLE11_RUN_MODE"], "preflight-one-step")
             self.assertIn("optimizer step 0 to 1", request["Description"])
 
@@ -380,6 +384,8 @@ class Table11LauncherTests(unittest.TestCase):
         self.assertIn("persistent_workers: false", source)
         self.assertIn("save_every: 1000", source)
         self.assertIn("weights_only_warm_start:\n  enabled: false", source)
+        self.assertIn("optimizer-0-to-50000-save-1000", source)
+        self.assertNotIn("optimizer-0-to-50000-save-5000", source)
 
     def test_dataloader_runtime_diagnostics_are_enabled(self) -> None:
         source = (REPO / "src" / "fastwam" / "trainer.py").read_text(

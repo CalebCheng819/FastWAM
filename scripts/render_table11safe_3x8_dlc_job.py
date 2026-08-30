@@ -260,7 +260,7 @@ def main() -> int:
                 "schedule": (
                     "optimizer-0-to-1-no-checkpoint"
                     if args.preflight_one_step
-                    else "optimizer-0-to-50000-save-5000"
+                    else "optimizer-0-to-50000-save-1000"
                 ),
             },
         },

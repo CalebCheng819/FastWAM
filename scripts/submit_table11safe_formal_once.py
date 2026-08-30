@@ -445,7 +445,12 @@ def validate_embedded_launcher(
         b'export FASTWAM_ATTEMPT_ID="${ATTEMPT_ID}"',
     ]
     if require_formal_schedule:
-        fragments.append(b"checkpoints=5000..50000/5000")
+        fragments.extend(
+            [
+                b'"save_every": 1000',
+                b"checkpoint_steps=1000,2000,3000,4000,5000",
+            ]
+        )
     for fragment in fragments:
         require(fragment in launcher, f"launcher omitted contract fragment: {fragment!r}")
 
