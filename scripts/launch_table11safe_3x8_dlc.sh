@@ -364,14 +364,16 @@ expected_world = int(os.environ["FASTWAM_TABLE11_CONFIG_EXPECTED_WORLD"])
 
 expected = {
     "batch_size": 1,
-    "num_workers": 8,
+    "num_workers": 2,
+    "prefetch_factor": 1,
+    "persistent_workers": False,
     "gradient_accumulation_steps": 1,
     "learning_rate": 1.0e-4,
     "weight_decay": 1.0e-2,
     "lr_scheduler_type": "cosine",
     "max_steps": 50000,
     "run_initial_global_step": 0,
-    "save_every": 5000,
+    "save_every": 1000,
     "eval_every": 5000,
     "checkpoint_state_kind": "full",
     "save_training_state": True,
@@ -472,14 +474,14 @@ sample_budget_equivalent=$([[ "${RUN_MODE}" == "formal" ]] && printf true || pri
 learning_rate=0.0001
 lr_scheduler=cosine
 scheduler_warmup_steps=2250
-save_every=5000
-checkpoint_steps=5000,10000,15000,20000,25000,30000,35000,40000,45000,50000
+save_every=1000
+checkpoint_steps=1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000,16000,17000,18000,19000,20000,21000,22000,23000,24000,25000,26000,27000,28000,29000,30000,31000,32000,33000,34000,35000,36000,37000,38000,39000,40000,41000,42000,43000,44000,45000,46000,47000,48000,49000,50000
 dataset_root=${DATASET_ROOT}
 gaussian_cache_dir=${GAUSSIAN_CACHE_DIR}
 "
 if [[ "${RUN_MODE}" == "preflight-one-step" ]]; then
-  RESERVATION_BODY="${RESERVATION_BODY/save_every=5000/save_every=0}"
-  RESERVATION_BODY="${RESERVATION_BODY/checkpoint_steps=5000,10000,15000,20000,25000,30000,35000,40000,45000,50000/checkpoint_steps=none}"
+  RESERVATION_BODY="${RESERVATION_BODY/save_every=1000/save_every=0}"
+  RESERVATION_BODY="${RESERVATION_BODY/checkpoint_steps=1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000,16000,17000,18000,19000,20000,21000,22000,23000,24000,25000,26000,27000,28000,29000,30000,31000,32000,33000,34000,35000,36000,37000,38000,39000,40000,41000,42000,43000,44000,45000,46000,47000,48000,49000,50000/checkpoint_steps=none}"
 fi
 
 if [[ "${DRY_RUN}" == "0" ]]; then

@@ -2,8 +2,10 @@ import hashlib
 import inspect
 import json
 import logging
+import multiprocessing
 import os
 import re
+import resource
 import secrets
 import shutil
 import subprocess
@@ -53,6 +55,23 @@ from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_s
 logger = get_logger(__name__)
 
 
+class _DiagnosticWorkerInit:
+    """Pickle-safe worker initializer that preserves seeding and logs startup."""
+
+    def __init__(self, seed_worker, process_index: int):
+        self.seed_worker = seed_worker
+        self.process_index = int(process_index)
+
+    def __call__(self, worker_id: int):
+        self.seed_worker(worker_id)
+        logger.info(
+            "DataLoader worker started: process_index=%d worker_id=%d pid=%d",
+            self.process_index,
+            worker_id,
+            os.getpid(),
+        )
+
+
 class Wan22Trainer:
     def __init__(self, model, train_dataset, val_dataset=None, *, cfg: DictConfig):
         self.model = model
@@ -64,6 +83,16 @@ class Wan22Trainer:
         self.weight_decay = float(cfg.weight_decay)
         self.batch_size = int(cfg.batch_size)
         self.num_workers = int(cfg.num_workers)
+        if self.num_workers < 0:
+            raise ValueError(f"`num_workers` must be non-negative, got {self.num_workers}")
+        self.prefetch_factor = int(cfg.get("prefetch_factor", 2))
+        if self.prefetch_factor <= 0:
+            raise ValueError(
+                f"`prefetch_factor` must be positive, got {self.prefetch_factor}"
+            )
+        self.persistent_workers = bool(cfg.get("persistent_workers", False))
+        if self.num_workers == 0 and self.persistent_workers:
+            raise ValueError("`persistent_workers` requires num_workers > 0")
         self.num_epochs = int(cfg.num_epochs)
         max_steps = cfg.max_steps
         self.max_steps = int(max_steps) if max_steps is not None else None
@@ -319,7 +348,11 @@ class Wan22Trainer:
             self.max_grad_norm,
         )
         logger.info("using accelerator.device=%s", self.accelerator.device)
-        worker_init_fn = set_global_seed(self.seed, get_worker_init_fn=True)
+        seed_worker = set_global_seed(self.seed, get_worker_init_fn=True)
+        worker_init_fn = _DiagnosticWorkerInit(
+            seed_worker,
+            process_index=self.accelerator.process_index,
+        )
         self._assert_dataset_length_consistent(self.train_dataset, "train_dataset")
         if self.val_dataset is not None:
             self._assert_dataset_length_consistent(self.val_dataset, "val_dataset")
@@ -975,6 +1008,38 @@ class Wan22Trainer:
         self.wandb_run = None
 
     def _build_loader(self, dataset, worker_init_fn=None):
+        loader_runtime_kwargs = {
+            "num_workers": self.num_workers,
+            "pin_memory": torch.cuda.is_available(),
+            "worker_init_fn": worker_init_fn,
+        }
+        if self.num_workers > 0:
+            loader_runtime_kwargs.update(
+                prefetch_factor=self.prefetch_factor,
+                persistent_workers=self.persistent_workers,
+            )
+        try:
+            shm_stats = os.statvfs("/dev/shm")
+            shm_total_bytes = shm_stats.f_frsize * shm_stats.f_blocks
+            shm_free_bytes = shm_stats.f_frsize * shm_stats.f_bavail
+        except OSError:
+            shm_total_bytes = None
+            shm_free_bytes = None
+        logger.info(
+            "DataLoader runtime: process_index=%d num_workers=%d prefetch_factor=%s "
+            "persistent_workers=%s pin_memory=%s multiprocessing_start_method=%s "
+            "rlimit_nofile=%s rlimit_memlock=%s shm_total_bytes=%s shm_free_bytes=%s",
+            getattr(self.accelerator, "process_index", -1),
+            self.num_workers,
+            self.prefetch_factor if self.num_workers > 0 else None,
+            self.persistent_workers if self.num_workers > 0 else False,
+            loader_runtime_kwargs["pin_memory"],
+            multiprocessing.get_start_method(allow_none=True),
+            resource.getrlimit(resource.RLIMIT_NOFILE),
+            resource.getrlimit(resource.RLIMIT_MEMLOCK),
+            shm_total_bytes,
+            shm_free_bytes,
+        )
         agent_counts = resolve_agent_counts(dataset)
         if agent_counts is not None:
             task_ids = resolve_task_ids(dataset)
@@ -1024,9 +1089,7 @@ class Wan22Trainer:
             return DataLoader(
                 dataset,
                 batch_sampler=self.train_sampler,
-                num_workers=self.num_workers,
-                pin_memory=torch.cuda.is_available(),
-                worker_init_fn=worker_init_fn,
+                **loader_runtime_kwargs,
             )
 
         if self.agent_action_token_budget is not None:
@@ -1051,9 +1114,7 @@ class Wan22Trainer:
             batch_size=self.batch_size,
             shuffle=False,
             sampler=self.train_sampler,
-            num_workers=self.num_workers,
-            pin_memory=torch.cuda.is_available(),
-            worker_init_fn=worker_init_fn,
+            **loader_runtime_kwargs,
         )
 
     def _assert_dataset_length_consistent(self, dataset, dataset_name: str):
@@ -1359,6 +1420,8 @@ class Wan22Trainer:
             "resume",
             "weights_only_warm_start",
             "num_workers",
+            "prefetch_factor",
+            "persistent_workers",
             "log_every",
             "save_every",
             "eval_every",

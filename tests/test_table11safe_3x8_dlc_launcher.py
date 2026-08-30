@@ -375,8 +375,21 @@ class Table11LauncherTests(unittest.TestCase):
             'common.require("step_005000.pt" not in log', preflight_submitter
         )
         self.assertIn("libero_uncond_2cam224.pt", source)
-        self.assertIn("num_workers: 8", source)
+        self.assertIn("num_workers: 2", source)
+        self.assertIn("prefetch_factor: 1", source)
+        self.assertIn("persistent_workers: false", source)
+        self.assertIn("save_every: 1000", source)
         self.assertIn("weights_only_warm_start:\n  enabled: false", source)
+
+    def test_dataloader_runtime_diagnostics_are_enabled(self) -> None:
+        source = (REPO / "src" / "fastwam" / "trainer.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("DataLoader runtime:", source)
+        self.assertIn("DataLoader worker started:", source)
+        self.assertIn('os.statvfs("/dev/shm")', source)
+        self.assertIn("resource.RLIMIT_NOFILE", source)
+        self.assertIn("resource.RLIMIT_MEMLOCK", source)
 
     def test_preflight_controller_latches_before_exactly_one_create(self) -> None:
         source = PREFLIGHT_SUBMITTER.read_text(encoding="utf-8")

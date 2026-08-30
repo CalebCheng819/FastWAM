@@ -7,4 +7,4 @@ defaults:
 
 wandb:
   group: robofactory-table11safe-vg1-hub1-gau1-scratch50k
-  name: fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r1-20260829
+  name: fastwam-table11safe-vg1h1gau1-scratch50k-s42-24g-r2-20260831

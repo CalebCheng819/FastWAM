@@ -9,13 +9,15 @@ defaults:
 
 trainable_scope: dit
 batch_size: 1
-num_workers: 8
+num_workers: 2
+prefetch_factor: 1
+persistent_workers: false
 learning_rate: 1.0e-4
 weight_decay: 1.0e-2
 lr_scheduler_type: cosine
 max_steps: 50000
 run_initial_global_step: 0
-save_every: 5000
+save_every: 1000
 eval_every: 5000
 offline_eval_num_samples: 12
 phase_balanced_fraction: 0.0
@@ -53,4 +55,4 @@ model:
 
 wandb:
   group: robofactory-multirobot-vg1-hub1-gau1-scratch50k
-  name: fastwam-n234-vg1h1gau1-scratch50k-s42-24g-r1
+  name: fastwam-n234-vg1h1gau1-scratch50k-s42-24g-r2
