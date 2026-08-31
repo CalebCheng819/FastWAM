@@ -1,0 +1,19 @@
+{
+  "schema": "research-workflow-experiment-manifest-v1",
+  "experiment_id": "FASTWAM-TABLE11SAFE-VG0H1GAU1-SCRATCH50K-S42-16G-R1-20260831",
+  "implementation_commit": "ee8bd8295047877b30b8bccddd9af7567502f88a",
+  "binding_commit": "87469266549ebcf65208daa2575cfcb542fd5195",
+  "branch": "exp/table11safe-vg0h1gau1-scratch50k-16g-r1-20260831",
+  "notion_page_id": "3cd21e77-89cc-810f-8db6-d3b2135df490",
+  "notion_page_url": "https://app.notion.com/p/FastWAM-Table11-Safe-VG0H1GAU1-Scratch-16G-50k-3cd21e7789cc810f8db6d3b2135df490",
+  "source_bundle": "/oss-chengjuntao/artifacts/fastwam-table11safe-vg0h1gau1-scratch50k-s42-16g-r1-20260831-launch-control/fastwam-table11safe-vg0h1gau1-scratch50k-source-r1-20260831.bundle",
+  "source_bundle_ref": "refs/bundles/fastwam-table11safe-vg0h1gau1-scratch50k-r1",
+  "formal_run_id": "fastwam-table11safe-vg0h1gau1-scratch50k-s42-16g-r1-20260831",
+  "preflight_run_id": "fastwam-table11safe-vg0h1gau1-scratch-preflight-s42-8g-r1-20260831",
+  "formal_priority": 7,
+  "formal_workers": 2,
+  "gpus_per_worker": 8,
+  "phase": "PRELAUNCH",
+  "preflight_create_job_called": false,
+  "formal_create_job_called": false
+}
