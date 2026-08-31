@@ -2,6 +2,7 @@
 
 - Experiment: `FASTWAM-TABLE11SAFE-VG0H1GAU1-SCRATCH50K-S42-16G-R1-20260831`
 - Base revision: `94284303174539ec883521f344d5ac2419fa8a61`
+- Code treatment commit: `ee8bd8295047877b30b8bccddd9af7567502f88a`
 - Parent configuration: current joint-safe Table11 scratch-training R2.
 - Initialization: official generic FastWAM `libero_uncond_2cam224.pt` model
   weights only. Optimizer, scheduler, and global step start from zero; no
@@ -25,11 +26,12 @@
 
 ## Status
 
-- Phase: `PREPARED LOCALLY`.
+- Phase: `CODE FROZEN; PRELAUNCH PENDING`.
 - New independent worktree and branch created; no changes were made to the
   currently running joint-safe R2 worktree.
-- Formal and preflight submission scripts carry an unpublished-commit sentinel
-  and fail closed before external I/O until a clean immutable commit is frozen.
+- Formal and preflight submission scripts are bound to the immutable code
+  treatment commit above and still require the exact published source bundle,
+  prelaunch evidence, and preflight receipt before formal `CreateJob`.
 - No preflight, DLC submission, retry, stop, CreateJob, or other cloud mutation
   has been performed. Notion has not been updated for this local-only variant.
 - Validation: `bash -n` and Python compilation passed. The focused new 16-GPU
@@ -37,6 +39,6 @@
   `31 passed, 8 subtests passed`.
 - Renderer structure, 2x8 topology, Priority 7, corrected Table11 paths, VG0,
   H1, GAU1, and unpublished-commit fail-closed behavior are covered by the
-  focused tests. A real pinned-bundle render is intentionally deferred because
-  this local-only variant does not yet have an immutable commit or source
-  bundle; no synthetic publication was created to bypass that gate.
+  focused tests. A real pinned-bundle render remains gated on publishing the
+  exact immutable source bundle; no synthetic publication was created to
+  bypass that gate.

@@ -27,7 +27,7 @@ ATTEMPT_ID = "attempt-r1-20260831"
 WORKSPACE_ID = "270969"
 RESOURCE_ID = "quotaksvqq2oh2pg"
 UNPUBLISHED_COMMIT = "0" * 40
-COMMIT = UNPUBLISHED_COMMIT
+COMMIT = "ee8bd8295047877b30b8bccddd9af7567502f88a"
 IMAGE = (
     "dsw-registry-vpc.cn-beijing.cr.aliyuncs.com/pai/"
     "pytorch:2.7.1-gpu-py310-cu128-ubuntu22.04-3995b779-1764350887"
