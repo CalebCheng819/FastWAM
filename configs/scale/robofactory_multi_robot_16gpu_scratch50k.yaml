@@ -1,0 +1,23 @@
+# @package _global_
+
+# Two DLC pods x eight RTX 4090 GPUs. The task profile owns the full
+# zero-to-50,000 schedule; this file owns distributed and checkpoint policy.
+gradient_accumulation_steps: 1
+checkpoint_state_kind: full
+save_training_state: true
+save_final_checkpoint: true
+provenance_mode: stat_cmp
+
+# This treatment uses ordinary Git/run/checkpoint metadata without adding
+# hash-chain or terminal rehash requirements.
+seal_training_state: false
+seal_training_run: false
+terminal_rehash_weights: false
+
+process_group_timeout_seconds: 21600
+checkpoint_io_timeout_seconds: 21600
+
+# Deterministic held-out loss only; simulator task success remains a separate
+# closed-loop evaluation after training.
+eval_every: 5000
+offline_eval_num_samples: 12

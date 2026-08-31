@@ -1,5 +1,15 @@
 # RoboFactory multi-robot scale profiles
 
+`robofactory_multi_robot_16gpu_scratch50k` is the dedicated joint-safe
+Table11 VG0/H1/GAU1 scratch-training profile. It runs 2 DLC workers x 8 GPUs
+(world size 16), uses per-device batch 1 and gradient accumulation 1, and thus
+has global batch 16. It loads only the official generic FastWAM model weights;
+optimizer, scheduler, and global step are initialized from zero. Video
+generation/co-training is disabled (`action_only_cache`, no future-video
+targets, zero video-loss weight), while the hub and Gaussian conditioning paths
+remain enabled. This 16-GPU run is not sample-budget-equivalent to the existing
+world-24 reference and must be reported as an independent training variant.
+
 `robofactory_multi_robot_32gpu` is a formal DLC 4-node x 8-GPU override. It is
 not a generic tuning preset: `scripts/train_zero2.sh` rejects any topology other
 than PAI `WORLD_SIZE=4`, `NPROC_PER_NODE=8`, and node `RANK=0..3`, including in

@@ -1,0 +1,10 @@
+# @package _global_
+
+defaults:
+  - robofactory_multi_robot_vg0_hub1_gau1_scratch50k_224_1e-4
+  - override /data: robofactory_table11
+  - _self_
+
+wandb:
+  group: robofactory-table11safe-vg0-hub1-gau1-scratch50k
+  name: fastwam-table11safe-vg0h1gau1-scratch50k-s42-16g-r1-20260831

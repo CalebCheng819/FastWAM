@@ -1,0 +1,59 @@
+# @package _global_
+
+# Train the VG0/HUB1/GAU1 action-only model for 50,000 optimizer updates on a
+# joint-safe dataset. The generic FastWAM pretrained weights initialize only
+# the model; optimizer, scheduler, and public step numbering all start at zero.
+defaults:
+  - robofactory_multi_robot_vg0_hub1_gau1_224_1e-4
+  - _self_
+
+trainable_scope: action
+batch_size: 1
+num_workers: 2
+prefetch_factor: 1
+persistent_workers: false
+learning_rate: 1.0e-4
+weight_decay: 1.0e-2
+lr_scheduler_type: cosine
+max_steps: 50000
+run_initial_global_step: 0
+save_every: 1000
+checkpoint_keep_last: 2
+eval_every: 5000
+offline_eval_num_samples: 12
+phase_balanced_fraction: 0.0
+checkpoint_state_kind: full
+provenance_mode: stat_cmp
+
+resume: ${oc.env:FASTWAM_PRETRAINED_ROOT}
+weights_only_warm_start:
+  enabled: false
+
+data:
+  train:
+    load_future_video: false
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+  val:
+    load_future_video: false
+    gaussian_cache_verify: stat_cmp
+    gaussian_cache_expected_manifest_sha256: null
+    gaussian_cache_expected_selection_sha256: null
+    gaussian_cache_expected_source_identity_sha256: null
+
+model:
+  training_mode: action_only_cache
+  action_dit_config:
+    hub_enabled: true
+    enable_gaussian: true
+  loss:
+    lambda_video: 0.0
+    lambda_action: 1.0
+    b4:
+      enabled: false
+
+wandb:
+  group: robofactory-multirobot-vg0-hub1-gau1-scratch50k
+  name: fastwam-n234-vg0h1gau1-scratch50k-s42-16g-r1
